@@ -328,10 +328,11 @@ impl<C: Connector<(), Out = Box<dyn Transport>>> Connector<()> for AddressFallba
                 } else {
                     details.timeout.after
                 },
-                reason: details.timeout.reason,
+                ..details.timeout
             },
             current_time: details.current_time.clone(),
             run_connector: details.run_connector.clone(),
+            register_shutdown: details.register_shutdown.clone(),
         };
         match self.inner.connect(&attempt, chained) {
             Err(error) if retryable_connect_error(&error) => {
@@ -1424,9 +1425,11 @@ mod tests {
             timeout: NextTimeout {
                 after: Duration::from_secs(10).into(),
                 reason: ureq::Timeout::Connect,
+                ..NextTimeout::default()
             },
             current_time: Arc::new(move || ConnectInstant::Exact(*lock(&clock))),
             run_connector: Arc::new(|_| Err(ureq::Error::ConnectionFailed)),
+            register_shutdown: Arc::new(|_| Ok(())),
         };
         let result = connector.connect(&details, None);
         let attempts = std::mem::take(&mut *lock(&connector.inner.attempts));
