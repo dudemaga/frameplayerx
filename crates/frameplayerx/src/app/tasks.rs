@@ -782,12 +782,12 @@ impl App {
             return;
         }
         // Kept for when this video next opens, as a pick in the player is.
-        if let Some(i) = audio
-            .as_ref()
-            .and_then(|id| p.source_tracks.iter().find(|t| !t.subtitle && t.id == *id))
-            .and_then(|t| t.index)
-        {
-            p.picked.audio = Some(i);
+        if let Some(id) = &audio {
+            p.picked.audio = p
+                .source_tracks
+                .iter()
+                .find(|t| !t.subtitle && t.id == *id)
+                .and_then(|t| t.index);
         }
         if let Some(subtitle) = &subtitle {
             p.picked.subtitles =

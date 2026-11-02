@@ -266,8 +266,7 @@ impl MediaRecord {
 
 /// Last segment of a path or URL, without a query string.
 pub(crate) fn file_name_of(location: &str) -> Cow<'_, str> {
-    // Its location ends in the server's ID, and an ID of 180 is no format hint.
-    if location.starts_with("plex://") {
+    if fp_core::source::location_names_no_file(location) {
         return Cow::Borrowed("");
     }
     if let Some(rest) = location.strip_prefix("source://source/") {
@@ -278,9 +277,6 @@ pub(crate) fn file_name_of(location: &str) -> Cow<'_, str> {
             && !key.contains(['/', '?', '#'])
             && let Ok(key) = percent_encoding::percent_decode_str(key).decode_utf8()
         {
-            if fp_core::source::location_names_no_file(kind) {
-                return Cow::Borrowed("");
-            }
             // The outer URI stores the provider key as one opaque segment.
             // Extract its basename before decoding the original URL escapes,
             // so folders and query values cannot masquerade as format hints.
@@ -489,6 +485,11 @@ mod tests {
         assert_eq!(file_name_of("/a/b/c.mp4"), "c.mp4");
         assert_eq!(file_name_of("plex://source/s/m/item/180?media=1"), "");
         assert_eq!(file_name_of("source://source/s/deovr-id/180"), "");
+        assert_eq!(
+            file_name_of("plex://source/s/m/image/resource?path=%2Fa.jpg"),
+            "resource",
+            "as last_segment says"
+        );
         assert_eq!(
             file_name_of("source://source/s/dlna/item%3A64%241%24180"),
             ""

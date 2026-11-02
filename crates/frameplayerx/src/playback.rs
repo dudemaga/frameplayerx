@@ -306,12 +306,10 @@ pub fn open(
             src.playback_tracks(&video).unwrap_or_default()
         })
         .unwrap_or_default();
-    // What was picked for this video earlier, as the server's track IDs: a
-    // transcode has only the tracks the server puts in it.
+    // What was picked for this video, as the server's track IDs: a transcode
+    // has only the tracks the server puts in it.
     if !source_tracks.is_empty() {
-        let (audio, subtitle) = saved_source_tracks(&picked, &source_tracks);
-        req.source_audio = req.source_audio.take().or(audio);
-        req.source_subtitle = req.source_subtitle.take().or(subtitle);
+        use_saved_source_tracks(&mut req, &picked, &source_tracks);
     }
     let open_player = |src: Arc<dyn fp_core::ByteSource>, config: PlayerConfig| {
         let direct = config.timeline.is_none();
@@ -607,7 +605,18 @@ fn player_config(settings: &Settings, start_at: f64) -> PlayerConfig {
     }
 }
 
-/// Logs why a video the hardware could decode is decoded in software.
+/// Puts what was picked for a video on its request. The saved pick goes first:
+/// the request can be an old copy, kept in Up next before the pick was made.
+fn use_saved_source_tracks(
+    req: &mut OpenRequest,
+    picked: &fp_library::PickedTracks,
+    tracks: &[fp_sources::PlaybackTrack],
+) {
+    let (audio, subtitle) = saved_source_tracks(picked, tracks);
+    req.source_audio = audio.or(req.source_audio.take());
+    req.source_subtitle = subtitle.or(req.source_subtitle.take());
+}
+
 /// What was picked for a video, as its server's track IDs: audio, then
 /// subtitles ("0" for off).
 fn saved_source_tracks(
@@ -653,6 +662,7 @@ pub(crate) fn picked_source_subtitles(
         .or_else(|| track.index.map(PickedSubtitles::Stream))
 }
 
+/// Logs why a video the hardware could decode is decoded in software.
 fn warn_if_software(name: &str, info: &fp_media::MediaInfo, st: &fp_media::Stats) {
     if !st.hardware && info.video_stream().is_some_and(has_hardware_decoder) {
         log::warn!(
@@ -1807,5 +1817,30 @@ mod tests {
             Some(PickedSubtitles::File("plex://sub".into()))
         );
         assert_eq!(picked_source_subtitles(Some("999"), &tracks), None);
+
+        // An old copy of the request from Up next, then subtitles turned off
+        // and another audio track picked: the saved picks win.
+        let mut old = OpenRequest {
+            source_audio: Some("201".into()),
+            source_subtitle: Some("301".into()),
+            ..Default::default()
+        };
+        use_saved_source_tracks(
+            &mut old,
+            &PickedTracks {
+                audio: Some(2),
+                subtitles: Some(PickedSubtitles::Off),
+            },
+            &tracks,
+        );
+        assert_eq!(old.source_audio.as_deref(), Some("202"));
+        assert_eq!(old.source_subtitle.as_deref(), Some("0"));
+        // Nothing saved: what the request asks for stands.
+        let mut asked = OpenRequest {
+            source_audio: Some("201".into()),
+            ..Default::default()
+        };
+        use_saved_source_tracks(&mut asked, &PickedTracks::default(), &tracks);
+        assert_eq!(asked.source_audio.as_deref(), Some("201"));
     }
 }

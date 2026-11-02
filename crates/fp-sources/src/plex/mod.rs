@@ -34,9 +34,13 @@ const FAILED_FOR: Duration = Duration::from_secs(60);
 /// How long a video's details are reused: opening one reads them several
 /// times, each a round trip to the server.
 const METADATA_FRESH: Duration = Duration::from_secs(10);
-/// The most a poster and a backdrop are asked for, as on Jellyfin.
-const POSTER: (u32, u32) = (480, 720);
+/// The most each kind of picture is asked for, as on Jellyfin.
+const POSTER: (u32, u32) = (480, 480);
+const LANDSCAPE: (u32, u32) = (640, 640);
 const BACKDROP: (u32, u32) = (1280, 720);
+/// How long a server none of whose addresses answered isn't asked again. Each
+/// silent address takes seconds, and a grid of posters would queue behind them.
+const UNREACHABLE_FOR: Duration = Duration::from_secs(3);
 
 /// Whether an address names Plex's web app rather than a media server.
 pub fn is_web_app(address: &str) -> bool {
@@ -59,18 +63,6 @@ pub fn owner(location: &str) -> Option<String> {
         .map(std::borrow::Cow::into_owned)
 }
 
-/// Whether `location` is a Plex video, whose last path segment is the
-/// server's ID for it rather than a name.
-pub(crate) fn is_item(location: &str) -> bool {
-    Url::parse(location).is_ok_and(|url| {
-        url.scheme() == "plex"
-            && url.host_str() == Some("source")
-            && url
-                .path_segments()
-                .is_some_and(|mut p| p.nth(2) == Some("item"))
-    })
-}
-
 #[derive(Clone)]
 struct Endpoint {
     base: String,
@@ -83,6 +75,8 @@ pub struct PlexSource {
     config: Mutex<PlexConfig>,
     endpoint: Mutex<Option<Endpoint>>,
     failed_connections: Mutex<HashMap<String, Instant>>,
+    /// When every address last failed to answer.
+    unreachable: Mutex<Option<Instant>>,
     connecting: Mutex<()>,
     refreshing: Mutex<()>,
     auth_api: PlexAuthClient,
@@ -113,6 +107,7 @@ impl PlexSource {
             config: Mutex::new(config),
             endpoint: Mutex::new(None),
             failed_connections: Default::default(),
+            unreachable: Default::default(),
             connecting: Mutex::new(()),
             refreshing: Mutex::new(()),
             auth_api: PlexAuthClient::new(),
@@ -199,6 +194,7 @@ impl PlexSource {
         config.connections = resource.connections;
         *lock(&self.endpoint) = None;
         lock(&self.failed_connections).clear();
+        *lock(&self.unreachable) = None;
         self.changed.store(true, Ordering::Release);
         Ok(())
     }
@@ -226,10 +222,14 @@ impl PlexSource {
         if config.access_token.is_empty() {
             return Err(Error::Auth("Plex server needs an access token".into()));
         }
-        let mut last = Error::Http {
+        let no_connection = || Error::Http {
             url: redact(&config.url),
             message: "no reachable Plex server connection".into(),
         };
+        if lock(&self.unreachable).is_some_and(|at| at.elapsed() < UNREACHABLE_FOR) {
+            return Err(no_connection());
+        }
+        let mut last = no_connection();
         let mut candidates = connections(&config);
         // One that just failed goes last rather than out: it may be the only
         // one, and the server may be back already.
@@ -316,6 +316,7 @@ impl PlexSource {
             *lock(&self.endpoint) = Some(endpoint.clone());
             return Ok(endpoint);
         }
+        *lock(&self.unreachable) = Some(Instant::now());
         Err(last)
     }
 
@@ -663,7 +664,7 @@ fn connections(config: &PlexConfig) -> Vec<PlexConnection> {
     }
     // The token goes with every request. An address someone typed is theirs
     // to choose, but one plex.tv lists has to be encrypted or on the LAN.
-    let typed = config.connections.is_empty();
+    let typed = config.auth.is_none() && config.connections.is_empty();
     choices.retain(|c| {
         (!config.local_only || c.local)
             && (config.allow_relay || !c.relay)

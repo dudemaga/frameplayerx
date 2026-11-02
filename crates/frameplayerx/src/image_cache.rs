@@ -251,7 +251,7 @@ impl ImageCache {
             }
         }
         let reply = client
-            .request("GET", &address, &headers, None, MAX_BYTES)
+            .request("GET", &address, &headers, None, MAX_BYTES + 1)
             .map_err(|e| e.to_string())?;
         if reply.status == 304
             && let Some(m) = old
@@ -266,6 +266,11 @@ impl ImageCache {
             return Ok(None);
         }
         let reply = reply.error_for_status(url).map_err(|e| e.to_string())?;
+        // The client stops reading at its limit: kept, it would pass for whole.
+        if reply.body.len() as u64 > MAX_BYTES {
+            let mb = MAX_BYTES >> 20;
+            return Err(tr!("error-too-large", mb = mb));
+        }
         let meta = Meta {
             url: plain.to_string(),
             etag: reply.header("etag").map(str::to_string),
@@ -444,6 +449,7 @@ mod tests {
         let hits = Arc::new(AtomicUsize::new(0));
         let changed = Arc::new(std::sync::atomic::AtomicBool::new(false));
         let (h, c) = (hits.clone(), changed.clone());
+        let huge = vec![0u8; MAX_BYTES as usize + 1];
         std::thread::spawn(move || {
             for stream in listener.incoming().flatten() {
                 h.fetch_add(1, Ordering::SeqCst);
@@ -461,7 +467,9 @@ mod tests {
                     etag_matches |= l.starts_with("if-none-match:") && l.contains("\"v1\"");
                 }
                 let changed = c.load(Ordering::SeqCst);
-                let (status, etag, body): (&str, &str, &[u8]) = if etag_matches && !changed {
+                let (status, etag, body): (&str, &str, &[u8]) = if path == "/huge" {
+                    ("200 OK", "\"v1\"", &huge)
+                } else if etag_matches && !changed {
                     ("304 Not Modified", "\"v1\"", b"")
                 } else if changed && path == "/a" {
                     ("200 OK", "\"v2\"", b"AAAAANEWER")
@@ -576,6 +584,21 @@ mod tests {
         assert_eq!(cache.refresh(&a).unwrap(), Some(b"AAAAANEWER".to_vec()));
         assert_eq!(cache.get(&a).unwrap().0, b"AAAAANEWER");
         std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn a_picture_too_large_is_refused_and_not_kept_cut_off() {
+        let s = server();
+        let dir = temp_dir("too-large");
+        let cache = ImageCache::new(dir.clone(), 500).with_opener(picture_source(&s));
+        for url in [
+            format!("{}/huge", s.base),
+            fp_sources::location::encode("pictures", "http", "huge"),
+        ] {
+            assert!(cache.get(&url).is_err(), "{url}");
+            assert!(cache.cached_file(&url).is_none(), "{url}");
+        }
+        assert!(!dir.exists(), "nothing was stored");
     }
 
     #[test]

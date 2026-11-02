@@ -177,10 +177,18 @@ pub const VIDEO_EXTENSIONS: &[&str] = &[
 /// File extensions treated as subtitles.
 pub const SUBTITLE_EXTENSIONS: &[&str] = &["srt", "ass", "ssa", "vtt"];
 
-/// Whether a source location of this kind ends in a server's ID for the video
-/// rather than a file name: an ID of 180 is no format hint.
-pub fn location_names_no_file(kind: &str) -> bool {
-    matches!(kind, "dlna" | "mb") || kind.ends_with("-id") || kind.ends_with("-group")
+/// Whether a source location ends in a server's ID for the video rather than a
+/// file name: an ID of 180 is no format hint.
+pub fn location_names_no_file(location: &str) -> bool {
+    if let Some(rest) = location.strip_prefix("plex://source/") {
+        return rest.split('/').nth(2) == Some("item");
+    }
+    location
+        .strip_prefix("source://source/")
+        .and_then(|rest| rest.split('/').nth(1))
+        .is_some_and(|kind| {
+            matches!(kind, "dlna" | "mb") || kind.ends_with("-id") || kind.ends_with("-group")
+        })
 }
 
 pub fn is_video_name(name: &str) -> bool {
@@ -223,5 +231,28 @@ mod tests {
         assert!(is_script_name("a.funscript"));
         assert!(is_subtitle_name("a.en.srt"));
         assert!(!is_video_name("mp4"));
+    }
+
+    #[test]
+    fn a_servers_id_names_no_file_but_a_path_does() {
+        for location in [
+            "plex://source/s/m/item/180",
+            "plex://source/s/m/item/180?media=1",
+            "source://source/s/deovr-id/180",
+            "source://source/s/heresphere-id/360",
+            "source://source/s/dlna/item%3A64%241%24180",
+            "source://source/s/mb/item%3Dabc",
+        ] {
+            assert!(location_names_no_file(location), "{location}");
+        }
+        for location in [
+            "plex://source/s/m/image/resource?path=%2Fa.jpg",
+            "source://source/s/http/VR%2FClip_180_LR.mp4",
+            "source://source/s/dlna-file/x",
+            "http://h/item/180.mp4",
+            "/videos/180.mp4",
+        ] {
+            assert!(!location_names_no_file(location), "{location}");
+        }
     }
 }

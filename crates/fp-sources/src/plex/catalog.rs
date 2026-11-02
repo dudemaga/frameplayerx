@@ -1,7 +1,7 @@
 //! Maps Plex library and metadata responses to the shared catalog, keeping
 //! Plex's item types, query keys and pagination inside this adapter.
 
-use super::{BACKDROP, LISTING_LIMIT, PAGE_LIMIT, POSTER, PlexSource, container};
+use super::{BACKDROP, LANDSCAPE, LISTING_LIMIT, PAGE_LIMIT, POSTER, PlexSource, container};
 use crate::catalog::{
     Catalog, CatalogCapabilities, CatalogFacets, CatalogFilter, CatalogHome, CatalogItem,
     CatalogKind, CatalogPage, CatalogQuery, CatalogSort, CatalogVersion,
@@ -122,13 +122,19 @@ impl PlexSource {
             .as_deref()
             .and_then(detect_from_name)
             .or_else(|| text(v, "title").as_deref().and_then(detect_from_name));
-        let poster = text(v, "thumb")
+        let thumb = text(v, "thumb")
             .or_else(|| text(v, "parentThumb"))
-            .or_else(|| text(v, "grandparentThumb"))
-            .and_then(|p| self.image(&p, POSTER));
-        let backdrop = text(v, "art")
-            .or_else(|| text(v, "grandparentArt"))
-            .and_then(|p| self.image(&p, BACKDROP));
+            .or_else(|| text(v, "grandparentThumb"));
+        let art = text(v, "art").or_else(|| text(v, "grandparentArt"));
+        // An episode's thumb is its still, wider than anything's poster.
+        let wide = if kind == CatalogKind::Episode {
+            thumb.as_ref().or(art.as_ref())
+        } else {
+            art.as_ref().or(thumb.as_ref())
+        };
+        let landscape = wide.and_then(|p| self.image(p, LANDSCAPE));
+        let poster = thumb.and_then(|p| self.image(&p, POSTER));
+        let backdrop = art.and_then(|p| self.image(&p, BACKDROP));
         let unplayed = num(v, "leafCount")
             .zip(num(v, "viewedLeafCount"))
             .map(|(n, v)| (n - v).max(0.0) as u32);
@@ -180,11 +186,7 @@ impl PlexSource {
             position: num(v, "viewOffset").map_or(0.0, |n| n / 1000.0),
             unplayed,
             added: num(v, "addedAt").map(|n| n as i64),
-            landscape: if kind == CatalogKind::Episode {
-                poster.clone().or_else(|| backdrop.clone())
-            } else {
-                backdrop.clone().or_else(|| poster.clone())
-            },
+            landscape,
             poster,
             backdrop,
             location: self.location("item", &id, None),
@@ -259,9 +261,21 @@ impl PlexSource {
         let mut q = query.clone();
         let mut sent = 0;
         let mut items = Vec::new();
+        let mut last_first = None;
         loop {
             q.limit = (wanted - sent).min(PAGE_LIMIT);
             let (page, raw) = self.page(&self.query_path(&q)?, &q)?;
+            if wanted >= LISTING_LIMIT && page.total > LISTING_LIMIT {
+                return Err(Error::Unsupported("Plex listing is too large".into()));
+            }
+            let first = page.items.first().map(|i| i.id.clone());
+            if first.is_some() && first == last_first {
+                return Err(Error::parse(
+                    "Plex listing",
+                    "server listing did not advance",
+                ));
+            }
+            last_first = first;
             items.extend(page.items);
             sent += raw;
             q.start += raw;
@@ -280,9 +294,6 @@ impl PlexSource {
             limit: LISTING_LIMIT,
             ..query
         })?;
-        if page.total > LISTING_LIMIT {
-            return Err(Error::Unsupported("Plex listing is too large".into()));
-        }
         Ok(page.items)
     }
 

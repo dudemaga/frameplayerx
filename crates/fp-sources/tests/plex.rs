@@ -11,7 +11,7 @@ use fp_sources::{
 use serde_json::{Value, json};
 use std::sync::{
     Arc, Mutex,
-    atomic::{AtomicBool, Ordering},
+    atomic::{AtomicBool, AtomicUsize, Ordering},
 };
 use std::time::{Duration, Instant};
 
@@ -728,6 +728,13 @@ fn tv_collections_facets_and_reset_resume_use_plex_metadata() {
         ["401", "400"],
         "episode indexes determine watch order rather than title sorting"
     );
+    let (_, still) = source
+        .picture_request(episodes[1].landscape.as_deref().unwrap())
+        .unwrap();
+    assert!(
+        still.contains("width=640") && still.contains("episode-thumb"),
+        "an episode's wide picture is its still: {still}"
+    );
     let episode = episodes.remove(1);
     assert_eq!(
         (
@@ -1030,33 +1037,28 @@ fn continue_watching_comes_from_the_listing_inside_its_hub() {
 }
 
 #[test]
-fn a_blip_on_the_only_connection_ends_when_the_server_is_back() {
-    let offline = Arc::new(AtomicBool::new(false));
-    let down = offline.clone();
+fn a_blip_on_the_only_connection_is_over_at_once() {
+    let failing = Arc::new(AtomicUsize::new(0));
+    let left = failing.clone();
     let server = TestServer::start(move |r| {
-        if down.load(Ordering::Acquire) {
+        let failed = left.try_update(Ordering::AcqRel, Ordering::Acquire, |n| n.checked_sub(1));
+        if failed.is_ok() {
             resp(503, Vec::new(), &[])
         } else {
             reply(r)
         }
     });
     let source = PlexSource::new(&config(&server)).unwrap();
-    source.item("100").unwrap();
-    offline.store(true, Ordering::Release);
-    let during = source.items(&CatalogQuery {
-        ids: vec!["100".into()],
-        ..Default::default()
-    });
-    assert!(
-        !matches!(during, Ok(_) | Err(fp_sources::Error::NotFound(_))),
-        "a server that is down hasn't deleted anything: {during:?}"
-    );
-    offline.store(false, Ordering::Release);
-    assert_eq!(
-        source.probe().unwrap().machine_identifier,
-        "machine-1",
-        "back at once, not after a minute"
-    );
+    source.probe().unwrap();
+    // Enough to get past the client's own retry.
+    failing.store(2, Ordering::Release);
+    let page = source
+        .items(&CatalogQuery {
+            ids: vec!["100".into()],
+            ..Default::default()
+        })
+        .unwrap();
+    assert_eq!(page.items[0].id, "100", "it connected again by itself");
 }
 
 #[test]
@@ -1285,9 +1287,15 @@ fn pictures_are_asked_for_at_the_size_they_show() {
     assert_eq!(params["url"], "/library/metadata/100/thumb/1");
     assert_eq!(
         (params["width"].as_str(), params["height"].as_str()),
-        ("480", "720")
+        ("480", "480")
     );
     assert!(!item.poster.unwrap().contains("secret"));
+
+    // A card's wide picture has its own size, as on Jellyfin.
+    let (_, wide) = source
+        .picture_request(item.landscape.as_deref().unwrap())
+        .unwrap();
+    assert!(wide.contains("width=640"), "{wide}");
 }
 
 #[test]
@@ -1301,5 +1309,42 @@ fn a_plex_id_is_no_format_hint() {
         let name = fp_sources::urlutil::last_segment(&location);
         let got = resolve(None, ContainerHints::default(), &name, 1920, 1080);
         assert_eq!(got.format.projection, Projection::Flat, "ID {id}");
+    }
+}
+
+/// A library of `total` that answers every request with the same page, as a
+/// proxy that drops the paging parameters would.
+fn stuck_listing(total: usize) -> TestServer {
+    TestServer::start(move |r| {
+        if r.path() != "/library/sections/1/all" {
+            return reply(r);
+        }
+        json_reply(&json!({"MediaContainer":{"totalSize":total,"Metadata":[movie("100")]}}))
+    })
+}
+
+#[test]
+fn a_server_repeating_a_page_is_an_error_not_a_short_list() {
+    let server = stuck_listing(1000);
+    let source = PlexSource::new(&config(&server)).unwrap();
+    assert!(source.shuffled(&section_one()).is_err());
+    assert_eq!(server.count(|r| r.path() == "/library/sections/1/all"), 2);
+}
+
+#[test]
+fn a_listing_too_large_is_refused_on_its_first_page() {
+    let server = stuck_listing(150_000);
+    let source = PlexSource::new(&config(&server)).unwrap();
+    assert!(matches!(
+        source.shuffled(&section_one()),
+        Err(fp_sources::Error::Unsupported(_))
+    ));
+    assert_eq!(server.count(|r| r.path() == "/library/sections/1/all"), 1);
+}
+
+fn section_one() -> CatalogQuery {
+    CatalogQuery {
+        parent: Some("section:1".into()),
+        ..Default::default()
     }
 }

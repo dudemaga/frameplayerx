@@ -140,4 +140,64 @@ fn a_listed_remote_address_has_to_be_encrypted() {
     // An address typed for an access token is the one they chose.
     let c = config(plain, Vec::new());
     assert_eq!(tried(&c), [plain]);
+    // A linked source's list can come back empty: that doesn't make it typed.
+    let mut c = config(plain, Vec::new());
+    c.auth = Some(auth::PlexCredentials::manual(
+        "account".into(),
+        "client".into(),
+    ));
+    assert!(tried(&c).is_empty());
+}
+
+#[test]
+fn a_server_that_stays_down_is_only_asked_once_in_a_while() {
+    let down = Arc::new(AtomicBool::new(true));
+    let is_down = down.clone();
+    let server = TestServer::start(move |r| {
+        if is_down.load(Ordering::Acquire) {
+            return resp(503, Vec::new(), &[]);
+        }
+        let body = match r.path() {
+            "/identity" => json!({"MediaContainer":{"machineIdentifier":"machine"}}),
+            "/" | "/library/sections" => json!({"MediaContainer":{"Directory":[]}}),
+            _ => return resp(404, Vec::new(), &[]),
+        };
+        resp(
+            200,
+            serde_json::to_vec(&body).unwrap(),
+            &[("Content-Type", "application/json")],
+        )
+    });
+    let source = PlexSource::new(&PlexConfig {
+        id: "source".into(),
+        name: "Plex".into(),
+        url: server.base.clone(),
+        machine_identifier: "machine".into(),
+        access_token: "token".into(),
+        connections: Vec::new(),
+        auth: None,
+        insecure_tls: false,
+        max_height: None,
+        local_only: false,
+        allow_relay: false,
+    })
+    .unwrap();
+    let picture = "plex://source/source/machine/image/resource?path=%2Fa.jpg";
+    assert!(source.picture_request(picture).is_none());
+    let asked = server.requests().len();
+    assert!(asked > 0);
+    for _ in 0..20 {
+        assert!(source.picture_request(picture).is_none());
+        let error = source.open(picture).err().unwrap();
+        assert!(
+            !matches!(error, Error::NotFound(_)),
+            "a server that is down hasn't deleted anything: {error}"
+        );
+    }
+    assert_eq!(server.requests().len(), asked, "not asked again so soon");
+
+    // Once that has passed, and the server is back, it connects.
+    down.store(false, Ordering::Release);
+    *lock(&source.unreachable) = None;
+    assert!(source.probe().is_ok());
 }

@@ -105,13 +105,10 @@ fn split_url(location: &str) -> (&str, &str, &str) {
 /// name. Empty for a bare host, and for a Plex video, whose location ends in
 /// the server's ID for it: an ID of 180 is no format hint.
 pub fn last_segment(location: &str) -> String {
-    if crate::plex::is_item(location) {
+    if fp_core::source::location_names_no_file(location) {
         return String::new();
     }
     if let Some(reference) = crate::location::decode(location) {
-        if fp_core::source::location_names_no_file(&reference.kind) {
-            return String::new();
-        }
         // DLNA resource URLs are opaque. The durable reference carries
         // the server's filename separately from the object ID so subtitle
         // decoders and haptic axis detection retain its extension/suffix.
