@@ -462,6 +462,13 @@ pub(crate) mod tests {
         patched("h264_aac_180_LR.mp4", b"pasp", 4, &pasp)
     }
 
+    /// h264_aac_180_LR.mp4, two 320x320 eyes side by side, marked 1:2 as
+    /// some full side-by-side re-encodes are.
+    pub(crate) fn side_by_side_marked_1_2_clip() -> Arc<MemorySource> {
+        let pasp: Vec<u8> = [1u32, 2].iter().flat_map(|v| v.to_be_bytes()).collect();
+        patched("h264_aac_180_LR.mp4", b"pasp", 4, &pasp)
+    }
+
     fn info_of(src: Arc<MemorySource>, name: &str) -> MediaInfo {
         read_info(&Input::open(src, name, Arc::new(AtomicBool::new(false))).expect("open"))
     }

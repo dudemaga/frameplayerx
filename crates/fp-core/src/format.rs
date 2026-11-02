@@ -102,6 +102,18 @@ impl StereoLayout {
     pub fn is_top_bottom(&self) -> bool {
         matches!(self, StereoLayout::TopBottom | StereoLayout::HalfTopBottom)
     }
+
+    /// The pixel aspect each eye is shown with, of a video whose pixels are
+    /// `pixel_aspect` times as wide as tall. Some full side-by-side
+    /// re-encodes are marked 1:2, the packing itself, so a 2D player shows
+    /// the whole frame at one eye's shape: their eyes' pixels are square.
+    pub fn eye_pixel_aspect(&self, pixel_aspect: f64) -> f64 {
+        if *self == StereoLayout::SideBySide && (pixel_aspect - 0.5).abs() < 0.01 {
+            1.0
+        } else {
+            pixel_aspect
+        }
+    }
 }
 
 /// Complete format of a video.
@@ -798,5 +810,23 @@ mod tests {
         let j = serde_json::to_string(&f).unwrap();
         assert_eq!(serde_json::from_str::<VideoFormat>(&j).unwrap(), f);
         assert!(j.contains("\"kind\":\"fisheye\""), "{j}");
+    }
+
+    #[test]
+    fn full_side_by_side_marked_1_2_has_square_eyes() {
+        use StereoLayout::*;
+        assert_eq!(SideBySide.eye_pixel_aspect(0.5), 1.0);
+        // Anything else is the eyes' own: 1:2 in other layouts, 2:1 top/bottom
+        // (also real 2x anamorphic), DVD pixels.
+        for (layout, pa) in [
+            (Mono, 0.5),
+            (HalfSideBySide, 0.5),
+            (HalfTopBottom, 0.5),
+            (TopBottom, 2.0),
+            (HalfSideBySide, 2.0),
+            (SideBySide, 32.0 / 27.0),
+        ] {
+            assert_eq!(layout.eye_pixel_aspect(pa), pa, "{layout:?} {pa}");
+        }
     }
 }
