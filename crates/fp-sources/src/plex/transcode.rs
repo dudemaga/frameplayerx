@@ -83,7 +83,6 @@ impl PlexSource {
             .get("media")
             .ok_or_else(|| Error::Unsupported("invalid Plex media target".into()))?;
         let raw = self.raw_item(&location.id)?;
-        self.choose_media(&raw, Some(media_id))?;
         let media_index = array(&raw, "Media")
             .iter()
             .position(|m| text(m, "id").as_ref() == Some(media_id))
@@ -100,7 +99,7 @@ impl PlexSource {
             .append_pair("offset", &if start.is_finite() { start.max(0.0) } else { 0.0 }.to_string())
             .append_pair("videoResolution", &format!("{width}x{height}"))
             .append_pair("videoBitrate", &(bitrate / 1000).to_string())
-            .append_pair("X-Plex-Client-Profile-Name", "generic")
+            .append_pair("X-Plex-Client-Profile-Name", "Generic")
             .append_pair("X-Plex-Client-Profile-Extra", "add-transcode-target(type=videoProfile&context=streaming&protocol=http&container=mkv&videoCodec=h264&audioCodec=aac&subtitleCodec=srt)")
             .append_pair("session", &encoding)
             .append_pair("X-Plex-Session-Identifier", watch.map_or(encoding.as_str(), |s| s.id.as_str()));

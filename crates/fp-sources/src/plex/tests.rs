@@ -93,3 +93,53 @@ fn rejected_saved_credentials_renew_at_handshake_or_on_a_later_request() {
         );
     }
 }
+
+#[test]
+fn a_listed_remote_address_has_to_be_encrypted() {
+    let listed = |uri: &str| PlexConnection {
+        uri: uri.into(),
+        address: None,
+        port: None,
+        local: false,
+        relay: false,
+        protocol: uri.split(':').next().unwrap().into(),
+    };
+    let config = |url: &str, connections: Vec<PlexConnection>| PlexConfig {
+        id: "source".into(),
+        name: "Plex".into(),
+        url: url.into(),
+        machine_identifier: "machine".into(),
+        access_token: "secret".into(),
+        connections,
+        auth: None,
+        insecure_tls: false,
+        max_height: None,
+        local_only: false,
+        allow_relay: false,
+    };
+    let tried =
+        |c: &PlexConfig| -> Vec<String> { connections(c).into_iter().map(|c| c.uri).collect() };
+    let https = "https://1-2-3-4.abc.plex.direct:32400";
+    for (plain, kept) in [
+        ("http://203.0.113.5:32400", false),
+        ("http://[2001:db8::5]:32400", false),
+        ("http://plex.example.com:32400", false),
+        ("http://192.168.1.5:32400", true),
+        ("http://[fd00::5]:32400", true),
+        ("http://nas.local:32400", true),
+        ("http://nas:32400", true),
+    ] {
+        let c = config(https, vec![listed(https), listed(plain)]);
+        assert_eq!(tried(&c).contains(&plain.to_string()), kept, "{plain}");
+        assert!(tried(&c).contains(&https.to_string()));
+    }
+    // A saved address is held to the same rule on a linked source.
+    let plain = "http://203.0.113.5:32400";
+    let c = config(plain, vec![listed(https), listed(plain)]);
+    assert_eq!(tried(&c), [https]);
+    let c = config(plain, vec![listed(https)]);
+    assert_eq!(tried(&c), [https]);
+    // An address typed for an access token is the one they chose.
+    let c = config(plain, Vec::new());
+    assert_eq!(tried(&c), [plain]);
+}

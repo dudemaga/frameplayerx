@@ -148,6 +148,8 @@ class Handler(http.server.BaseHTTPRequestHandler):
             self.end_headers()
             self.wfile.write(data[start:end + 1])
             return
+        if path == "/photo/:/transcode":
+            path = urllib.parse.parse_qs(urllib.parse.urlsplit(self.path).query)["url"][0]
         if (path.startswith("/Items/") and "/Images/" in path) or path.startswith("/plex-images/"):
             item_id = path.split("/")[2]
             jpg = thumb_for(THUMBS.get(item_id, "Sunset"))
@@ -183,7 +185,7 @@ class Handler(http.server.BaseHTTPRequestHandler):
         elif path.startswith("/library/metadata/"):
             ids = path.rsplit("/", 1)[1].split(",")
             body = {"MediaContainer": {"Metadata": [i for i in PLEX_ITEMS if i["ratingKey"] in ids]}}
-        elif path == "/hubs/continueWatching":
+        elif path == "/hubs/continueWatching/items":
             body = {"MediaContainer": {"Metadata": []}}
         elif path == "/hubs/search":
             term = q.get("query", [""])[0].lower()

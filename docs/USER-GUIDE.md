@@ -294,7 +294,9 @@ history separate from the new account.
 - **Local only** (the default for new sources): use Plex's advertised LAN
   addresses, without remote addresses or Relay.
 - **Direct connections**: try LAN addresses first, then direct remote
-  addresses, without Relay.
+  addresses, without Relay. Remote addresses have to use HTTPS, because your
+  token goes with every request. If Plex only lists plain HTTP for your server,
+  set its **Secure connections** to Preferred or Required.
 - **Direct + Relay**: try direct connections first, then Plex Relay if needed.
 
 Local playback is free. Remote video requires **Plex Pass** for you or

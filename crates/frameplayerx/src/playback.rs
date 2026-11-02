@@ -214,6 +214,14 @@ pub fn open(
     let location = entry
         .as_ref()
         .map_or_else(|| req.location.clone(), |e| e.location.clone());
+    // What messages call it: a Plex location names no file.
+    let label = if name.is_empty() {
+        entry
+            .as_ref()
+            .map_or_else(|| req.shown_title(), |e| e.name.clone())
+    } else {
+        name.clone()
+    };
 
     // Library record: existing, or created for remote entries (and deleted
     // again if the video doesn't open, so nothing invisible is left behind).
@@ -298,6 +306,13 @@ pub fn open(
             src.playback_tracks(&video).unwrap_or_default()
         })
         .unwrap_or_default();
+    // What was picked for this video earlier, as the server's track IDs: a
+    // transcode has only the tracks the server puts in it.
+    if !source_tracks.is_empty() {
+        let (audio, subtitle) = saved_source_tracks(&picked, &source_tracks);
+        req.source_audio = req.source_audio.take().or(audio);
+        req.source_subtitle = req.source_subtitle.take().or(subtitle);
+    }
     let open_player = |src: Arc<dyn fp_core::ByteSource>, config: PlayerConfig| {
         let direct = config.timeline.is_none();
         let server_tracks = !direct && !source_tracks.is_empty();
@@ -376,7 +391,7 @@ pub fn open(
     // From where it was asked to start when the server can start it there
     // (and so seek), else from the beginning.
     let transcoded = |t: &TranscodeTarget| {
-        let fail = |e: String| format!("{name} ({}): {e}", t.label);
+        let fail = |e: String| format!("{label} ({}): {e}", t.label);
         let src = source.clone().ok_or_else(|| fail("no server".into()))?;
         let restart = restart_at(src, &location, t, source_session.clone());
         let first = if t.seekable { start_at } else { 0.0 };
@@ -412,7 +427,7 @@ pub fn open(
                             && !targets.is_empty()
                             && matches!(e, fp_sources::Error::Unsupported(_)) =>
                     {
-                        log::info!("{name}: {e}; asking Plex to transcode");
+                        log::info!("{label}: {e}; asking Plex to transcode");
                         Ok(None)
                     }
                     Err(e) => Err(crate::ui::errors::source(&e)),
@@ -430,13 +445,13 @@ pub fn open(
                         && !targets.is_empty() =>
                 {
                     let t = targets[0].clone();
-                    log::warn!("{name}: {e}; the server transcodes it to {}", t.label);
+                    log::warn!("{label}: {e}; the server transcodes it to {}", t.label);
                     let (p, pick) = transcoded(&t).map_err(failed)?;
                     notice = Some(tr!("transcode-cannot-play", quality = t.label.as_str()));
                     (p, pick, Some(t))
                 }
                 Some(Err(e)) => {
-                    return Err(failed(format!("{name}: {}", crate::ui::errors::media(&e))));
+                    return Err(failed(format!("{label}: {}", crate::ui::errors::media(&e))));
                 }
                 None => {
                     let t = targets[0].clone();
@@ -452,7 +467,7 @@ pub fn open(
     }
     let info = player.info().clone();
     if settings.hardware_decoding {
-        warn_if_software(&name, &info, &player.stats());
+        warn_if_software(&label, &info, &player.stats());
     }
     let (resolved, detected) =
         detect_format(&name, &info, entry.as_ref(), record.as_ref(), settings);
@@ -591,6 +606,51 @@ fn player_config(settings: &Settings, start_at: f64) -> PlayerConfig {
 }
 
 /// Logs why a video the hardware could decode is decoded in software.
+/// What was picked for a video, as its server's track IDs: audio, then
+/// subtitles ("0" for off).
+fn saved_source_tracks(
+    picked: &fp_library::PickedTracks,
+    tracks: &[fp_sources::PlaybackTrack],
+) -> (Option<String>, Option<String>) {
+    use fp_library::PickedSubtitles;
+    let audio = picked
+        .audio
+        .and_then(|i| tracks.iter().find(|t| !t.subtitle && t.index == Some(i)))
+        .map(|t| t.id.clone());
+    let subtitles = tracks.iter().filter(|t| t.subtitle);
+    let subtitle = match &picked.subtitles {
+        None => None,
+        Some(PickedSubtitles::Off) => Some("0".to_string()),
+        Some(PickedSubtitles::Stream(i)) => subtitles
+            .clone()
+            .find(|t| t.index == Some(*i))
+            .map(|t| t.id.clone()),
+        Some(PickedSubtitles::File(file)) => subtitles
+            .clone()
+            .find(|t| t.location.as_ref() == Some(file))
+            .map(|t| t.id.clone()),
+    };
+    (audio, subtitle)
+}
+
+/// How to keep a server's subtitle track picked while transcoding (`None` is
+/// off), the way a pick in the player is kept.
+pub(crate) fn picked_source_subtitles(
+    id: Option<&str>,
+    tracks: &[fp_sources::PlaybackTrack],
+) -> Option<fp_library::PickedSubtitles> {
+    use fp_library::PickedSubtitles;
+    let Some(id) = id else {
+        return Some(PickedSubtitles::Off);
+    };
+    let track = tracks.iter().find(|t| t.subtitle && t.id == id)?;
+    track
+        .location
+        .clone()
+        .map(PickedSubtitles::File)
+        .or_else(|| track.index.map(PickedSubtitles::Stream))
+}
+
 fn warn_if_software(name: &str, info: &fp_media::MediaInfo, st: &fp_media::Stats) {
     if !st.hardware && info.video_stream().is_some_and(has_hardware_decoder) {
         log::warn!(
@@ -1690,5 +1750,57 @@ mod tests {
         s422.pixel_format = "yuv422p10le".into();
         assert!(!hardware_decodes(&s422, true));
         assert!(hardware_decodes(&stream("h264", 8), false));
+    }
+
+    #[test]
+    fn picks_become_the_servers_tracks_and_back() {
+        use fp_library::{PickedSubtitles, PickedTracks};
+        use fp_sources::PlaybackTrack;
+        let track =
+            |id: &str, index: Option<usize>, location: Option<&str>, subtitle| PlaybackTrack {
+                id: id.into(),
+                index,
+                location: location.map(Into::into),
+                subtitle,
+                title: String::new(),
+                codec: String::new(),
+                selected: false,
+            };
+        let tracks = [
+            track("201", Some(1), None, false),
+            track("202", Some(2), None, false),
+            track("301", Some(3), None, true),
+            track("302", None, Some("plex://sub"), true),
+        ];
+        let saved =
+            |audio, subtitles| saved_source_tracks(&PickedTracks { audio, subtitles }, &tracks);
+        assert_eq!(saved(None, None), (None, None), "nothing picked");
+        assert_eq!(
+            saved(Some(2), Some(PickedSubtitles::Stream(3))),
+            (Some("202".into()), Some("301".into()))
+        );
+        assert_eq!(
+            saved(None, Some(PickedSubtitles::File("plex://sub".into()))).1,
+            Some("302".into())
+        );
+        assert_eq!(saved(None, Some(PickedSubtitles::Off)).1, Some("0".into()));
+        assert_eq!(
+            saved(Some(9), Some(PickedSubtitles::Stream(9))),
+            (None, None)
+        );
+
+        assert_eq!(
+            picked_source_subtitles(None, &tracks),
+            Some(PickedSubtitles::Off)
+        );
+        assert_eq!(
+            picked_source_subtitles(Some("301"), &tracks),
+            Some(PickedSubtitles::Stream(3))
+        );
+        assert_eq!(
+            picked_source_subtitles(Some("302"), &tracks),
+            Some(PickedSubtitles::File("plex://sub".into()))
+        );
+        assert_eq!(picked_source_subtitles(Some("999"), &tracks), None);
     }
 }

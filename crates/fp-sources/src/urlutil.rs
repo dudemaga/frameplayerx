@@ -102,8 +102,12 @@ fn split_url(location: &str) -> (&str, &str, &str) {
 }
 
 /// Decoded last non-empty path segment of a URL or path: the file or folder
-/// name. Empty for a bare host.
+/// name. Empty for a bare host, and for a Plex video, whose location ends in
+/// the server's ID for it: an ID of 180 is no format hint.
 pub fn last_segment(location: &str) -> String {
+    if crate::plex::is_item(location) {
+        return String::new();
+    }
     if let Some(reference) = crate::location::decode(location) {
         // DLNA resource URLs are opaque. The durable reference carries
         // the server's filename separately from the object ID so subtitle
@@ -568,5 +572,13 @@ mod tests {
         let mut v = vec!["ep10.mp4", "Ep2.mp4", "ep1.mp4", "a.mp4", "ep02b.mp4"];
         v.sort_by(|a, b| natural_cmp(a, b));
         assert_eq!(v, ["a.mp4", "ep1.mp4", "Ep2.mp4", "ep02b.mp4", "ep10.mp4"]);
+    }
+
+    #[test]
+    fn a_plex_video_location_names_no_file() {
+        let item = "plex://source/plex-one/machine-1/item/180?media=10";
+        assert_eq!(last_segment(item), "");
+        let picture = "plex://source/plex-one/machine-1/image/resource?path=%2Fa%2Fb.jpg";
+        assert_eq!(last_segment(picture), "resource");
     }
 }

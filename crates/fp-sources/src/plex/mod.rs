@@ -27,6 +27,16 @@ use auth::{PlexAuthClient, PlexConnection};
 
 const JSON_LIMIT: u64 = 32 << 20;
 const PAGE_LIMIT: usize = 200;
+/// The longest listing read whole.
+const LISTING_LIMIT: usize = 100_000;
+/// How long a connection that failed is tried after the others.
+const FAILED_FOR: Duration = Duration::from_secs(60);
+/// How long a video's details are reused: opening one reads them several
+/// times, each a round trip to the server.
+const METADATA_FRESH: Duration = Duration::from_secs(10);
+/// The most a poster and a backdrop are asked for, as on Jellyfin.
+const POSTER: (u32, u32) = (480, 720);
+const BACKDROP: (u32, u32) = (1280, 720);
 
 /// Whether an address names Plex's web app rather than a media server.
 pub fn is_web_app(address: &str) -> bool {
@@ -49,6 +59,18 @@ pub fn owner(location: &str) -> Option<String> {
         .map(std::borrow::Cow::into_owned)
 }
 
+/// Whether `location` is a Plex video, whose last path segment is the
+/// server's ID for it rather than a name.
+pub(crate) fn is_item(location: &str) -> bool {
+    Url::parse(location).is_ok_and(|url| {
+        url.scheme() == "plex"
+            && url.host_str() == Some("source")
+            && url
+                .path_segments()
+                .is_some_and(|mut p| p.nth(2) == Some("item"))
+    })
+}
+
 #[derive(Clone)]
 struct Endpoint {
     base: String,
@@ -66,8 +88,9 @@ pub struct PlexSource {
     auth_api: PlexAuthClient,
     changed: AtomicBool,
     versions: Mutex<HashMap<String, String>>,
-    /// Recent details for constructing watch sessions without network I/O.
-    metadata: Mutex<HashMap<String, Value>>,
+    /// Recent details, and when they were read. Watch sessions are made from
+    /// them without network I/O.
+    metadata: Mutex<HashMap<String, (Instant, Value)>>,
     facets: Mutex<HashMap<String, String>>,
     encoding: Arc<Mutex<Option<String>>>,
     id: String,
@@ -203,14 +226,19 @@ impl PlexSource {
         if config.access_token.is_empty() {
             return Err(Error::Auth("Plex server needs an access token".into()));
         }
-        let mut last = Error::NotFound("no reachable Plex server connection".into());
-        for candidate in connections(&config) {
-            if lock(&self.failed_connections)
-                .get(candidate.uri.trim_end_matches('/'))
-                .is_some_and(|at| at.elapsed() < Duration::from_secs(60))
-            {
-                continue;
-            }
+        let mut last = Error::Http {
+            url: redact(&config.url),
+            message: "no reachable Plex server connection".into(),
+        };
+        let mut candidates = connections(&config);
+        // One that just failed goes last rather than out: it may be the only
+        // one, and the server may be back already.
+        candidates.sort_by_key(|c| {
+            lock(&self.failed_connections)
+                .get(c.uri.trim_end_matches('/'))
+                .is_some_and(|at| at.elapsed() < FAILED_FOR)
+        });
+        for candidate in candidates {
             let base = match server_url(&candidate.uri) {
                 Ok(base) => base,
                 Err(e) => {
@@ -337,6 +365,11 @@ impl PlexSource {
     }
 
     fn raw_item(&self, id: &str) -> Result<Value> {
+        if let Some((read, item)) = lock(&self.metadata).get(id)
+            && read.elapsed() < METADATA_FRESH
+        {
+            return Ok(item.clone());
+        }
         let v = self.json(&format!(
             "/library/metadata/{}?includeChapters=1",
             encode_form_value(id)
@@ -349,7 +382,7 @@ impl PlexSource {
         if metadata.len() >= 128 {
             metadata.clear();
         }
-        metadata.insert(id.into(), item.clone());
+        metadata.insert(id.into(), (Instant::now(), item.clone()));
         Ok(item)
     }
 
@@ -379,6 +412,21 @@ impl PlexSource {
         let mut url = Url::parse(&self.location(kind, "resource", None)).ok()?;
         url.query_pairs_mut().append_pair("path", path);
         Some(url.to_string())
+    }
+
+    /// A picture as the server scales it to fit `(width, height)`: the
+    /// originals can be larger than the image cache takes.
+    fn image(&self, path: &str, (width, height): (u32, u32)) -> Option<String> {
+        if !safe_resource(path) {
+            return None;
+        }
+        let mut query = url::form_urlencoded::Serializer::new(String::new());
+        query
+            .append_pair("width", &width.to_string())
+            .append_pair("height", &height.to_string())
+            .append_pair("upscale", "0")
+            .append_pair("url", path);
+        self.asset("image", &format!("/photo/:/transcode?{}", query.finish()))
     }
 
     fn parse_location(&self, location: &str) -> Result<Location> {
@@ -459,25 +507,11 @@ impl Source for PlexSource {
                 } else {
                     location.id
                 };
-                let mut query = crate::catalog::CatalogQuery {
+                let items = self.whole_listing(crate::catalog::CatalogQuery {
                     parent: Some(parent),
-                    limit: PAGE_LIMIT,
                     ..Default::default()
-                };
-                let mut all = Vec::new();
-                loop {
-                    let page = self.items(&query)?;
-                    let count = page.items.len();
-                    all.extend(page.items.into_iter().map(|i| i.to_entry()));
-                    query.start += count;
-                    if count == 0 || query.start >= page.total {
-                        break;
-                    }
-                    if all.len() > 100_000 {
-                        return Err(Error::Unsupported("Plex listing is too large".into()));
-                    }
-                }
-                Ok(all)
+                })?;
+                Ok(items.iter().map(CatalogItem::to_entry).collect())
             }
         }
     }
@@ -606,22 +640,7 @@ fn connections(config: &PlexConfig) -> Vec<PlexConnection> {
         .iter()
         .any(|c| c.uri.trim_end_matches('/') == config.url)
     {
-        let local = Url::parse(&config.url)
-            .ok()
-            .and_then(|u| u.host_str().map(str::to_string))
-            .is_some_and(|h| {
-                h == "localhost"
-                    || h.ends_with(".local")
-                    || !h.contains('.')
-                    || h.parse::<std::net::IpAddr>().is_ok_and(|ip| match ip {
-                        std::net::IpAddr::V4(v) => {
-                            v.is_private() || v.is_loopback() || v.is_link_local()
-                        }
-                        std::net::IpAddr::V6(v) => {
-                            v.is_loopback() || v.is_unique_local() || v.is_unicast_link_local()
-                        }
-                    })
-            });
+        let local = Url::parse(&config.url).is_ok_and(|u| private_address(&u));
         choices.push(PlexConnection {
             uri: config.url.clone(),
             address: None,
@@ -633,7 +652,15 @@ fn connections(config: &PlexConfig) -> Vec<PlexConnection> {
                 .map_or_else(String::new, |u| u.scheme().into()),
         });
     }
-    choices.retain(|c| (!config.local_only || c.local) && (config.allow_relay || !c.relay));
+    // The token goes with every request. An address someone typed is theirs
+    // to choose, but one plex.tv lists has to be encrypted or on the LAN.
+    let typed = config.connections.is_empty();
+    choices.retain(|c| {
+        (!config.local_only || c.local)
+            && (config.allow_relay || !c.relay)
+            && (typed
+                || Url::parse(&c.uri).is_ok_and(|u| u.scheme() == "https" || private_address(&u)))
+    });
     choices.sort_by_key(|c| {
         (
             c.relay,
@@ -644,6 +671,19 @@ fn connections(config: &PlexConfig) -> Vec<PlexConnection> {
     });
     choices.dedup_by(|a, b| a.uri == b.uri);
     choices
+}
+
+fn private_address(url: &Url) -> bool {
+    match url.host() {
+        Some(url::Host::Ipv4(ip)) => ip.is_private() || ip.is_loopback() || ip.is_link_local(),
+        Some(url::Host::Ipv6(ip)) => {
+            ip.is_loopback() || ip.is_unique_local() || ip.is_unicast_link_local()
+        }
+        Some(url::Host::Domain(host)) => {
+            host == "localhost" || host.ends_with(".local") || !host.contains('.')
+        }
+        None => false,
+    }
 }
 
 fn address_fallback(client: HttpClient, base: &str, connection: &PlexConnection) -> HttpClient {

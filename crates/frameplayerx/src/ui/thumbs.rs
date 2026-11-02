@@ -170,7 +170,8 @@ impl Thumbs {
 
     /// Drops every server picture, so each is fetched again.
     pub fn forget_remote(&mut self) {
-        let remote = |k: &String| fp_sources::urlutil::is_http_url(k);
+        let remote =
+            |k: &String| fp_sources::urlutil::is_http_url(k) || fp_sources::is_source_location(k);
         self.textures.retain(|k, _| !remote(k));
         self.failed.retain(|k| !remote(k));
         self.order.retain(|k| !remote(k));

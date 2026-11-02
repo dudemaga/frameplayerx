@@ -44,8 +44,12 @@ fn reply(request: &Req) -> Resp {
                 .unwrap_or(0);
             json!({"MediaContainer":{"offset":start,"totalSize":2,"Metadata":if start < 2 {vec![movie(if start==0 {"100"} else {"101"})]} else {vec![]}}})
         }
-        "/hubs/continueWatching" | "/library/metadata/100" => {
+        "/hubs/continueWatching/items" | "/library/metadata/100" => {
             json!({"MediaContainer":{"Metadata":[movie("100")]}})
+        }
+        // As a real server answers it: the videos are inside a hub.
+        "/hubs/continueWatching" => {
+            json!({"MediaContainer":{"size":1,"Hub":[{"key":"/hubs/continueWatching/items","type":"mixed","size":1,"Metadata":[movie("100")]}]}})
         }
         "/hubs/search" => {
             json!({"MediaContainer":{"Hub":[{"type":"movie","Metadata":[movie("100")]},{"type":"artist","Metadata":[]}]}})
@@ -54,7 +58,7 @@ fn reply(request: &Req) -> Resp {
             json!({"MediaContainer":{"Metadata":[movie("100"),movie("101")]}})
         }
         "/library/metadata/101" => json!({"MediaContainer":{"Metadata":[movie("101")]}}),
-        "/library/metadata/100/thumb/1" => return serve_bytes(request, b"picture", true),
+        "/photo/:/transcode" => return serve_bytes(request, b"picture", true),
         "/library/streams/301.srt" => {
             return serve_bytes(request, b"1\n00:00:00,000 --> 00:00:05,000\nHello\n", true);
         }
@@ -62,6 +66,11 @@ fn reply(request: &Req) -> Resp {
             return serve_bytes(request, &common::pattern(4096), true);
         }
         "/video/:/transcode/universal/decision" => {
+            // As a real server does: the profile's name is case-sensitive,
+            // and without a profile it answers 400.
+            if params.get("X-Plex-Client-Profile-Name").map(String::as_str) != Some("Generic") {
+                return resp(400, b"Bad Request".to_vec(), &[]);
+            }
             json!({"MediaContainer":{"transcodeDecisionCode":1000}})
         }
         "/video/:/transcode/universal/start.mkv" => {
@@ -424,7 +433,10 @@ fn hevc_matroska_uses_local_codec_decisions_and_authenticated_original_ranges() 
     let video = source
         .details(&source.item("100").unwrap().to_entry())
         .unwrap();
-    assert!(video.location.contains("media=11"));
+    assert!(
+        !video.location.contains("media="),
+        "the version chosen automatically stays out of the location"
+    );
     let session = source.watch_session(&video).unwrap();
     let original = source.open_playback(&video.location, &session).unwrap();
     let mut bytes = [0; 16];
@@ -576,7 +588,7 @@ fn catalog_versions_media_assets_and_watch_keep_source_ownership() {
             ..Default::default()
         })
         .unwrap();
-    assert_eq!((page.total, page.items.len()), (2, 1));
+    assert_eq!((page.total, page.items.len()), (2, 2));
     let item = source.item("100").unwrap();
     assert_eq!(item.versions.len(), 2);
     assert_eq!(owner(&item.location).as_deref(), Some("plex-one"));
@@ -649,7 +661,8 @@ fn catalog_versions_media_assets_and_watch_keep_source_ownership() {
             .details(&item.to_entry())
             .unwrap()
             .location
-            .contains("media=11")
+            .ends_with("/item/100"),
+        "back to the location it is listed under"
     );
 }
 
@@ -672,7 +685,7 @@ fn tv_collections_facets_and_reset_resume_use_plex_metadata() {
                 Some(vec![episode, first])
             }
             "/library/metadata/301/children" => Some(Vec::new()),
-            "/hubs/continueWatching" => Some(vec![episode]),
+            "/hubs/continueWatching/items" => Some(vec![episode]),
             "/library/metadata/500" => Some(vec![
                 json!({"ratingKey":"500","type":"collection","title":"Collection"}),
             ]),
@@ -765,6 +778,7 @@ fn studio_filters_use_exact_names_once_encoded_and_keep_server_pagination() {
         "North & South Pictures",
         "North & South Pictures Classics",
         "Cinéma 100%",
+        "Foo, Inc.",
     ];
     let server = TestServer::start(move |r| {
         let value = match r.path() {
@@ -787,7 +801,11 @@ fn studio_filters_use_exact_names_once_encoded_and_keep_server_pagination() {
                     .enumerate()
                     .filter_map(|(i, name)| {
                         let studio_matches = if let Some(exact) = params.get("studio=") {
-                            exact.split(',').any(|selected| selected == *name)
+                            // Like PMS: split at commas, then decode each.
+                            exact.split(',').any(|selected| {
+                                percent_encoding::percent_decode_str(selected).decode_utf8_lossy()
+                                    == *name
+                            })
                         } else if let Some(contains) = params.get("studio") {
                             contains.split(',').any(|selected| name.contains(selected))
                         } else {
@@ -822,7 +840,7 @@ fn studio_filters_use_exact_names_once_encoded_and_keep_server_pagination() {
         parent: Some("section:1".into()),
         ..Default::default()
     };
-    assert_eq!(source.items(&query).unwrap().total, 3);
+    assert_eq!(source.items(&query).unwrap().total, 4);
     let facets = source.facets(&query).unwrap();
     assert_eq!(facets.studios, studio_names);
     query.genres = facets.genres;
@@ -841,8 +859,16 @@ fn studio_filters_use_exact_names_once_encoded_and_keep_server_pagination() {
     assert_eq!(second.items[0].studios, [studio_names[2]]);
 
     query.start = 0;
+    query.studios = vec![studio_names[3].into()];
+    let page = source.items(&query).unwrap();
+    assert_eq!(
+        (page.total, page.items[0].id.as_str()),
+        (1, "103"),
+        "a comma inside a name doesn't split it"
+    );
+
     query.studios.clear();
-    assert_eq!(source.items(&query).unwrap().total, 3);
+    assert_eq!(source.items(&query).unwrap().total, 4);
 
     // Rebuilding a source must not require warming its facet cache again.
     let rebuilt = PlexSource::new(&config(&server)).unwrap();
@@ -874,6 +900,7 @@ fn shuffle_snapshots_a_stable_listing_and_search_has_video_groups() {
     );
     let results = source.search("Movie", 10).unwrap();
     assert_eq!(results.len(), 1);
+    assert_eq!(results[0].0, "Movies", "headed as on Jellyfin");
     assert_eq!(results[0].1[0].id, "100");
     assert!(!source.capabilities().favorites);
     let page = source
@@ -983,4 +1010,281 @@ fn progressive_encoding_uses_seconds_kilobits_and_stops_on_drop() {
         std::thread::sleep(Duration::from_millis(10));
     }
     assert!(server.count(|r| r.path().ends_with("/stop")) > 0);
+}
+
+fn json_reply(value: &Value) -> Resp {
+    resp(
+        200,
+        serde_json::to_vec(value).unwrap(),
+        &[("Content-Type", "application/json")],
+    )
+}
+
+#[test]
+fn continue_watching_comes_from_the_listing_inside_its_hub() {
+    let server = TestServer::start(reply);
+    let source = PlexSource::new(&config(&server)).unwrap();
+    let home = source.home().unwrap();
+    assert_eq!(home.resume.len(), 1, "a real server wraps the plain path");
+    assert_eq!(home.resume[0].id, "100");
+}
+
+#[test]
+fn a_blip_on_the_only_connection_ends_when_the_server_is_back() {
+    let offline = Arc::new(AtomicBool::new(false));
+    let down = offline.clone();
+    let server = TestServer::start(move |r| {
+        if down.load(Ordering::Acquire) {
+            resp(503, Vec::new(), &[])
+        } else {
+            reply(r)
+        }
+    });
+    let source = PlexSource::new(&config(&server)).unwrap();
+    source.item("100").unwrap();
+    offline.store(true, Ordering::Release);
+    let during = source.items(&CatalogQuery {
+        ids: vec!["100".into()],
+        ..Default::default()
+    });
+    assert!(
+        !matches!(during, Ok(_) | Err(fp_sources::Error::NotFound(_))),
+        "a server that is down hasn't deleted anything: {during:?}"
+    );
+    offline.store(false, Ordering::Release);
+    assert_eq!(
+        source.probe().unwrap().machine_identifier,
+        "machine-1",
+        "back at once, not after a minute"
+    );
+}
+
+#[test]
+fn a_show_is_watched_when_its_episodes_are() {
+    // viewCount as a real server sends it: it stays up when episodes are
+    // marked unwatched, so 1 of 3 can read 3.
+    let item = |id: &str, kind: &str, plays: u32, seen: u32| json!({"ratingKey":id,"type":kind,"title":id,"viewCount":plays,"leafCount":3,"viewedLeafCount":seen});
+    let server = TestServer::start(move |r| {
+        let metadata = match r.path() {
+            "/library/metadata/1" => item("1", "show", 0, 0),
+            "/library/metadata/2" => item("2", "show", 3, 1),
+            "/library/metadata/3" => item("3", "show", 3, 3),
+            "/library/metadata/4" => item("4", "season", 2, 1),
+            "/library/metadata/5" => item("5", "season", 3, 3),
+            "/library/metadata/6" => {
+                json!({"ratingKey":"6","type":"show","title":"Empty","viewCount":0,"leafCount":0,"viewedLeafCount":0})
+            }
+            "/library/metadata/7" => {
+                json!({"ratingKey":"7","type":"episode","title":"Seen","viewCount":1})
+            }
+            _ => return reply(r),
+        };
+        json_reply(&json!({"MediaContainer":{"Metadata":[metadata]}}))
+    });
+    let source = PlexSource::new(&config(&server)).unwrap();
+    for (id, played, unplayed) in [
+        ("1", false, Some(3)),
+        ("2", false, Some(2)),
+        ("3", true, Some(0)),
+        ("4", false, Some(2)),
+        ("5", true, Some(0)),
+        ("6", false, Some(0)),
+        ("7", true, None),
+    ] {
+        let item = source.item(id).unwrap();
+        assert_eq!((item.played, item.unplayed), (played, unplayed), "{id}");
+    }
+}
+
+#[test]
+fn a_video_keeps_the_location_it_is_listed_under_until_a_version_is_picked() {
+    let server = TestServer::start(reply);
+    let source = PlexSource::new(&config(&server)).unwrap();
+    let listed = source.item("100").unwrap().to_entry();
+    assert_eq!(source.details(&listed).unwrap().location, listed.location);
+
+    source.set_version(&listed.location, Some("10"));
+    let picked = source.details(&listed).unwrap();
+    assert!(
+        picked.location.ends_with("?media=10"),
+        "{}",
+        picked.location
+    );
+}
+
+#[test]
+fn a_saved_version_whose_file_was_replaced_still_plays() {
+    let server = TestServer::start(reply);
+    let source = PlexSource::new(&config(&server)).unwrap();
+    let listed = source.item("100").unwrap().to_entry();
+    let mut saved = listed.clone();
+    saved.location = format!("{}?media=99", listed.location);
+
+    let video = source.details(&saved).unwrap();
+    assert_eq!(
+        video.location, saved.location,
+        "the same library row, with its history"
+    );
+    let file = source.open(&video.location).unwrap();
+    let mut bytes = [0; 16];
+    assert_eq!(file.read_at(64, &mut bytes).unwrap(), bytes.len());
+}
+
+#[test]
+fn a_grid_reloading_more_than_a_page_gets_all_of_it() {
+    const TOTAL: usize = 450;
+    let server = TestServer::start(|r| {
+        if r.path() != "/library/sections/1/all" {
+            return reply(r);
+        }
+        let url = url::Url::parse(&format!("http://test{}", r.url)).unwrap();
+        let params: std::collections::HashMap<_, _> = url.query_pairs().into_owned().collect();
+        let start: usize = params["X-Plex-Container-Start"].parse().unwrap();
+        let size: usize = params["X-Plex-Container-Size"].parse().unwrap();
+        assert!(size <= 200, "Plex is asked for a page at a time");
+        let items: Vec<_> = (start..TOTAL.min(start + size))
+            .map(|i| movie(&i.to_string()))
+            .collect();
+        json_reply(&json!({"MediaContainer":{"offset":start,"totalSize":TOTAL,"Metadata":items}}))
+    });
+    let source = PlexSource::new(&config(&server)).unwrap();
+    let page = source
+        .items(&CatalogQuery {
+            parent: Some("section:1".into()),
+            limit: 450,
+            ..Default::default()
+        })
+        .unwrap();
+    assert_eq!((page.items.len(), page.total), (450, 450));
+    assert_eq!(page.items[449].id, "449");
+    assert_eq!(server.count(|r| r.path() == "/library/sections/1/all"), 3);
+
+    let page = source
+        .items(&CatalogQuery {
+            parent: Some("section:1".into()),
+            limit: 60,
+            ..Default::default()
+        })
+        .unwrap();
+    assert_eq!(page.items.len(), 60, "a normal page is still one request");
+    assert_eq!(server.count(|r| r.path() == "/library/sections/1/all"), 4);
+}
+
+#[test]
+fn listings_move_on_by_what_the_server_sent() {
+    // Every other item is a kind the catalog doesn't keep.
+    let server = TestServer::start(|r| {
+        if r.path() != "/library/metadata/9/children" {
+            return reply(r);
+        }
+        let url = url::Url::parse(&format!("http://test{}", r.url)).unwrap();
+        let params: std::collections::HashMap<_, _> = url.query_pairs().into_owned().collect();
+        let start: usize = params["X-Plex-Container-Start"].parse().unwrap();
+        let size: usize = params["X-Plex-Container-Size"].parse().unwrap();
+        let items: Vec<_> = (start..500.min(start + size))
+            .map(|i| {
+                let kind = if i % 2 == 0 { "episode" } else { "photo" };
+                json!({"ratingKey":i.to_string(),"type":kind,"title":"x","index":i})
+            })
+            .collect();
+        json_reply(&json!({"MediaContainer":{"offset":start,"totalSize":500,"Metadata":items}}))
+    });
+    let source = PlexSource::new(&config(&server)).unwrap();
+    let episodes = source.episodes("series", Some("9")).unwrap();
+    assert_eq!(episodes.len(), 250, "none repeated, none missed");
+    assert_eq!(server.count(|r| r.path().ends_with("/children")), 3);
+}
+
+#[test]
+fn the_home_page_survives_a_library_that_fails() {
+    let server = TestServer::start(|r| {
+        let value = match r.path() {
+            "/library/sections" => json!({"MediaContainer":{"Directory":[
+                {"key":"1","type":"movie","title":"Movies"},
+                {"key":"2","type":"show","title":"Broken"},
+                {"key":"3","type":"movie","title":"Empty"}]}}),
+            "/library/sections/2/all" => return resp(500, Vec::new(), &[]),
+            "/library/sections/3/all" => {
+                json!({"MediaContainer":{"offset":0,"totalSize":0,"Metadata":[]}})
+            }
+            _ => return reply(r),
+        };
+        json_reply(&value)
+    });
+    let source = PlexSource::new(&config(&server)).unwrap();
+    let home = source.home().unwrap();
+    assert_eq!(home.libraries.len(), 3);
+    let rows: Vec<_> = home.latest.iter().map(|(l, _)| l.name.as_str()).collect();
+    assert_eq!(rows, ["Movies"], "as on Jellyfin: no failed or empty rows");
+}
+
+#[test]
+fn opening_a_video_reads_its_details_once() {
+    let server = TestServer::start(reply);
+    let source = PlexSource::new(&config(&server)).unwrap();
+    let listed = source.item("100").unwrap().to_entry();
+    let video = source.details(&listed).unwrap();
+    source.sidecars(&video).unwrap();
+    let session = source.watch_session(&video).unwrap();
+    source.playback_tracks(&video).unwrap();
+    assert!(!source.transcode_targets(&video).is_empty());
+    source.open_playback(&video.location, &session).unwrap();
+    let reads = |s: &TestServer| s.count(|r| r.path() == "/library/metadata/100");
+    assert_eq!(reads(&server), 1);
+
+    // Where it was left has changed: the next read asks the server.
+    source
+        .report_watch(
+            &session,
+            WatchEvent {
+                kind: WatchKind::Stop,
+                position: 14.0,
+                paused: false,
+                speed: 1.0,
+            },
+        )
+        .unwrap();
+    source.details(&listed).unwrap();
+    assert_eq!(reads(&server), 2);
+
+    source.set_played("100", true).unwrap();
+    source.details(&listed).unwrap();
+    assert_eq!(reads(&server), 3, "marking it changes it too");
+}
+
+#[test]
+fn pictures_are_asked_for_at_the_size_they_show() {
+    let server = TestServer::start(reply);
+    let source = PlexSource::new(&config(&server)).unwrap();
+    let item = source.item("100").unwrap();
+    let picture = source.open(item.poster.as_deref().unwrap()).unwrap();
+    let mut bytes = [0; 7];
+    assert_eq!(picture.read_at(0, &mut bytes).unwrap(), 7);
+    let requests = server.requests();
+    let asked = requests
+        .iter()
+        .find(|r| r.path() == "/photo/:/transcode")
+        .unwrap();
+    let url = url::Url::parse(&format!("http://test{}", asked.url)).unwrap();
+    let params: std::collections::HashMap<_, _> = url.query_pairs().into_owned().collect();
+    assert_eq!(params["url"], "/library/metadata/100/thumb/1");
+    assert_eq!(
+        (params["width"].as_str(), params["height"].as_str()),
+        ("480", "720")
+    );
+    assert!(!item.poster.unwrap().contains("secret"));
+}
+
+#[test]
+fn a_plex_id_is_no_format_hint() {
+    use fp_core::format::{ContainerHints, Projection, resolve};
+    let server = TestServer::start(reply);
+    let source = PlexSource::new(&config(&server)).unwrap();
+    let listed = source.item("100").unwrap().location;
+    for id in ["180", "360"] {
+        let location = listed.replace("/item/100", &format!("/item/{id}"));
+        let name = fp_sources::urlutil::last_segment(&location);
+        let got = resolve(None, ContainerHints::default(), &name, 1920, 1080);
+        assert_eq!(got.format.projection, Projection::Flat, "ID {id}");
+    }
 }

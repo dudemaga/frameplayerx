@@ -46,13 +46,13 @@ impl PlexSource {
             .media
             .or_else(|| lock(&self.versions).get(&location.id).cloned());
         let media = self.choose_media(&raw, selected.as_deref())?;
-        let media_id =
-            text(media, "id").ok_or_else(|| Error::parse("Plex media", "missing media id"))?;
         let item = self
             .catalog_item(&raw)
             .ok_or_else(|| Error::Unsupported("Plex item is not a video".into()))?;
         let mut entry = item.to_entry();
-        entry.location = self.location("item", &location.id, Some(&media_id));
+        // Only a version someone picked: the video otherwise keeps the one
+        // location it is listed under, and with it one row in the library.
+        entry.location = self.location("item", &location.id, selected.as_deref());
         entry.resume = Some(num(&raw, "viewOffset").unwrap_or(0.0).max(0.0) / 1000.0);
         entry.duration = num(&raw, "duration").map(|n| n / 1000.0);
         entry.modified = num(&raw, "updatedAt").map(|n| n as i64);
@@ -115,7 +115,7 @@ impl PlexSource {
             .filter(|d| d.is_finite() && *d > 0.0)
             .map(|d| (d * 1000.0) as u64);
         session.media_id = location.media.clone();
-        if let Some(raw) = lock(&self.metadata).get(&location.id).cloned()
+        if let Some((_, raw)) = lock(&self.metadata).get(&location.id).cloned()
             && let Ok(media) = self.choose_media(&raw, location.media.as_deref())
             && let Some(part) = array(media, "Part").first()
         {
@@ -195,7 +195,7 @@ impl PlexSource {
                 // sidecar, so Plex must not burn in its stored selection.
                 .append_pair("subtitles", "none")
                 .append_pair("directStream", "1")
-                .append_pair("X-Plex-Client-Profile-Name", "generic")
+                .append_pair("X-Plex-Client-Profile-Name", "Generic")
                 .append_pair("X-Plex-Session-Identifier", &session.id)
                 .append_pair("session", &session.id);
             let decision = self.json(&format!(
@@ -252,7 +252,10 @@ impl PlexSource {
         if let Some(duration) = session.duration_ms {
             query.append_pair("duration", &duration.to_string());
         }
-        self.request("POST", &format!("/:/timeline?{}", query.finish()), &[])?;
+        let reported = self.request("POST", &format!("/:/timeline?{}", query.finish()), &[]);
+        // Where it was left has changed.
+        lock(&self.metadata).remove(&session.item);
+        reported?;
         Ok(())
     }
 }
