@@ -71,9 +71,10 @@ impl Library {
     /// is locked, so it must not perform I/O or call back into the library.
     ///
     /// The transaction preserves media IDs, history, playlists and all other
-    /// user data. An empty replacement or a location owned by another media
-    /// row aborts the entire rewrite. No records are merged or deleted.
-    /// Returns the number of media rows with any changed location.
+    /// user data. A row whose new location another row already has keeps its
+    /// own, and still opens by it; the rest of the source moves. An empty
+    /// replacement aborts the entire rewrite. No records are merged or
+    /// deleted. Returns the number of media rows with any changed location.
     pub fn rewrite_source_locations(
         &self,
         source_id: &str,
@@ -103,7 +104,8 @@ impl Library {
                 .collect::<rusqlite::Result<Vec<_>>>()?;
             let mut count = 0;
             for mut row in rows {
-                let media_changed = rewrite_one(&mut row.media, &mut rewrite)?;
+                let original = row.media.clone();
+                let mut media_changed = rewrite_one(&mut row.media, &mut rewrite)?;
                 if media_changed {
                     let collision: Option<i64> = connection
                         .query_row(
@@ -113,10 +115,8 @@ impl Library {
                         )
                         .optional()?;
                     if collision.is_some() {
-                        return Err(Error::InvalidArgument(
-                            "rewriting source locations would reuse an existing media location"
-                                .into(),
-                        ));
+                        row.media = original;
+                        media_changed = false;
                     }
                 }
                 let mut changed = media_changed;
@@ -298,48 +298,91 @@ mod tests {
     }
 
     #[test]
-    fn a_collision_rolls_back_prior_rewrites_and_attached_data() {
+    fn a_collision_keeps_that_row_and_moves_the_rest() {
         for existing_target in [false, true] {
             let library = Library::open_in_memory().unwrap();
             let first = add(&library, "server", "a");
             let second = add(&library, "server", "b");
+            let third = add(&library, "server", "c");
             library.set_favorite(first, true).unwrap();
             let session = library.start_playback(second).unwrap();
             library.update_playback(session, 13.0, false).unwrap();
             let target = "source://source/server/collision.mkv";
-            let third = existing_target.then(|| {
+            let other = existing_target.then(|| {
                 library
                     .upsert(&MediaUpsert::new(target, "other-source"))
                     .unwrap()
                     .id
             });
-            let before = [first, second].map(|id| library.get(id).unwrap().unwrap());
+            let kept = library.get(second).unwrap().unwrap();
             let history = library.history(20).unwrap();
-            let result = library.rewrite_source_locations("server", |location| {
-                if location == format!("{OLD}a.mkv") {
-                    stable(location)
-                } else if location == format!("{OLD}b.mkv") {
+            let rewrite = |location: &str| {
+                if location == format!("{OLD}b.mkv") {
                     Some(if existing_target {
                         target.into()
                     } else {
                         stable(&format!("{OLD}a.mkv")).unwrap()
                     })
                 } else {
-                    None
+                    stable(location)
                 }
-            });
-            assert!(matches!(result, Err(Error::InvalidArgument(_))));
-            for record in before {
-                assert_eq!(library.get(record.id).unwrap(), Some(record));
-            }
-            assert_eq!(library.history(20).unwrap(), history);
-            if let Some(third) = third {
+            };
+            assert_eq!(
+                library.rewrite_source_locations("server", rewrite).unwrap(),
+                2,
+                "one collision doesn't hold back the others"
+            );
+            let moved = library.get(first).unwrap().unwrap();
+            assert_eq!(moved.location, stable(&format!("{OLD}a.mkv")).unwrap());
+            assert!(moved.favorite);
+            assert_eq!(
+                library.get(third).unwrap().unwrap().location,
+                stable(&format!("{OLD}c.mkv")).unwrap()
+            );
+            assert_eq!(library.get(second).unwrap(), Some(kept.clone()));
+            assert_eq!(
+                library.get_by_location(&kept.location).unwrap().unwrap().id,
+                second,
+                "it still opens by the location it kept"
+            );
+            assert_eq!(library.history(20).unwrap().len(), history.len());
+            if let Some(other) = other {
                 assert_eq!(
-                    library.get(third).unwrap().unwrap().source_id,
+                    library.get(other).unwrap().unwrap().source_id,
                     "other-source"
                 );
             }
+            assert_eq!(
+                library.rewrite_source_locations("server", rewrite).unwrap(),
+                0,
+                "nothing to do the next time"
+            );
         }
+    }
+
+    #[test]
+    fn a_row_that_keeps_its_location_still_moves_its_files() {
+        let library = Library::open_in_memory().unwrap();
+        let target = "source://source/server/taken.mkv";
+        library
+            .upsert(&MediaUpsert::new(target, "other-source"))
+            .unwrap();
+        let mut upsert = MediaUpsert::new(format!("{OLD}b.mkv"), "server");
+        upsert.subtitles = vec![format!("{OLD}b.srt")];
+        let id = library.upsert(&upsert).unwrap().id;
+        let changed = library
+            .rewrite_source_locations("server", |location| {
+                if location.ends_with(".mkv") {
+                    Some(target.into())
+                } else {
+                    stable(location)
+                }
+            })
+            .unwrap();
+        assert_eq!(changed, 1);
+        let row = library.get(id).unwrap().unwrap();
+        assert_eq!(row.location, format!("{OLD}b.mkv"));
+        assert_eq!(row.subtitles, [stable(&format!("{OLD}b.srt")).unwrap()]);
     }
 
     #[test]

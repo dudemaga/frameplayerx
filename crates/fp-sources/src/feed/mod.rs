@@ -42,9 +42,15 @@ use serde_json::Value;
 use std::collections::HashMap;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
+use std::time::{Duration, Instant};
 
 /// Largest JSON document accepted from a feed.
 const JSON_LIMIT: u64 = 64 << 20;
+
+/// How long scene addresses read from the feed are used before asking it
+/// again. They may be signed, so not for long, but opening a scene looks its
+/// address up several times, and filling in a group's details once a scene.
+const LINKS_FRESH: Duration = Duration::from_secs(60);
 
 /// Parallel requests when a HereSphere group is listed.
 const DETAIL_WORKERS: usize = 6;
@@ -205,10 +211,15 @@ pub struct FeedSource {
     /// Each scene's event server, as its details named it.
     event_servers: Mutex<HashMap<String, String>>,
     scene_links: Mutex<SceneLinks>,
+    /// Held while asking the feed for a scene's address, so workers filling
+    /// in details don't all download it at once.
+    resolving: Mutex<()>,
 }
 
 #[derive(Default)]
 struct SceneLinks {
+    /// When these were read from the feed.
+    read: Option<Instant>,
     by_url: HashMap<String, String>,
     by_reference: HashMap<String, String>,
     entries: HashMap<String, Entry>,
@@ -259,6 +270,7 @@ impl FeedSource {
             max_height: config.max_height,
             event_servers: Mutex::new(HashMap::new()),
             scene_links: Mutex::new(SceneLinks::default()),
+            resolving: Mutex::new(()),
         })
     }
 
@@ -279,6 +291,20 @@ impl FeedSource {
         if reference.kind == format!("{}-id", self.location_kind()) {
             // Resolve the published ID afresh: the media/API URL may be signed
             // or have changed since the listing was saved.
+            let fresh = || {
+                let links = lock(&self.scene_links);
+                links
+                    .read
+                    .filter(|read| read.elapsed() < LINKS_FRESH)
+                    .and_then(|_| links.by_reference.get(location).cloned())
+            };
+            if let Some(address) = fresh() {
+                return Ok(address);
+            }
+            let _asking = lock(&self.resolving);
+            if let Some(address) = fresh() {
+                return Ok(address);
+            }
             self.groups(&self.url)?;
             return lock(&self.scene_links)
                 .by_reference
@@ -417,7 +443,10 @@ impl FeedSource {
             .into_iter()
             .filter_map(|(id, address)| address.map(|address| (address, id)))
             .collect();
-        let mut links = SceneLinks::default();
+        let mut links = SceneLinks {
+            read: Some(Instant::now()),
+            ..SceneLinks::default()
+        };
         for group in &mut groups {
             for entry in &mut group.scenes {
                 let address = entry.location.clone();
@@ -796,7 +825,49 @@ fn find_group(groups: Vec<SceneGroup>, name: &str, location: &str) -> Result<Vec
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::test_server;
     use serde_json::json;
+
+    #[test]
+    fn a_scenes_address_is_asked_for_again_once_it_may_have_expired() {
+        let server = test_server::TestServer::start(|_| {
+            test_server::resp(
+                200,
+                r#"{"scenes":[{"name":"All","list":[
+                    {"id":"7","title":"Seven","video_url":"http://media/seven.mp4?token=1"}
+                ]}]}"#,
+                &[("Content-Type", "application/json")],
+            )
+        });
+        let feed = FeedSource::deovr(&FeedConfig {
+            id: "deo".into(),
+            name: "Scenes".into(),
+            url: server.url("/feed"),
+            credentials: None,
+            insecure_tls: false,
+            max_height: None,
+        })
+        .unwrap();
+        let scene = crate::location::encode("deo", "deovr-id", "7");
+        assert!(feed.resolved_location(&scene).unwrap().contains("token=1"));
+        feed.resolved_location(&scene).unwrap();
+        assert_eq!(server.requests().len(), 1, "still fresh");
+
+        lock(&feed.scene_links).read = Instant::now().checked_sub(LINKS_FRESH);
+        feed.resolved_location(&scene).unwrap();
+        assert_eq!(server.requests().len(), 2, "may have expired");
+
+        let gone = crate::location::encode("deo", "deovr-id", "8");
+        assert!(matches!(
+            feed.resolved_location(&gone),
+            Err(Error::NotFound(_))
+        ));
+        assert_eq!(
+            server.requests().len(),
+            3,
+            "one the list doesn't have may be new"
+        );
+    }
 
     #[test]
     fn the_file_comes_before_the_servers_transcode() {

@@ -462,7 +462,9 @@ pub fn open(
             }
         }
     };
-    if req.paused {
+    // Only for this open: the request is cloned for later ones (a Loop
+    // restart, Up next), which start playing.
+    if std::mem::take(&mut req.paused) {
         player.pause();
     }
     let info = player.info().clone();
@@ -1358,7 +1360,10 @@ mod tests {
         assert_eq!(first.record_id, Some(expected_id));
         assert_eq!(first.settings, expected_view);
         assert_eq!(first.request.entry.as_ref().unwrap().location, stable);
+        assert!(first.player.is_paused());
+        assert!(!first.request.paused, "for this open only");
         let mut reopen = first.request.clone();
+        reopen.paused = true;
         reopen.quality = Quality::Original;
         reopen.start_at = Some(0.0);
         first.close(&library);

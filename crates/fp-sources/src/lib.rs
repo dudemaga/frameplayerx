@@ -37,6 +37,9 @@ pub mod mediabrowser;
 pub mod plex;
 pub mod sidecar;
 pub mod smb;
+#[cfg(test)]
+#[path = "../tests/common/mod.rs"]
+mod test_server;
 pub mod timeutil;
 pub mod transcode;
 pub mod urlutil;

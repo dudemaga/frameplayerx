@@ -7,9 +7,7 @@ use ring::rand::SystemRandom;
 use ring::signature::Ed25519KeyPair;
 use serde_json::json;
 
-#[path = "../../tests/common/mod.rs"]
-mod common;
-use common::{TestServer, resp};
+use crate::test_server::{TestServer, resp};
 
 #[test]
 fn rejected_saved_credentials_renew_at_handshake_or_on_a_later_request() {
