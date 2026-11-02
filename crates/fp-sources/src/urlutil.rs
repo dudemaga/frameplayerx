@@ -109,6 +109,9 @@ pub fn last_segment(location: &str) -> String {
         return String::new();
     }
     if let Some(reference) = crate::location::decode(location) {
+        if fp_core::source::location_names_no_file(&reference.kind) {
+            return String::new();
+        }
         // DLNA resource URLs are opaque. The durable reference carries
         // the server's filename separately from the object ID so subtitle
         // decoders and haptic axis detection retain its extension/suffix.
@@ -572,6 +575,16 @@ mod tests {
         let mut v = vec!["ep10.mp4", "Ep2.mp4", "ep1.mp4", "a.mp4", "ep02b.mp4"];
         v.sort_by(|a, b| natural_cmp(a, b));
         assert_eq!(v, ["a.mp4", "ep1.mp4", "Ep2.mp4", "ep02b.mp4", "ep10.mp4"]);
+    }
+
+    #[test]
+    fn a_servers_id_for_a_video_names_no_file() {
+        let of = |kind: &str, key: &str| last_segment(&crate::location::encode("s", kind, key));
+        assert_eq!(of("dlna", "item:64$1$180"), "");
+        assert_eq!(of("deovr-id", "180"), "");
+        assert_eq!(of("heresphere-id", "360"), "");
+        assert_eq!(of("mb", "item=abc180&version=360"), "");
+        assert_eq!(of("http", "VR/Clip_180_LR.mp4"), "Clip_180_LR.mp4");
     }
 
     #[test]

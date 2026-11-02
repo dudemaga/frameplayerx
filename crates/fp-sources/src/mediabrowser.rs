@@ -1158,6 +1158,15 @@ impl Source for MediaBrowserSource {
         Ok(Arc::new(client.open(&url)?))
     }
 
+    fn picture_request(&self, location: &str) -> Option<(HttpClient, String)> {
+        let reference = crate::location::decode(location)?;
+        if reference.source_id != self.id || reference.kind != "mb-asset" {
+            return None;
+        }
+        let url = crate::location::resolve_url(&self.base_url, &reference.key)?;
+        Some((self.client().ok()?.0, url))
+    }
+
     fn parent(&self, location: &str) -> Option<String> {
         let location = self.canonical_location(location)?;
         lock(&self.parents).get(&location).cloned()

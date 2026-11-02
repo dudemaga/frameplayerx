@@ -1253,6 +1253,21 @@ fn opening_a_video_reads_its_details_once() {
 }
 
 #[test]
+fn a_picture_can_be_asked_for_directly_so_it_can_be_checked() {
+    let server = TestServer::start(reply);
+    let source = PlexSource::new(&config(&server)).unwrap();
+    let item = source.item("100").unwrap();
+    let (client, url) = source
+        .picture_request(item.poster.as_deref().unwrap())
+        .unwrap();
+    assert!(url.contains("/photo/:/transcode?"), "{url}");
+    assert!(!url.contains("secret"), "the token goes in a header");
+    let answer = client.request("GET", &url, &[], None, 1024).unwrap();
+    assert_eq!(answer.body, b"picture");
+    assert!(source.picture_request(&item.location).is_none());
+}
+
+#[test]
 fn pictures_are_asked_for_at_the_size_they_show() {
     let server = TestServer::start(reply);
     let source = PlexSource::new(&config(&server)).unwrap();

@@ -128,6 +128,10 @@ impl Source for HttpDirSource {
         Ok(Arc::new(self.client.open(&self.current_url(location)?)?))
     }
 
+    fn picture_request(&self, location: &str) -> Option<(HttpClient, String)> {
+        Some((self.client.clone(), self.current_url(location).ok()?))
+    }
+
     fn parent(&self, location: &str) -> Option<String> {
         self.canonical_location(&parent_url(&self.current_url(location).ok()?)?)
     }

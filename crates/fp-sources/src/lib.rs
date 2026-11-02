@@ -120,6 +120,14 @@ pub trait Source: Send + Sync {
         None
     }
 
+    /// A picture of this source as an HTTP request: the client allowed to ask
+    /// for it, and its address. The image cache uses it to ask whether the
+    /// picture changed, where opening it could only download it again. `None`
+    /// for one that isn't over HTTP.
+    fn picture_request(&self, _location: &str) -> Option<(HttpClient, String)> {
+        None
+    }
+
     /// Folder containing `location`, when the source can list it.
     fn parent(&self, _location: &str) -> Option<String> {
         None

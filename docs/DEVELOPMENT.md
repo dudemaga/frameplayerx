@@ -243,8 +243,7 @@ the original Part.
 Plex transcodes use progressive Matroska over `ByteSource`, not FFmpeg
 networking. Restarting after a seek creates an encoding session distinct
 from the watch-report session and stops the previous encoding. Original
-server track IDs survive the restart. See [Plex design](PLEX-DESIGN.md)
-for protocol choices and remaining live-server validation.
+server track IDs survive the restart.
 
 **Libraries and cards.** A library is a source (`SourceConfig::Library`)
 whose folder is scanned into the database under its own id

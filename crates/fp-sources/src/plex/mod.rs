@@ -522,6 +522,15 @@ impl Source for PlexSource {
     fn open_playback(&self, location: &str, session: &WatchSession) -> Result<Arc<dyn ByteSource>> {
         self.open_resource(location, Some(session))
     }
+    fn picture_request(&self, location: &str) -> Option<(HttpClient, String)> {
+        let location = self.parse_location(location).ok()?;
+        if location.kind != "image" {
+            return None;
+        }
+        let endpoint = self.client().ok()?;
+        let url = resource_url(&endpoint.base, &location.path?).ok()?;
+        Some((endpoint.client, url))
+    }
     fn details(&self, entry: &Entry) -> Result<Entry> {
         self.entry_details(entry)
     }

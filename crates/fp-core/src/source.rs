@@ -177,6 +177,12 @@ pub const VIDEO_EXTENSIONS: &[&str] = &[
 /// File extensions treated as subtitles.
 pub const SUBTITLE_EXTENSIONS: &[&str] = &["srt", "ass", "ssa", "vtt"];
 
+/// Whether a source location of this kind ends in a server's ID for the video
+/// rather than a file name: an ID of 180 is no format hint.
+pub fn location_names_no_file(kind: &str) -> bool {
+    matches!(kind, "dlna" | "mb") || kind.ends_with("-id") || kind.ends_with("-group")
+}
+
 pub fn is_video_name(name: &str) -> bool {
     ext_in(name, VIDEO_EXTENSIONS)
 }

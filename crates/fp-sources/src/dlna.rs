@@ -927,6 +927,10 @@ impl Source for DlnaSource {
         Ok(Arc::new(self.client.open(&self.resource_url(location)?)?))
     }
 
+    fn picture_request(&self, location: &str) -> Option<(HttpClient, String)> {
+        Some((self.client.clone(), self.resource_url(location).ok()?))
+    }
+
     fn parent(&self, location: &str) -> Option<String> {
         let canonical = self.canonical_location(location)?;
         lock(&self.parents)
