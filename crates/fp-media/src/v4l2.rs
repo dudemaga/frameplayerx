@@ -177,6 +177,54 @@ impl Holder {
     }
 }
 
+/// Pictures in a row the decoder may flag as broken before it counts as
+/// failed. A seek can leave a few leading pictures it can't decode; a stream
+/// the hardware misreads has every picture flagged.
+pub(crate) const MAX_BROKEN_PICTURES: u32 = 48;
+
+/// The part of a packet to rotate right by `extradata.len()` so the
+/// parameter sets `hevc_mp4toannexb` copied in from the hvcC (`extradata`,
+/// Annex B) go ahead of the VPS, SPS and PPS the packet carries itself,
+/// and those are the ones the decoder ends up with. `None` when nothing
+/// needs to move.
+///
+/// The filter inserts the hvcC's right before a packet's first IRAP
+/// picture, after any in-band ones, whether or not the packet is flagged
+/// as a keyframe. Software decoders read the hvcC once,
+/// so in-band parameter sets replace it, and a file whose hvcC doesn't
+/// match its pictures (some Matroska re-encodes) plays everywhere else; the
+/// Frame's decoder takes the stale copy and flags every picture as broken.
+pub(crate) fn hvcc_copy_after_own(data: &[u8], extradata: &[u8]) -> Option<std::ops::Range<usize>> {
+    if extradata.is_empty() {
+        return None;
+    }
+    // From start code to start code, reading only each unit's header, up
+    // to the first picture: the rest is the bulk of the packet, and only an
+    // IRAP picture gets the hvcC's copy.
+    let (mut own, mut at) = (None, 0);
+    let irap = loop {
+        let code = at + crate::nal::start_code(&data[at..])?;
+        let begin = if code > 0 && data[code - 1] == 0 {
+            code - 1
+        } else {
+            code
+        };
+        match (data.get(code + 3)? >> 1) & 0x3f {
+            16..=23 => break begin,
+            0..=15 | 24..=31 => return None,
+            32..=34 => own = own.or(Some(begin)),
+            _ => {}
+        }
+        at = code + 3;
+    };
+    let inserted = irap
+        .checked_sub(extradata.len())
+        .filter(|&at| data[at..irap] == *extradata)?;
+    let own = own.filter(|&own| own < inserted)?;
+    // Most files repeat the hvcC's own parameter sets: nothing to move.
+    (data[own..inserted] != *extradata).then_some(own..irap)
+}
+
 /// The error for a stream of size `stream` the admission check refuses,
 /// `admitted` being the largest height it takes at that width beside the
 /// `holders`' sessions, if any.
@@ -831,6 +879,13 @@ mod linux {
         /// The primer trick is active (declared OUTPUT size was lowered).
         primed: bool,
         bsf: *mut ff::AVBSFContext,
+        /// The parameter sets the filter inserts at keyframes when it
+        /// converts an hvcC (Annex B), else empty.
+        hvcc_parameter_sets: Vec<u8>,
+        /// Keyframes with parameter sets unlike the hvcC's were seen (logged).
+        in_band_parameter_sets: bool,
+        /// CAPTURE buffers flagged as broken since the last good picture.
+        broken_in_a_row: u32,
         out_free: Vec<u32>,
         /// Filtered packets waiting for a free OUTPUT buffer, with their ids.
         pending: VecDeque<(Packet, u64)>,
@@ -1075,6 +1130,9 @@ mod linux {
                 pixelformat,
                 primed: false,
                 bsf: std::ptr::null_mut(),
+                hvcc_parameter_sets: Vec::new(),
+                in_band_parameter_sets: false,
+                broken_in_a_row: 0,
                 out_free: Vec::new(),
                 pending: VecDeque::new(),
                 ts: Timestamps::default(),
@@ -1145,7 +1203,39 @@ mod linux {
                 (*self.bsf).time_base_in = time_base;
                 crate::check(ff::av_bsf_init(self.bsf), "bsf init")?;
             }
+            if self.codec != Codec::Hevc {
+                return Ok(());
+            }
+            // SAFETY: par and the initialised filter's par_out are valid;
+            // each extradata holds extradata_size bytes.
+            unsafe {
+                let (p, out) = (&*par, &*(*self.bsf).par_out);
+                if p.extradata.is_null() || p.extradata_size < 3 || out.extradata.is_null() {
+                    return Ok(());
+                }
+                let ext = std::slice::from_raw_parts(p.extradata, p.extradata_size as usize);
+                // Annex B extradata (MPEG-TS) passes through unchanged; an
+                // hvcC comes out as the parameter sets the filter inserts.
+                if !ext.starts_with(&[0, 0, 1]) && !ext.starts_with(&[0, 0, 0, 1]) {
+                    self.hvcc_parameter_sets = std::slice::from_raw_parts(
+                        out.extradata,
+                        out.extradata_size.max(0) as usize,
+                    )
+                    .to_vec();
+                }
+            }
             Ok(())
+        }
+
+        /// The decoder flagged too many pictures in a row as broken: it
+        /// can't decode this stream, however it is fed.
+        pub(crate) fn pictures_broken(&self) -> bool {
+            self.broken_in_a_row >= MAX_BROKEN_PICTURES
+        }
+
+        /// End of stream was sent (until a flush).
+        pub(crate) fn ended(&self) -> bool {
+            self.eos_input
         }
 
         /// S_FMT + REQBUFS on the OUTPUT queue with the declared size.
@@ -1336,6 +1426,32 @@ mod linux {
                 if size <= 0 {
                     // V4L2 would read an empty OUTPUT buffer as a full one.
                     continue;
+                }
+                if !self.hvcc_parameter_sets.is_empty() {
+                    let sets = &self.hvcc_parameter_sets;
+                    // SAFETY: the filter's packet holds size bytes at data.
+                    let moved = unsafe {
+                        let p = &*out.as_ptr();
+                        hvcc_copy_after_own(std::slice::from_raw_parts(p.data, size as usize), sets)
+                    };
+                    if let Some(range) = moved {
+                        // SAFETY: a writable packet holds size bytes at data.
+                        unsafe {
+                            crate::check(
+                                ff::av_packet_make_writable(out.as_ptr()),
+                                "packet writable",
+                            )?;
+                            let p = &*out.as_ptr();
+                            std::slice::from_raw_parts_mut(p.data, size as usize)[range]
+                                .rotate_right(sets.len());
+                        }
+                        if !self.in_band_parameter_sets {
+                            self.in_band_parameter_sets = true;
+                            log::info!(
+                                "V4L2: keyframes carry parameter sets unlike the hvcC's; theirs go last"
+                            );
+                        }
+                    }
                 }
                 let pts = if pts == ff::AV_NOPTS_VALUE { dts } else { pts };
                 if self.arm_floor {
@@ -1719,6 +1835,16 @@ mod linux {
                 if let Some(d) = self.dequeue_capture()? {
                     idle_since = None;
                     let last = d.flags & BUF_FLAG_LAST != 0;
+                    // Broken pictures keep coming, so the stall check never
+                    // fires: count them, but not the primer's or those from
+                    // before a seek.
+                    if self.ts.get(d.id).is_some() {
+                        if d.flags & BUF_FLAG_ERROR != 0 {
+                            self.broken_in_a_row += 1;
+                        } else if d.bytesused > 0 {
+                            self.broken_in_a_row = 0;
+                        }
+                    }
                     let timing = self.ts.get(d.id).filter(|&(pts, duration)| {
                         d.bytesused > 0
                             && d.flags & BUF_FLAG_ERROR == 0
@@ -1736,6 +1862,11 @@ mod linux {
                         self.last_seen = true;
                     } else {
                         self.queue_capture(d.index)?;
+                    }
+                    if self.pictures_broken() {
+                        return Err(Error::Unsupported(format!(
+                            "V4L2 decoder flagged {MAX_BROKEN_PICTURES} pictures in a row as broken"
+                        )));
                     }
                     match result {
                         Some(r) => {
@@ -1802,6 +1933,7 @@ mod linux {
             self.ts.invalidate();
             self.pts_floor = None;
             self.arm_floor = true;
+            self.broken_in_a_row = 0;
             if !self.stop_sent || self.drc_pending {
                 // Mid-stream (a pending resolution change is handled by the
                 // next receive): nothing to restart.
@@ -2228,5 +2360,79 @@ mod tests {
         assert_eq!(Codec::Hevc.fourcc(), fourcc(b"HEVC"));
         assert_eq!(macroblocks(8192, 4096), 131_072);
         assert_eq!(macroblocks(1920, 1080), 120 * 68);
+    }
+
+    /// Annex B with 4-byte start codes, as `hevc_mp4toannexb` writes it.
+    fn annex_b(nals: &[&[u8]]) -> Vec<u8> {
+        nals.iter()
+            .flat_map(|n| [&[0, 0, 0, 1][..], n].concat())
+            .collect()
+    }
+
+    #[test]
+    fn in_band_parameter_sets_go_last() {
+        // An hvcC that disagrees with the stream (some Matroska re-encodes):
+        // same ids, other contents.
+        let (vps, sps, pps) = (
+            &[0x40, 1, 0xaa][..],
+            &[0x42, 1, 0xaa][..],
+            &[0x44, 1, 0xaa][..],
+        );
+        let hvcc = annex_b(&[vps, sps, pps]);
+        let (own_vps, own_sps, own_pps) = (
+            &[0x40, 1, 0xbb][..],
+            &[0x42, 1, 0xbb][..],
+            &[0x44, 1, 0xbb][..],
+        );
+        let (aud, sei, idr, trail) = (
+            &[0x46, 1, 0x50][..],
+            &[0x4e, 1, 5][..],
+            &[0x26, 1, 0xaf][..],
+            &[0x02, 1, 0xd0][..],
+        );
+
+        // The keyframe as sent: the hvcC's copy moved ahead, when it moves.
+        let sent = |nals: &[&[u8]], extradata: &[u8]| {
+            let mut data = annex_b(nals);
+            let range = hvcc_copy_after_own(&data, extradata)?;
+            data[range].rotate_right(extradata.len());
+            Some(data)
+        };
+
+        // What the filter makes of a keyframe with its own parameter sets.
+        assert_eq!(
+            sent(&[own_vps, own_sps, own_pps, vps, sps, pps, idr], &hvcc),
+            Some(annex_b(&[vps, sps, pps, own_vps, own_sps, own_pps, idr]))
+        );
+        // An access unit delimiter and SEI stay ahead of them, and only the
+        // first picture's start is looked for.
+        assert_eq!(
+            sent(
+                &[aud, sei, own_vps, own_sps, own_pps, vps, sps, pps, idr, idr],
+                &hvcc
+            ),
+            Some(annex_b(&[
+                aud, sei, vps, sps, pps, own_vps, own_sps, own_pps, idr, idr
+            ]))
+        );
+
+        // Unchanged: keyframes without parameter sets of their own (most
+        // MP4s) or with the hvcC's, pictures that aren't IRAP, nothing
+        // inserted.
+        for nals in [
+            &[vps, sps, pps, idr][..],
+            &[aud, vps, sps, pps, idr],
+            &[vps, sps, pps, vps, sps, pps, idr],
+            &[own_vps, own_sps, own_pps, trail],
+            &[own_vps, own_sps, own_pps, idr],
+            // The search ends at the first picture.
+            &[aud, trail, own_vps, own_sps, own_pps, vps, sps, pps, idr],
+        ] {
+            assert_eq!(sent(nals, &hvcc), None, "{nals:x?}");
+        }
+        assert_eq!(
+            sent(&[own_vps, own_sps, own_pps, vps, sps, pps, idr], &[]),
+            None
+        );
     }
 }
