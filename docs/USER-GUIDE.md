@@ -680,7 +680,7 @@ picture. Play/pause and seeking are under either thumb.
 | Y / D-pad up | Next video | Show or hide the controls |
 | Menu / View | Browse | Recenter |
 | Bumper | Forward 1 minute | Back 1 minute |
-| Grip + thumbstick | Up / down raises or lowers you | Left / right turns the picture, up / down zooms in / out |
+| Grip + thumbstick | Up / down raises or lowers you | Left / right turns the picture, down zooms in, up zooms out |
 | Grip + X / Y | Previous / next chapter or bookmark (back within 3 s of one's start goes to the one before) | As without the grip |
 | Grip + A | Bookmark where you are | As without the grip |
 | Grip + thumbstick press | Subtitles off, or back on: the ones you had, else those in your language | As without the grip |
