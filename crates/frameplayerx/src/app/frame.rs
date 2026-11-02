@@ -420,6 +420,9 @@ impl App {
         };
         let mut buzz = Vec::new();
         self.move_panels(routed.grab, &input.hands, anchor, &mut buzz);
+        if let Some(hand) = routed.pressed {
+            buzz.push((hand, 0.2, 8));
+        }
         self.controller(
             input,
             routed.over_ui,
@@ -441,6 +444,30 @@ impl App {
         let mut actions = Vec::new();
         if self.thumbs.poll(&self.panels[MAIN].ctx) {
             self.panels[MAIN].request_repaint();
+        }
+        // Paint the keyboard first so a pressed key's text reaches its target
+        // panel and paints on the same frame.
+        if let Some(target) = kb_target {
+            let mut events = Vec::new();
+            let mut close = false;
+            let shift = &mut self.ui.keyboard_shift;
+            let symbols = &mut self.ui.keyboard_symbols;
+            if self.panels[KEYBOARD].needs_paint() {
+                let r = self.panels[KEYBOARD].paint(renderer, input.time, |ctx| {
+                    let (e, c) = ui::keyboard::keyboard(ctx, shift, symbols);
+                    events = e;
+                    close = c;
+                });
+                if let Err(e) = r {
+                    log::error!("painting the keyboard: {e}");
+                }
+            }
+            for e in events {
+                self.panels[target].push(e);
+            }
+            if close {
+                self.panels[target].push(escape());
+            }
         }
         let devices = self.services.haptic_statuses();
         let passthrough_available = input.passthrough_available;
@@ -479,28 +506,6 @@ impl App {
                 log::error!("painting panel: {e}");
             }
         }
-        if let Some(target) = kb_target {
-            let mut events = Vec::new();
-            let mut close = false;
-            let shift = &mut self.ui.keyboard_shift;
-            let symbols = &mut self.ui.keyboard_symbols;
-            if self.panels[KEYBOARD].needs_paint() {
-                let r = self.panels[KEYBOARD].paint(renderer, input.time, |ctx| {
-                    let (e, c) = ui::keyboard::keyboard(ctx, shift, symbols);
-                    events = e;
-                    close = c;
-                });
-                if let Err(e) = r {
-                    log::error!("painting the keyboard: {e}");
-                }
-            }
-            for e in events {
-                self.panels[target].push(e);
-            }
-            if close {
-                self.panels[target].push(escape());
-            }
-        }
         for a in actions {
             self.apply(a);
         }
@@ -514,7 +519,20 @@ impl App {
         input: &FrameInput,
         anchor: Mat4,
     ) -> (Option<Arc<VideoFrame>>, VideoParams, bool) {
-        let mut video = VideoParams::default();
+        let shown = self
+            .playback
+            .as_ref()
+            .map(|p| p.shown_settings(&self.settings.default_view));
+        // The open video's colour, else the one videos start with. It is
+        // sRGB; the eyes are cleared in linear light.
+        let [r, g, b] = shown
+            .unwrap_or(self.settings.default_view)
+            .background
+            .map(|c| egui::ecolor::linear_from_gamma(c.clamp(0.0, 1.0)));
+        let mut video = VideoParams {
+            background: [r, g, b, 1.0],
+            ..VideoParams::default()
+        };
         let mut frame = None;
         let flat_or_none = self
             .playback
@@ -523,10 +541,11 @@ impl App {
         // A chroma-keyed or alpha-packed video shows the room where its
         // background was, whatever its projection and whether or not
         // passthrough is on.
-        let keyed = self.playback.as_ref().is_some_and(|p| {
-            p.shown_settings(&self.settings.default_view).chroma_key
-                || p.format.alpha_pack_scale().is_some()
-        });
+        let keyed = shown.is_some_and(|s| s.chroma_key)
+            || self
+                .playback
+                .as_ref()
+                .is_some_and(|p| p.format.alpha_pack_scale().is_some());
         let passthrough =
             input.passthrough_available && ((self.settings.passthrough && flat_or_none) || keyed);
         if passthrough {
@@ -534,9 +553,8 @@ impl App {
         }
         let anchor_rot = anchor.to_scale_rotation_translation().1;
         let player = self.picture_anchor(anchor);
-        if let Some(p) = &self.playback {
+        if let (Some(p), Some(s)) = (&self.playback, shown) {
             frame = p.player.current_frame();
-            let s = p.shown_settings(&self.settings.default_view);
             video.format = p.format;
             video.screen_pose = place(player, 0.0, s.screen_distance, 0.0, 0.0);
             video.anchor = anchor_rot;

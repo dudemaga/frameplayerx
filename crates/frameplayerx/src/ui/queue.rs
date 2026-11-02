@@ -118,6 +118,18 @@ pub fn page(ui: &mut egui::Ui, v: &mut View) {
         if n > 1
             && widgets::button_sized(
                 ui,
+                Some(icons::SHUFFLE),
+                tr!("sort-shuffle"),
+                Kind::Secondary,
+                44.0,
+            )
+            .clicked()
+        {
+            v.actions.push(Action::QueueShuffle);
+        }
+        if n > 1
+            && widgets::button_sized(
+                ui,
                 Some(icons::TRASH),
                 tr!("common-clear"),
                 Kind::Secondary,

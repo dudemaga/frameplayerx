@@ -21,6 +21,7 @@ impl App {
             Action::StepQueue(dir) => self.step_queue(dir),
             Action::QueueRemove(i) => self.queue.remove(i),
             Action::QueueMove(from, to) => self.queue.move_item(from, to),
+            Action::QueueShuffle => self.queue.shuffle(crate::shuffle::new_seed()),
             Action::QueueClear => self.queue.clear_rest(),
             Action::ShowUpNext => {
                 self.ui.screen = Screen::UpNext;
@@ -115,9 +116,16 @@ impl App {
                 if let Some(p) = &mut self.playback {
                     p.player.select_audio(i);
                     p.picked.audio = Some(i);
+                    p.request.source_audio = p
+                        .source_tracks
+                        .iter()
+                        .find(|t| !t.subtitle && t.index == Some(i))
+                        .map(|t| t.id.clone());
                     p.save_tracks(&self.services.library);
                 }
             }
+            Action::SelectSourceAudio(id) => self.play_source_track(Some(id), None),
+            Action::SelectSourceSubtitles(id) => self.play_source_track(None, Some(id)),
             Action::SelectSubtitles(pick) => {
                 if let crate::subtitles::Pick::File(i) = pick {
                     self.select_subtitle_file(Some(i));
@@ -129,6 +137,22 @@ impl App {
                 }
                 if let Some(p) = &mut self.playback {
                     p.picked.subtitles = crate::subtitles::saved(pick, &p.subtitle_files);
+                    if !p.source_tracks.is_empty() {
+                        let track = p.source_tracks.iter().find(|t| {
+                            t.subtitle
+                                && match pick {
+                                    crate::subtitles::Pick::Stream(i) => t.index == Some(i),
+                                    crate::subtitles::Pick::File(i) => p
+                                        .subtitle_files
+                                        .get(i)
+                                        .is_some_and(|s| Some(&s.location) == t.location.as_ref()),
+                                    crate::subtitles::Pick::Off => false,
+                                }
+                        });
+                        p.request.source_subtitle = track.map(|t| t.id.clone()).or_else(|| {
+                            matches!(pick, crate::subtitles::Pick::Off).then(|| "0".into())
+                        });
+                    }
                     p.save_tracks(&self.services.library);
                 }
             }
@@ -183,16 +207,16 @@ impl App {
             Action::SetSourcePin { source, pin } => self.set_source_pin(&source, pin),
             Action::OpenSource { source, back_to } => self.open_source(source, back_to),
             Action::Browse { source, location } => self.browse(source, location),
-            Action::Jellyfin { source, seq, load } => {
-                self.jellyfin_job(source, seq, load, Duration::ZERO);
+            Action::Catalog { source, seq, load } => {
+                self.catalog_job(source, seq, load, Duration::ZERO);
             }
-            Action::JellyfinMark {
+            Action::CatalogMark {
                 source,
                 id,
                 mark,
                 on,
-            } => self.mark_jellyfin(&source, id, mark, on),
-            Action::JellyfinVersion {
+            } => self.mark_catalog(&source, id, mark, on),
+            Action::CatalogVersion {
                 source,
                 location,
                 version,
@@ -202,7 +226,7 @@ impl App {
                     .opener
                     .source(&source)
                     .as_deref()
-                    .and_then(|s| s.as_media_browser())
+                    .and_then(|s| s.as_catalog())
                 {
                     mb.set_version(&location, version.as_deref());
                 }
@@ -255,7 +279,10 @@ impl App {
             }
             Action::CheckUpdates => self.check_updates(),
             Action::InstallUpdate => self.install_update(),
-            Action::OpenWebPage(address) => self.open_web_page(address),
+            Action::PlexLinkStart => self.plex_link_start(),
+            Action::PlexLinkPoll { generation, pin } => self.plex_link_poll(generation, pin),
+            Action::PlexConnect(config) => self.plex_connect(config),
+            Action::OpenWebPage(address) => self.open_web_page(address.as_str()),
             Action::SendCrashReport => self.send_crash_report(),
             Action::DismissCrashReport => self.ui.crash = None,
             Action::Recenter => self.recenter(),
@@ -474,6 +501,7 @@ impl App {
 /// The library's video for `req`, given a row from its entry when it has
 /// none yet, as opening it does.
 fn media_of(lib: &Library, req: &OpenRequest) -> Option<fp_library::MediaId> {
+    let source_id = req.bound_source_id().ok()?;
     let location = fp_core::volume::stable(&req.location).into_owned();
     if let Ok(Some(r)) = lib.get_by_location(&location) {
         return Some(r.id);
@@ -482,7 +510,7 @@ fn media_of(lib: &Library, req: &OpenRequest) -> Option<fp_library::MediaId> {
         fp_core::Entry::new(req.shown_title(), &location, fp_core::EntryKind::Video)
     });
     e.location = location;
-    lib.upsert_entry(req.source_id.as_deref().unwrap_or(""), &e)
+    lib.upsert_entry(source_id.as_deref().unwrap_or(""), &e)
         .inspect_err(|err| log::warn!("adding {} to the library: {err}", e.location))
         .ok()
         .map(|o| o.id)

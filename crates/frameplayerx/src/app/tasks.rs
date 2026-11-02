@@ -2,6 +2,11 @@
 
 use super::*;
 
+type PlexLink = Option<(
+    fp_sources::plex::auth::PlexCredentials,
+    Vec<fp_sources::plex::auth::PlexResource>,
+)>;
+
 pub(super) enum Job {
     Opened(u64, Box<Result<Opened, String>>),
     Listed {
@@ -20,10 +25,10 @@ pub(super) enum Job {
         result: Result<fp_library::ScanReport, String>,
         told: bool,
     },
-    Jellyfin {
+    Catalog {
         source: String,
         seq: u64,
-        result: Box<Result<ui::jellyfin::Loaded, String>>,
+        result: Box<Result<ui::catalog::Loaded, String>>,
     },
     /// A scene feed's listing; `cached`: the one saved last time, shown
     /// while the server answers.
@@ -63,6 +68,9 @@ pub(super) enum Job {
     QuickConnectInitiated(u64, Result<fp_sources::QuickConnectState, String>),
     /// The answer to a poll with secret `.0`.
     QuickConnectPolled(String, Result<Option<(String, String)>, String>),
+    PlexInitiated(u64, Result<fp_sources::plex::auth::PlexPin, String>),
+    PlexPolled(u64, Box<Result<PlexLink, String>>),
+    PlexConnected(u64, Box<Result<fp_sources::PlexConfig, String>>),
     /// The last run crashed: the report the user may send.
     CrashReport(Box<crate::crash::Report>),
     CrashSent(Result<(), String>),
@@ -230,7 +238,10 @@ impl App {
     /// Opens `address` in Steam's browser, which shows over the app: the
     /// headset has no other browser to hand it to.
     pub(super) fn open_web_page(&mut self, address: &str) {
-        let url = format!("steam://openurl/https://{address}");
+        if !address.starts_with("https://") || address.chars().any(char::is_control) {
+            return;
+        }
+        let url = format!("steam://openurl/{address}");
         self.jobs.spawn("open-web-page", move || {
             let r = std::process::Command::new("steam")
                 .arg(&url)
@@ -342,6 +353,7 @@ impl App {
 
     /// Takes in finished background work and the metadata worker's progress.
     pub(super) fn poll_jobs(&mut self) {
+        self.services.poll_source_updates();
         for job in self.jobs.poll() {
             self.on_job(job);
         }
@@ -366,12 +378,12 @@ impl App {
                 result,
                 told,
             } => self.scanned(&source, result, told),
-            Job::Jellyfin {
+            Job::Catalog {
                 source,
                 seq,
                 result,
             } => {
-                if let Some(j) = self.ui.jellyfin_page(&source) {
+                if let Some(j) = self.ui.catalog_page(&source) {
                     j.loaded(seq, *result);
                 }
             }
@@ -485,6 +497,9 @@ impl App {
             }
             Job::QuickConnectInitiated(seq, r) => self.quick_connect_code(seq, r),
             Job::QuickConnectPolled(secret, r) => self.quick_connect_answer(&secret, r),
+            Job::PlexInitiated(generation, result) => self.plex_initiated(generation, result),
+            Job::PlexPolled(generation, result) => self.plex_polled(generation, *result),
+            Job::PlexConnected(generation, result) => self.plex_connected(generation, *result),
             Job::CrashReport(report) => {
                 self.ui.crash = Some(ui::crash::CrashPrompt::new(*report));
                 self.show_browser = true;
@@ -749,10 +764,45 @@ impl App {
         }
         let req = OpenRequest {
             start_at: Some(p.player.position()),
+            paused: p.player.is_paused(),
             quality,
             transcode,
             ..p.request.clone()
         };
+        self.open_request(req);
+    }
+
+    pub(super) fn play_source_track(
+        &mut self,
+        audio: Option<String>,
+        subtitle: Option<Option<String>>,
+    ) {
+        let Some(p) = &mut self.playback else { return };
+        if p.transcoding.is_none() || p.source_tracks.is_empty() {
+            return;
+        }
+        // Kept for when this video next opens, as a pick in the player is.
+        if let Some(id) = &audio {
+            p.picked.audio = p
+                .source_tracks
+                .iter()
+                .find(|t| !t.subtitle && t.id == *id)
+                .and_then(|t| t.index);
+        }
+        if let Some(subtitle) = &subtitle {
+            p.picked.subtitles =
+                playback::picked_source_subtitles(subtitle.as_deref(), &p.source_tracks);
+        }
+        p.save_tracks(&self.services.library);
+        let mut req = p.request.clone();
+        req.start_at = Some(p.player.position());
+        req.paused = p.player.is_paused();
+        if let Some(audio) = audio {
+            req.source_audio = Some(audio);
+        }
+        if let Some(subtitle) = subtitle {
+            req.source_subtitle = Some(subtitle.unwrap_or_else(|| "0".into()));
+        }
         self.open_request(req);
     }
 

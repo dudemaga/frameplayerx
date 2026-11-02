@@ -2,7 +2,7 @@
 
 use super::page::{self, Card};
 use super::theme::{self, Weight};
-use super::widgets::{self, Kind, Tip};
+use super::widgets::{self, Kind, ListArea, Tip};
 use super::{Action, Back, PinForm, QuickConnect, Screen, SourceForm, SourcePage, View, icons};
 use egui::{Align, Align2, Color32, Layout, RichText, Sense, Vec2};
 use fp_sources::{Credentials, SourceConfig, SourceKind, urlutil};
@@ -15,7 +15,7 @@ pub(super) fn kind_icon(kind: SourceKind) -> &'static str {
         SourceKind::WebDav => icons::CLOUD,
         SourceKind::Dlna => icons::BROADCAST,
         SourceKind::DeoVr | SourceKind::HereSphere => icons::VIRTUAL_REALITY,
-        SourceKind::MediaBrowser => icons::MONITOR_PLAY,
+        SourceKind::MediaBrowser | SourceKind::Plex => icons::MONITOR_PLAY,
         SourceKind::Smb => icons::SHARE_NETWORK,
     }
 }
@@ -37,6 +37,16 @@ pub(super) fn kind_label(kind: SourceKind) -> &'static str {
         SourceKind::HereSphere => tr!("source-kind-heresphere"),
         SourceKind::Smb => tr!("source-kind-smb"),
         SourceKind::MediaBrowser => "Jellyfin/Emby",
+        SourceKind::Plex => "Plex",
+    }
+}
+
+/// Compact names for the source-type chips; descriptions keep the full label.
+fn kind_chip_label(kind: SourceKind) -> &'static str {
+    match kind {
+        SourceKind::DeoVr => "DeoVR",
+        SourceKind::HereSphere => "HereSphere",
+        _ => kind_label(kind),
     }
 }
 
@@ -164,7 +174,7 @@ pub fn sources(ui: &mut egui::Ui, v: &mut View) {
         // Editing adds the PIN rows: taller than the panel.
         egui::ScrollArea::vertical()
             .auto_shrink(false)
-            .show(ui, |ui| add_form(ui, v));
+            .show_list(ui, |ui| add_form(ui, v));
         return;
     }
     if v.state.source.is_some() {
@@ -176,7 +186,7 @@ pub fn sources(ui: &mut egui::Ui, v: &mut View) {
             v.state.source_form = Some(SourceForm::default());
         }
     });
-    egui::ScrollArea::vertical().show(ui, |ui| {
+    egui::ScrollArea::vertical().show_list(ui, |ui| {
         widgets::section_label(ui, tr!("sources-heading"));
         ui.add_space(4.0);
         widgets::card(ui, |ui| {
@@ -302,7 +312,7 @@ fn browse(ui: &mut egui::Ui, v: &mut View) {
         SourcePage::Folders(b) => super::folders::page(ui, v, &sv.name, kind, b),
         SourcePage::Local(l) => super::local::page(ui, v, l),
         SourcePage::Library(l) => super::local::library_page(ui, v, &sv.source, &sv.name, l),
-        SourcePage::Jellyfin(j) => super::jellyfin::page(ui, v, &sv.source, &sv.name, j),
+        SourcePage::Catalog(j) => super::catalog::page(ui, v, &sv.source, &sv.name, j),
         SourcePage::Feed(f) => super::feeds::page(ui, v, &sv.source, &sv.name, f),
     };
     if back {
@@ -522,10 +532,11 @@ fn pin_form(ui: &mut egui::Ui, v: &mut View) {
     }
 }
 
-fn kinds() -> [(SourceKind, &'static str); 8] {
+fn kinds() -> [(SourceKind, &'static str); 9] {
     [
         (SourceKind::Library, tr!("source-kind-library-desc")),
         (SourceKind::MediaBrowser, tr!("source-kind-jellyfin-desc")),
+        (SourceKind::Plex, tr!("source-kind-plex-desc")),
         (SourceKind::DeoVr, tr!("source-kind-deovr-desc")),
         (SourceKind::HereSphere, tr!("source-kind-heresphere-desc")),
         (SourceKind::WebDav, tr!("source-kind-webdav-desc")),
@@ -535,10 +546,11 @@ fn kinds() -> [(SourceKind, &'static str); 8] {
     ]
 }
 
-fn address_hint(kind: SourceKind) -> &'static str {
+pub(super) fn address_hint(kind: SourceKind) -> &'static str {
     match kind {
         SourceKind::Local | SourceKind::Library => "/home/steamos/Videos/Movies",
         SourceKind::MediaBrowser => "http://192.168.1.10:8096",
+        SourceKind::Plex => "http://192.168.1.10:32400",
         SourceKind::DeoVr => "http://192.168.1.10:9999/deovr",
         SourceKind::HereSphere => "http://192.168.1.10:9999/heresphere",
         SourceKind::WebDav => "https://nas.local/dav/videos/",
@@ -548,9 +560,10 @@ fn address_hint(kind: SourceKind) -> &'static str {
     }
 }
 
-fn name_hint(kind: SourceKind) -> &'static str {
+pub(super) fn name_hint(kind: SourceKind) -> &'static str {
     match kind {
         SourceKind::MediaBrowser => tr!("source-name-hint-jellyfin"),
+        SourceKind::Plex => "Plex",
         SourceKind::DeoVr => tr!("source-name-hint-deovr"),
         SourceKind::HereSphere => tr!("source-name-hint-heresphere"),
         SourceKind::WebDav => tr!("source-name-hint-webdav"),
@@ -579,8 +592,10 @@ fn add_form(ui: &mut egui::Ui, v: &mut View) {
             fp_core::playback::now_ms()
         ),
     };
-    let save = if let Some(SourceConfig::Dlna(old)) = &editing {
-        dlna_name_form(ui, f, old)
+    let save = if f.kind == SourceKind::Plex {
+        super::plex::form(ui, f, id, v.actions)
+    } else if let Some(SourceConfig::Dlna(_)) = &editing {
+        dlna_edit_form(ui, f, id)
     } else if f.kind == SourceKind::Dlna {
         dlna_search(ui, v.actions, &dlna_found, searching, &id)
     } else if f.kind == SourceKind::Library {
@@ -630,13 +645,14 @@ fn form_header(ui: &mut egui::Ui, f: &mut SourceForm, editing: Option<&SourceCon
     if editing.is_some() {
         // A source keeps its type; add another for a different one.
         ui.horizontal(|ui| {
-            widgets::chip_icon(ui, Some(kind_icon(f.kind)), kind_label(f.kind), true);
+            widgets::chip_icon(ui, Some(kind_icon(f.kind)), kind_chip_label(f.kind), true);
         });
     } else {
         ui.horizontal_wrapped(|ui| {
             ui.spacing_mut().item_spacing = Vec2::new(8.0, 8.0);
             for (k, _) in kinds() {
-                if widgets::chip_icon(ui, Some(kind_icon(k)), kind_label(k), f.kind == k).clicked()
+                if widgets::chip_icon(ui, Some(kind_icon(k)), kind_chip_label(k), f.kind == k)
+                    .clicked()
                 {
                     f.kind = k;
                 }
@@ -746,36 +762,36 @@ fn library_form(
     save
 }
 
-/// A server found on the network: only its name is the user's.
-fn dlna_name_form(
-    ui: &mut egui::Ui,
-    f: &mut SourceForm,
-    old: &fp_sources::DlnaConfig,
-) -> Option<SourceConfig> {
+/// The name and description address of an existing discovered server.
+fn dlna_edit_form(ui: &mut egui::Ui, f: &mut SourceForm, id: String) -> Option<SourceConfig> {
     let mut save = None;
     widgets::rows(ui, |r| {
-        r.row(tr!("source-name"), Some(old.location.as_str()), |ui| {
-            ui.add(
-                egui::TextEdit::singleline(&mut f.name)
-                    .margin(egui::Margin::symmetric(12, 9))
-                    .font(theme::font(Weight::Regular, 17.0))
-                    .desired_width(460.0),
-            );
+        r.row(
+            tr!("source-name"),
+            Some(tr!("source-name-desc-server")),
+            |ui| text_field(ui, &mut f.name, name_hint(f.kind), false),
+        );
+        r.row(tr!("source-address"), None, |ui| {
+            text_field(ui, &mut f.address, address_hint(f.kind), false);
         });
     });
     ui.add_space(12.0);
-    let name = f.name.trim();
-    if ui
-        .add_enabled_ui(!name.is_empty(), |ui| {
-            widgets::button(ui, Some(icons::CHECK), tr!("common-save"), Kind::Primary)
-        })
-        .inner
-        .clicked()
-    {
-        let mut c = old.clone();
-        c.name = name.to_string();
-        save = Some(SourceConfig::Dlna(c));
-    }
+    ui.horizontal(|ui| match build_config(f, id) {
+        Ok(cfg) => {
+            if widgets::button(ui, Some(icons::CHECK), tr!("common-save"), Kind::Primary).clicked()
+            {
+                save = Some(cfg);
+            }
+        }
+        Err(e) => {
+            ui.add_enabled_ui(false, |ui| {
+                widgets::button(ui, Some(icons::CHECK), tr!("common-save"), Kind::Primary)
+            });
+            if !f.address.is_empty() {
+                ui.label(RichText::new(e).color(theme::WARN));
+            }
+        }
+    });
     save
 }
 
@@ -936,7 +952,7 @@ fn server_form(
     save
 }
 
-fn text_field(ui: &mut egui::Ui, value: &mut String, hint: &str, masked: bool) {
+pub(super) fn text_field(ui: &mut egui::Ui, value: &mut String, hint: &str, masked: bool) {
     ui.add(
         egui::TextEdit::singleline(value)
             .margin(egui::Margin::symmetric(12, 9))
@@ -1131,7 +1147,16 @@ pub fn edit_form(cfg: &SourceConfig) -> SourceForm {
             f.address = c.url.clone();
             f.insecure_tls = c.insecure_tls;
         }
-        SourceConfig::Dlna(_) => {}
+        SourceConfig::Dlna(c) => f.address = c.location.clone(),
+        SourceConfig::Plex(c) => {
+            f.address = c.url.clone();
+            f.insecure_tls = c.insecure_tls;
+            f.plex.manual = c.auth.is_none();
+            f.plex.token = c.access_token.clone();
+            f.plex.connection = super::plex::ConnectionMode::from_config(c);
+            f.plex.selected = Some(c.clone());
+            f.plex.state = super::plex::LinkState::Connected;
+        }
         SourceConfig::DeoVr(c) | SourceConfig::HereSphere(c) => {
             creds(&c.credentials);
             f.address = c.url.clone();
@@ -1184,6 +1209,14 @@ fn keep_hidden(mut new: SourceConfig, old: &SourceConfig) -> SourceConfig {
 
 /// Builds a source configuration from the form, validating the address.
 pub fn build_config(f: &SourceForm, id: String) -> Result<SourceConfig, String> {
+    if f.kind == SourceKind::Plex {
+        return f
+            .plex
+            .selected
+            .clone()
+            .map(SourceConfig::Plex)
+            .ok_or_else(|| tr!("plex-test-required").into());
+    }
     let address = f.address.trim().to_string();
     if address.is_empty() {
         return Err(tr!("source-error-no-address").into());
@@ -1320,13 +1353,107 @@ pub fn build_config(f: &SourceForm, id: String) -> Result<SourceConfig, String> 
                 user_id,
             })
         }
-        SourceKind::Dlna => return Err(tr!("source-error-pick-server").into()),
+        SourceKind::Plex => return Err(tr!("plex-test-required").into()),
+        SourceKind::Dlna => {
+            let Some(SourceConfig::Dlna(old)) = &f.editing else {
+                return Err(tr!("source-error-pick-server").into());
+            };
+            // A device description is a resource URL, not a server root;
+            // keep its trailing slash and query exactly as entered.
+            let location = urlutil::with_http_scheme(&address);
+            if !urlutil::is_http_url(&location) || urlutil::split_credentials(&location).is_err() {
+                return Err(tr!("source-error-http").into());
+            }
+            let mut config = old.clone();
+            config.name = name;
+            if location != old.location {
+                config.location = location;
+                config.control_url = None;
+                config.service_type = None;
+            }
+            SourceConfig::Dlna(config)
+        }
     })
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn editing_dlna_keeps_identity_and_refreshes_control_after_an_address_change() {
+        let saved = fp_sources::DlnaConfig {
+            id: "living-room".into(),
+            name: "Living room".into(),
+            location: "http://old.example:8200/description/".into(),
+            control_url: Some("http://old.example:8200/control/content".into()),
+            service_type: Some("urn:schemas-upnp-org:service:ContentDirectory:1".into()),
+        };
+        let mut form = edit_form(&SourceConfig::Dlna(saved.clone()));
+        assert_eq!(form.address, saved.location);
+        form.name = "  Media server  ".into();
+        let renamed = build_config(&form, "unused-new-id".into()).unwrap();
+        assert_eq!(
+            renamed,
+            SourceConfig::Dlna(fp_sources::DlnaConfig {
+                name: "Media server".into(),
+                ..saved.clone()
+            })
+        );
+
+        form.address = " https://new.example:8443/device.xml?instance=2 ".into();
+        assert_eq!(
+            build_config(&form, "unused-new-id".into()).unwrap(),
+            SourceConfig::Dlna(fp_sources::DlnaConfig {
+                id: saved.id.clone(),
+                name: "Media server".into(),
+                location: "https://new.example:8443/device.xml?instance=2".into(),
+                control_url: None,
+                service_type: None,
+            })
+        );
+        for address in ["", "ftp://new.example/device.xml", "http://"] {
+            form.address = address.into();
+            assert!(build_config(&form, saved.id.clone()).is_err(), "{address}");
+        }
+
+        // Adding still goes through discovery rather than this edit form.
+        form.address = "http://new.example/device.xml".into();
+        form.editing = None;
+        assert!(build_config(&form, "new-server".into()).is_err());
+    }
+
+    #[test]
+    fn editing_a_linked_plex_source_keeps_code_sign_in_without_a_device_key() {
+        let mut cfg = fp_sources::PlexConfig {
+            id: "plex".into(),
+            name: "Plex".into(),
+            url: "https://server.plex.direct:32400".into(),
+            machine_identifier: "machine".into(),
+            access_token: "server-token".into(),
+            connections: Vec::new(),
+            auth: Some(fp_sources::plex::auth::PlexCredentials::manual(
+                "account-token".into(),
+                "linked-client".into(),
+            )),
+            insecure_tls: false,
+            max_height: None,
+            local_only: false,
+            allow_relay: true,
+        };
+        let saved = SourceConfig::Plex(cfg.clone());
+        let form = edit_form(&saved);
+        assert!(!form.plex.manual);
+        assert!(matches!(
+            form.plex.state,
+            super::super::plex::LinkState::Connected
+        ));
+        assert_eq!(form.plex.selected.as_ref(), Some(&cfg));
+        assert_eq!(form.editing.as_ref(), Some(&saved));
+
+        cfg.auth = None;
+        assert!(edit_form(&SourceConfig::Plex(cfg)).plex.manual);
+    }
 
     #[test]
     fn form_validation() {

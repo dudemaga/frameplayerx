@@ -925,9 +925,190 @@ pub fn slider_control(
 
 const OVER_SLIDER: &str = "over-slider";
 
+/// How far (in points, along its direction) a press goes to start scrolling a
+/// list; from there on it is no longer a click. About a degree and a half:
+/// clicks wander far less up and down than sideways, and only 1 of 35 clicks
+/// recorded on the headset went further.
+const LIST_REACH: f32 = 25.0;
+
+/// A let-go slower than this (points a second) is the trigger's tip, not a
+/// flick of the list.
+const FLICK: f32 = 500.0;
+
+/// How fast a flicked list slows (points a second squared), and the speed it
+/// stops at: as egui's.
+const COAST_FRICTION: f32 = 1000.0;
+const COAST_STOP: f32 = 20.0;
+
+const LIST_TOOK_PRESS: &str = "list-took-press";
+
+/// What a list keeps from pass to pass to follow a press.
+#[derive(Clone, Copy)]
+struct ListGrip {
+    id: egui::Id,
+    rect: Rect,
+    /// How far it can scroll.
+    max: f32,
+    /// A press began on it, and not on a slider or a scroll bar.
+    armed: bool,
+    scrolling: bool,
+    /// Points a second, coasting on from a flick.
+    velocity: f32,
+}
+
+/// Follows a press on the list `key` remembers, ahead of the list's pass so
+/// it shows this frame.
+fn drag_list(ui: &Ui, key: egui::Id, axis: usize) {
+    let ctx = ui.ctx();
+    let Some(mut g) = ctx.data(|d| d.get_temp::<ListGrip>(key)) else {
+        return;
+    };
+    let Some(mut state) = egui::scroll_area::State::load(ctx, g.id) else {
+        return;
+    };
+    let (pressed, down, origin, pos, delta, velocity, dt) = ctx.input(|i| {
+        (
+            i.pointer.any_pressed(),
+            i.pointer.any_down(),
+            i.pointer.press_origin(),
+            i.pointer.latest_pos(),
+            i.pointer.delta()[axis],
+            i.pointer.velocity()[axis],
+            i.stable_dt,
+        )
+    });
+    if pressed {
+        g.armed = g.max > 0.0
+            && origin.is_some_and(|o| g.rect.contains(o))
+            && !over_slider(ctx)
+            && ctx.dragged_id().is_none();
+    }
+    let mut by = 0.0;
+    if down {
+        g.velocity = 0.0;
+        if g.armed
+            && !g.scrolling
+            && let (Some(o), Some(p)) = (origin, pos)
+            && (p - o)[axis].abs() > LIST_REACH
+        {
+            g.scrolling = true;
+            ctx.data_mut(|d| d.insert_temp(egui::Id::new(LIST_TOOK_PRESS), true));
+        }
+        if g.scrolling {
+            by = delta;
+        }
+    } else {
+        // Let go off its panel, the pointer's speed means nothing.
+        let on_panel = pos.is_some_and(|p| ctx.screen_rect().contains(p));
+        if g.scrolling && on_panel && velocity.abs() > FLICK {
+            g.velocity = velocity;
+        }
+        g.scrolling = false;
+        g.armed = false;
+        by = g.velocity * dt;
+        let slower = g.velocity.abs() - COAST_FRICTION * dt;
+        g.velocity = if slower < COAST_STOP {
+            0.0
+        } else {
+            slower.copysign(g.velocity)
+        };
+        if g.velocity != 0.0 {
+            ctx.request_repaint();
+        }
+    }
+    if by != 0.0 {
+        state.offset[axis] = (state.offset[axis] - by).clamp(0.0, g.max);
+        state.store(ctx, g.id);
+    }
+    ctx.data_mut(|d| d.insert_temp(key, g));
+}
+
+fn show_list_along<R>(
+    area: egui::ScrollArea,
+    ui: &mut Ui,
+    axis: usize,
+    add: impl FnOnce(&mut Ui) -> R,
+) -> egui::scroll_area::ScrollAreaOutput<R> {
+    let key = ui.next_auto_id().with("list");
+    drag_list(ui, key, axis);
+    let out = area
+        .scroll_source(egui::scroll_area::ScrollSource {
+            scroll_bar: true,
+            drag: false,
+            mouse_wheel: true,
+        })
+        .show(ui, add);
+    let max = (out.content_size[axis] - out.inner_rect.size()[axis]).max(0.0);
+    let (id, rect) = (out.id, out.inner_rect);
+    ui.data_mut(|d| {
+        let last = d.get_temp::<ListGrip>(key);
+        d.insert_temp(
+            key,
+            ListGrip {
+                id,
+                rect,
+                max,
+                armed: last.is_some_and(|g| g.armed),
+                scrolling: last.is_some_and(|g| g.scrolling),
+                velocity: last.map_or(0.0, |g| g.velocity),
+            },
+        );
+    });
+    out
+}
+
+/// Scroll areas that scroll by their bar, the thumbstick and a press past
+/// [`LIST_REACH`] along them, which they follow point for point until it lets
+/// go. egui's own drag scrolling starts with the press, so every click would
+/// nudge the list.
+pub trait ListArea {
+    /// Shows a list that scrolls up and down.
+    fn show_list<R>(
+        self,
+        ui: &mut Ui,
+        add: impl FnOnce(&mut Ui) -> R,
+    ) -> egui::scroll_area::ScrollAreaOutput<R>;
+
+    /// Shows a row that scrolls sideways.
+    fn show_rail<R>(
+        self,
+        ui: &mut Ui,
+        add: impl FnOnce(&mut Ui) -> R,
+    ) -> egui::scroll_area::ScrollAreaOutput<R>;
+}
+
+impl ListArea for egui::ScrollArea {
+    fn show_list<R>(
+        self,
+        ui: &mut Ui,
+        add: impl FnOnce(&mut Ui) -> R,
+    ) -> egui::scroll_area::ScrollAreaOutput<R> {
+        show_list_along(self, ui, 1, add)
+    }
+
+    fn show_rail<R>(
+        self,
+        ui: &mut Ui,
+        add: impl FnOnce(&mut Ui) -> R,
+    ) -> egui::scroll_area::ScrollAreaOutput<R> {
+        show_list_along(self, ui, 0, add)
+    }
+}
+
+/// Whether a list has just taken the press from what it was on, once.
+pub fn list_took_press(ctx: &egui::Context) -> bool {
+    let id = egui::Id::new(LIST_TOOK_PRESS);
+    ctx.data_mut(|d| {
+        let took = d.get_temp::<bool>(id).unwrap_or(false);
+        d.remove::<bool>(id);
+        took
+    })
+}
+
 /// Whether the pointer was on a [`slider`] in the panel's last pass: a
-/// trigger press on it drags from the start, and the thumbstick steps it
-/// (the arrow keys a [`slider_control`] takes) instead of paging.
+/// trigger press on it moves the slider instead of scrolling a list, and the
+/// thumbstick steps it (the arrow keys a [`slider_control`] takes) instead of
+/// paging.
 pub fn over_slider(ctx: &egui::Context) -> bool {
     ctx.data(|d| d.get_temp::<u64>(egui::Id::new(OVER_SLIDER)))
         .is_some_and(|pass| pass + 1 == ctx.cumulative_pass_nr())
@@ -961,16 +1142,22 @@ pub fn slider(
         let pass = ui.ctx().cumulative_pass_nr();
         ui.data_mut(|d| d.insert_temp(egui::Id::new(OVER_SLIDER), pass));
     }
-    // Where a press took the knob, and the value then.
+    // Where a press took the knob, where the pointer was when it last could
+    // still have been a click, and the value then.
     let grab = resp.id.with("grab");
     if resp.is_pointer_button_down_on()
         && let Some(p) = resp.interact_pointer_pos()
     {
-        let origin = ui.input(|i| i.pointer.press_origin()).unwrap_or(p);
+        let (origin, may_click) = ui.input(|i| {
+            (
+                i.pointer.press_origin().unwrap_or(p),
+                i.pointer.could_any_button_be_click(),
+            )
+        });
         let knob = egui::lerp(rail_x.clone(), fraction(*value));
-        let (from, v0) = ui.data_mut(|d| {
-            match d.get_temp::<(Pos2, f32)>(grab) {
-                Some(g) if g.0 == origin => g,
+        let (from_x, v0) = ui.data_mut(|d| {
+            let (from_x, v0) = match d.get_temp::<(Pos2, f32, f32)>(grab) {
+                Some(g) if g.0 == origin => (g.1, g.2),
                 // Pressed on or near the knob, it is taken where it is;
                 // further along the rail it jumps there first.
                 _ => {
@@ -979,12 +1166,15 @@ pub fn slider(
                     } else {
                         lo + ((origin.x - rail_x.start()) / len).clamp(0.0, 1.0) * (hi - lo)
                     };
-                    d.insert_temp(grab, (origin, v0));
-                    (origin, v0)
+                    (origin.x, v0)
                 }
-            }
+            };
+            // A click's wander doesn't move it; a drag goes on from there.
+            let from_x = if may_click { p.x } else { from_x };
+            d.insert_temp(grab, (origin, from_x, v0));
+            (from_x, v0)
         });
-        let v = (v0 + (p.x - from.x) / len * (hi - lo)).clamp(lo, hi);
+        let v = (v0 + (p.x - from_x) / len * (hi - lo)).clamp(lo, hi);
         if (v - *value).abs() > f32::EPSILON {
             *value = v;
             resp.mark_changed();
@@ -1490,5 +1680,15 @@ mod tests {
         assert!((v + 5.0).abs() < 1e-3, "{v}");
         pass(vec![button(quarter, false)], &mut v);
         assert!((v + 5.0).abs() < 1e-3, "a click leaves it there: {v}");
+
+        // A press's wander within the click distance doesn't move it, and a
+        // drag goes on from there without a jump.
+        pass(vec![moved(quarter), button(quarter, true)], &mut v);
+        let near = quarter + Vec2::new(4.0, 0.0);
+        pass(vec![moved(near)], &mut v);
+        assert!((v + 5.0).abs() < 1e-3, "{v}");
+        pass(vec![moved(near + Vec2::new(54.5, 0.0))], &mut v);
+        assert!(v.abs() < 1e-3, "{v}");
+        pass(vec![button(near + Vec2::new(54.5, 0.0), false)], &mut v);
     }
 }

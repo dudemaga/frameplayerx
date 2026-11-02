@@ -24,6 +24,7 @@ const TOUCH_EVERY: Duration = Duration::from_secs(3600);
 
 pub struct ImageCache {
     dir: PathBuf,
+    opener: Option<std::sync::Arc<crate::services::Opener>>,
     http: HttpClient,
     state: Mutex<State>,
     /// Signalled when a download ends, for threads waiting on the same
@@ -89,6 +90,7 @@ impl ImageCache {
     fn with_limit(dir: PathBuf, limit: u64) -> ImageCache {
         ImageCache {
             dir,
+            opener: None,
             http: HttpClient::new(Default::default(), None),
             state: Mutex::new(State {
                 limit,
@@ -96,6 +98,11 @@ impl ImageCache {
             }),
             fetched: Condvar::new(),
         }
+    }
+
+    pub fn with_opener(mut self, opener: std::sync::Arc<crate::services::Opener>) -> Self {
+        self.opener = Some(opener);
+        self
     }
 
     pub fn set_limit(&self, limit_mb: u32) {
@@ -214,6 +221,26 @@ impl ImageCache {
         plain: &str,
         old: Option<&Meta>,
     ) -> Result<Option<Vec<u8>>, String> {
+        let owned = fp_sources::is_source_location(url);
+        let request = if owned {
+            self.opener.as_ref().and_then(|o| o.picture_request(url))
+        } else {
+            None
+        };
+        if owned && request.is_none() {
+            let bytes = self
+                .opener
+                .as_ref()
+                .ok_or_else(|| "source unavailable".to_string())?
+                .fetch(url, MAX_BYTES)?;
+            let meta = Meta {
+                url: plain.to_string(),
+                checked: unix_now(),
+                ..Default::default()
+            };
+            return Ok(self.keep(key, plain, old, bytes, &meta));
+        }
+        let (client, address) = request.unwrap_or_else(|| (self.http.clone(), url.to_string()));
         let mut headers = Vec::new();
         if let Some(m) = old {
             if let Some(e) = &m.etag {
@@ -223,9 +250,8 @@ impl ImageCache {
                 headers.push(("If-Modified-Since", d.as_str()));
             }
         }
-        let reply = self
-            .http
-            .request("GET", url, &headers, None, MAX_BYTES)
+        let reply = client
+            .request("GET", &address, &headers, None, MAX_BYTES + 1)
             .map_err(|e| e.to_string())?;
         if reply.status == 304
             && let Some(m) = old
@@ -240,6 +266,11 @@ impl ImageCache {
             return Ok(None);
         }
         let reply = reply.error_for_status(url).map_err(|e| e.to_string())?;
+        // The client stops reading at its limit: kept, it would pass for whole.
+        if reply.body.len() as u64 > MAX_BYTES {
+            let mb = MAX_BYTES >> 20;
+            return Err(tr!("error-too-large", mb = mb));
+        }
         let meta = Meta {
             url: plain.to_string(),
             etag: reply.header("etag").map(str::to_string),
@@ -249,11 +280,32 @@ impl ImageCache {
                 .header("cache-control")
                 .is_some_and(|c| c.to_ascii_lowercase().contains("immutable")),
         };
+        Ok(self.keep(key, plain, old, reply.body, &meta))
+    }
+
+    /// Stores a picture just downloaded: `None` when a check found the one
+    /// cached unchanged, as a server without validators can only show by
+    /// sending it, so that it isn't decoded and drawn again.
+    fn keep(
+        &self,
+        key: &str,
+        plain: &str,
+        old: Option<&Meta>,
+        body: Vec<u8>,
+        meta: &Meta,
+    ) -> Option<Vec<u8>> {
+        let unchanged =
+            old.is_some() && std::fs::read(self.path(key, "img")).is_ok_and(|held| held == body);
         // Shown all the same when the folder can't take it.
-        if let Err(e) = self.store(key, &reply.body, &meta) {
+        let stored = if unchanged {
+            self.write_meta(key, meta)
+        } else {
+            self.store(key, &body, meta)
+        };
+        if let Err(e) = stored {
             log::debug!("image cache {plain}: {e}");
         }
-        Ok(Some(reply.body))
+        (!unchanged).then_some(body)
     }
 
     fn write_meta(&self, key: &str, meta: &Meta) -> std::io::Result<()> {
@@ -397,6 +449,7 @@ mod tests {
         let hits = Arc::new(AtomicUsize::new(0));
         let changed = Arc::new(std::sync::atomic::AtomicBool::new(false));
         let (h, c) = (hits.clone(), changed.clone());
+        let huge = vec![0u8; MAX_BYTES as usize + 1];
         std::thread::spawn(move || {
             for stream in listener.incoming().flatten() {
                 h.fetch_add(1, Ordering::SeqCst);
@@ -414,7 +467,9 @@ mod tests {
                     etag_matches |= l.starts_with("if-none-match:") && l.contains("\"v1\"");
                 }
                 let changed = c.load(Ordering::SeqCst);
-                let (status, etag, body): (&str, &str, &[u8]) = if etag_matches && !changed {
+                let (status, etag, body): (&str, &str, &[u8]) = if path == "/huge" {
+                    ("200 OK", "\"v1\"", &huge)
+                } else if etag_matches && !changed {
                     ("304 Not Modified", "\"v1\"", b"")
                 } else if changed && path == "/a" {
                     ("200 OK", "\"v2\"", b"AAAAANEWER")
@@ -455,6 +510,153 @@ mod tests {
         let mut m = cache.read_meta(&k).unwrap();
         m.checked -= RECHECK.as_secs() + 60;
         cache.write_meta(&k, &m).unwrap();
+    }
+
+    #[test]
+    fn persistent_artwork_uses_its_owning_source_and_keeps_a_stable_cache_key() {
+        let server = server();
+        let opener = Arc::new(crate::services::Opener::new());
+        assert!(
+            opener
+                .set_sources(&[fp_sources::SourceConfig::Http(fp_sources::HttpConfig {
+                    id: "pictures".into(),
+                    name: "Pictures".into(),
+                    url: server.base.clone(),
+                    credentials: None,
+                    insecure_tls: false,
+                })])
+                .is_empty()
+        );
+        let dir = temp_dir("owned");
+        let cache = ImageCache::new(dir.clone(), 500).with_opener(opener);
+        let location = fp_sources::location::encode("pictures", "http", "a");
+        assert_eq!(cache.get(&location).unwrap().0, b"0123456789");
+        let hits = server.hits.load(Ordering::SeqCst);
+        assert_eq!(cache.get(&location).unwrap().0, b"0123456789");
+        assert_eq!(server.hits.load(Ordering::SeqCst), hits);
+        assert!(
+            cache
+                .read_meta(&key(&location).0)
+                .unwrap()
+                .url
+                .starts_with("source://")
+        );
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    fn picture_source(s: &Server) -> Arc<crate::services::Opener> {
+        let opener = Arc::new(crate::services::Opener::new());
+        assert!(
+            opener
+                .set_sources(&[fp_sources::SourceConfig::Http(fp_sources::HttpConfig {
+                    id: "pictures".into(),
+                    name: "Pictures".into(),
+                    url: s.base.clone(),
+                    credentials: None,
+                    insecure_tls: false,
+                })])
+                .is_empty()
+        );
+        opener
+    }
+
+    #[test]
+    fn a_sources_picture_is_checked_with_its_server_not_downloaded_again() {
+        let s = server();
+        let dir = temp_dir("source-checked");
+        let cache = ImageCache::new(dir.clone(), 500).with_opener(picture_source(&s));
+        let a = fp_sources::location::encode("pictures", "http", "a");
+        assert_eq!(cache.get(&a).unwrap(), (b"0123456789".to_vec(), false));
+        let k = key(&a).0;
+        assert_eq!(cache.read_meta(&k).unwrap().etag.as_deref(), Some("\"v1\""));
+
+        age(&cache, &a);
+        assert!(cache.get(&a).unwrap().1);
+        assert_eq!(
+            cache.refresh(&a).unwrap(),
+            None,
+            "the server answered 304 to its ETag"
+        );
+        assert!(!cache.get(&a).unwrap().1, "checked just now");
+
+        age(&cache, &a);
+        s.changed.store(true, Ordering::SeqCst);
+        assert_eq!(cache.refresh(&a).unwrap(), Some(b"AAAAANEWER".to_vec()));
+        assert_eq!(cache.get(&a).unwrap().0, b"AAAAANEWER");
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn a_picture_too_large_is_refused_and_not_kept_cut_off() {
+        let s = server();
+        let dir = temp_dir("too-large");
+        let cache = ImageCache::new(dir.clone(), 500).with_opener(picture_source(&s));
+        for url in [
+            format!("{}/huge", s.base),
+            fp_sources::location::encode("pictures", "http", "huge"),
+        ] {
+            assert!(cache.get(&url).is_err(), "{url}");
+            assert!(cache.cached_file(&url).is_none(), "{url}");
+        }
+        assert!(!dir.exists(), "nothing was stored");
+    }
+
+    #[test]
+    fn a_sources_immutable_picture_is_never_checked_again() {
+        let s = server();
+        let dir = temp_dir("source-immutable");
+        let cache = ImageCache::new(dir.clone(), 500).with_opener(picture_source(&s));
+        let forever = fp_sources::location::encode("pictures", "http", "forever");
+        cache.get(&forever).unwrap();
+        assert!(cache.read_meta(&key(&forever).0).unwrap().immutable);
+        age(&cache, &forever);
+        let hits = s.hits.load(Ordering::SeqCst);
+        assert!(!cache.get(&forever).unwrap().1, "not due, however old");
+        assert_eq!(cache.refresh(&forever).unwrap(), None);
+        assert_eq!(s.hits.load(Ordering::SeqCst), hits);
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn a_check_that_finds_the_same_picture_does_not_draw_it_again() {
+        // A source not over HTTP can only send the picture again.
+        struct Files(PathBuf);
+        impl fp_sources::Source for Files {
+            fn id(&self) -> &str {
+                "files"
+            }
+            fn name(&self) -> &str {
+                "Files"
+            }
+            fn kind(&self) -> fp_sources::SourceKind {
+                fp_sources::SourceKind::Smb
+            }
+            fn describe(&self) -> String {
+                "files".into()
+            }
+            fn list(&self, _: Option<&str>) -> fp_sources::Result<Vec<fp_core::source::Entry>> {
+                Ok(Vec::new())
+            }
+            fn open(&self, _: &str) -> fp_sources::Result<Arc<dyn fp_core::ByteSource>> {
+                Ok(Arc::new(fp_core::source::FileSource::open(&self.0)?))
+            }
+        }
+        let dir = temp_dir("same-picture");
+        std::fs::create_dir_all(&dir).unwrap();
+        let file = dir.join("picture");
+        std::fs::write(&file, b"same").unwrap();
+        let opener = Arc::new(crate::services::Opener::new());
+        opener.insert_source(Arc::new(Files(file.clone())));
+        let cache = ImageCache::new(dir.join("cache"), 500).with_opener(opener);
+        let location = fp_sources::location::encode("files", "smb", "picture");
+        assert_eq!(cache.get(&location).unwrap().0, b"same");
+        age(&cache, &location);
+        assert_eq!(cache.refresh(&location).unwrap(), None);
+        assert!(!cache.get(&location).unwrap().1, "checked just now");
+        age(&cache, &location);
+        std::fs::write(&file, b"new!").unwrap();
+        assert_eq!(cache.refresh(&location).unwrap(), Some(b"new!".to_vec()));
+        std::fs::remove_dir_all(dir).unwrap();
     }
 
     #[test]

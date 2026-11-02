@@ -382,6 +382,14 @@ fn flat_screen_sits_in_front_and_background_surrounds_it() {
     // No video: background everywhere.
     let [l, _] = render(&mut r, &mut e, None, &p, &[]);
     assert_eq!(centre(&l), [0, 0, 0]);
+
+    // A chosen background surrounds the screen and fills the scene on its own.
+    p.background = [0.0, 0.0, 1.0, 1.0];
+    let [l, _] = render(&mut r, &mut e, Some(&green), &p, &[]);
+    assert!(centre(&l)[1] > 200);
+    assert!(is_blue(px(&l, 2, 2)), "corner {:?}", px(&l, 2, 2));
+    let [l, _] = render(&mut r, &mut e, None, &p, &[]);
+    assert!(is_blue(centre(&l)), "no video {:?}", centre(&l));
     e.destroy(&r);
 }
 

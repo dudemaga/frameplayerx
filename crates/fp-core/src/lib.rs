@@ -16,6 +16,7 @@ pub mod dirs;
 pub mod format;
 pub mod language;
 pub mod playback;
+pub mod shuffle;
 pub mod source;
 pub mod sync;
 pub mod view;

@@ -9,9 +9,9 @@
 //!   (`BrowseDirectChildren`, paged until `TotalMatches`) and maps DIDL-Lite
 //!   containers to folders and items to files.
 //!
-//! Folder locations are `dlna:<percent-encoded object id>`; file locations
-//! are the item's `res` URL, read with the HTTP
-//! [`crate::http::HttpFile`].
+//! Source-owned locations retain the server's object ID. Opening an item
+//! fetches its current resource URL with `BrowseMetadata`, so a server
+//! address change does not invalidate saved media or sidecar references.
 
 use crate::config::{DlnaConfig, SourceKind};
 use crate::error::{Error, Result};
@@ -323,13 +323,31 @@ pub struct BrowsePage {
     pub total: u32,
     /// Object id of the parent container for each file location.
     pub parents: Vec<(String, String)>,
+    /// `(location, object id)` for entries that name one.
+    pub objects: Vec<(String, String)>,
 }
 
 /// SOAP body of a `Browse` request.
 pub fn browse_request(service_type: &str, object_id: &str, start: u32, count: u32) -> String {
+    browse_request_for(
+        service_type,
+        object_id,
+        "BrowseDirectChildren",
+        start,
+        count,
+    )
+}
+
+fn browse_request_for(
+    service_type: &str,
+    object_id: &str,
+    flag: &str,
+    start: u32,
+    count: u32,
+) -> String {
     format!(
         r#"<?xml version="1.0" encoding="utf-8"?>
-<s:Envelope xmlns:s="http://schemas.xmlsoap.org/soap/envelope/" s:encodingStyle="http://schemas.xmlsoap.org/soap/encoding/"><s:Body><u:Browse xmlns:u="{}"><ObjectID>{}</ObjectID><BrowseFlag>BrowseDirectChildren</BrowseFlag><Filter>*</Filter><StartingIndex>{start}</StartingIndex><RequestedCount>{count}</RequestedCount><SortCriteria></SortCriteria></u:Browse></s:Body></s:Envelope>"#,
+<s:Envelope xmlns:s="http://schemas.xmlsoap.org/soap/envelope/" s:encodingStyle="http://schemas.xmlsoap.org/soap/encoding/"><s:Body><u:Browse xmlns:u="{}"><ObjectID>{}</ObjectID><BrowseFlag>{flag}</BrowseFlag><Filter>*</Filter><StartingIndex>{start}</StartingIndex><RequestedCount>{count}</RequestedCount><SortCriteria></SortCriteria></u:Browse></s:Body></s:Envelope>"#,
         xml::escape(service_type),
         xml::escape(object_id)
     )
@@ -465,6 +483,8 @@ pub struct Didl {
     pub entries: Vec<Entry>,
     /// `(file location, parent container id)` for items that name one.
     pub parents: Vec<(String, String)>,
+    /// `(location, object id)` for entries that name one.
+    pub objects: Vec<(String, String)>,
 }
 
 /// Parses a DIDL-Lite document. Relative URLs resolve against `base` (the
@@ -476,6 +496,7 @@ pub fn parse_didl(didl: &str, base: &str) -> Result<Didl> {
         .ok_or_else(|| Error::parse("DIDL-Lite", "no DIDL-Lite element"))?;
     let mut entries = Vec::new();
     let mut parents = Vec::new();
+    let mut objects = Vec::new();
     for el in &root.children {
         if el.name.eq_ignore_ascii_case("container") {
             let Some(id) = el.attr("id") else { continue };
@@ -484,17 +505,25 @@ pub fn parse_didl(didl: &str, base: &str) -> Result<Didl> {
             e.thumbnail_url = el
                 .child_text("albumArtURI")
                 .and_then(|u| resolve(base, u).ok());
+            objects.push((e.location.clone(), id.to_string()));
             entries.push(e);
         } else if el.name.eq_ignore_ascii_case("item")
             && let Some((e, parent)) = item_entry(el, base)
         {
+            if let Some(id) = el.attr("id") {
+                objects.push((e.location.clone(), id.to_string()));
+            }
             if let Some(p) = parent {
                 parents.push((e.location.clone(), p));
             }
             entries.push(e);
         }
     }
-    Ok(Didl { entries, parents })
+    Ok(Didl {
+        entries,
+        parents,
+        objects,
+    })
 }
 
 /// Parses a SOAP `BrowseResponse`, or turns a SOAP fault into an error.
@@ -521,7 +550,11 @@ pub fn parse_browse_response(xml_text: &str, base: &str) -> Result<BrowsePage> {
             .and_then(|v| v.parse::<u32>().ok())
             .unwrap_or(0)
     };
-    let Didl { entries, parents } = match resp.child_text("Result") {
+    let Didl {
+        entries,
+        parents,
+        objects,
+    } = match resp.child_text("Result") {
         Some(didl) => parse_didl(didl, base)?,
         None => Didl::default(),
     };
@@ -534,6 +567,7 @@ pub fn parse_browse_response(xml_text: &str, base: &str) -> Result<BrowsePage> {
         returned,
         total: num("TotalMatches"),
         parents,
+        objects,
     })
 }
 
@@ -552,6 +586,9 @@ pub struct DlnaSource {
     control: Mutex<Option<Control>>,
     /// Parent container of each file listed so far, for sidecars.
     parents: Mutex<HashMap<String, String>>,
+    /// Legacy resource URLs learned from server metadata, without I/O in
+    /// canonical_location. Unknown old URLs remain readable as before.
+    aliases: Mutex<HashMap<String, String>>,
 }
 
 impl std::fmt::Debug for DlnaSource {
@@ -587,6 +624,7 @@ impl DlnaSource {
             client: HttpClient::new(HttpOptions::default(), None),
             control: Mutex::new(control),
             parents: Mutex::new(HashMap::new()),
+            aliases: Mutex::new(HashMap::new()),
         })
     }
 
@@ -614,8 +652,18 @@ impl DlnaSource {
 
     /// Fetches one page of a container.
     pub fn browse(&self, object_id: &str, start: u32, count: u32) -> Result<BrowsePage> {
+        self.browse_with_flag(object_id, "BrowseDirectChildren", start, count)
+    }
+
+    fn browse_with_flag(
+        &self,
+        object_id: &str,
+        flag: &str,
+        start: u32,
+        count: u32,
+    ) -> Result<BrowsePage> {
         let control = self.control()?;
-        let body = browse_request(&control.service_type, object_id, start, count);
+        let body = browse_request_for(&control.service_type, object_id, flag, start, count);
         let action = format!("\"{}#Browse\"", control.service_type);
         let reply = self.client.request_no_status_retry(
             "POST",
@@ -648,7 +696,8 @@ impl DlnaSource {
         let mut out = Vec::new();
         let mut start = 0u32;
         for _ in 0..MAX_PAGES {
-            let page = self.browse(object_id, start, PAGE_SIZE)?;
+            let mut page = self.browse(object_id, start, PAGE_SIZE)?;
+            self.remember_page(&mut page, Some(object_id));
             {
                 let mut parents = lock(&self.parents);
                 for (loc, parent) in page.parents {
@@ -676,6 +725,148 @@ impl DlnaSource {
         }
         Ok(out)
     }
+
+    fn item_location(&self, object_id: &str) -> String {
+        crate::location::encode(&self.id, "dlna", &format!("item:{object_id}"))
+    }
+
+    fn file_location(&self, object_id: &str, name: &str) -> String {
+        let key = serde_json::to_string(&(object_id, name)).expect("string tuple serializes");
+        crate::location::encode(&self.id, "dlna-file", &key)
+    }
+
+    fn folder_location(&self, object_id: &str) -> String {
+        crate::location::encode(&self.id, "dlna", &format!("folder:{object_id}"))
+    }
+
+    fn asset_location(&self, object_id: &str, role: &str, index: usize, name: &str) -> String {
+        let key = serde_json::to_string(&(object_id, role, index, name))
+            .expect("string tuple serializes");
+        crate::location::encode(&self.id, "dlna-asset", &key)
+    }
+
+    fn owned_reference(&self, location: &str) -> Result<crate::location::Location> {
+        crate::location::decode(location)
+            .filter(|r| {
+                r.source_id == self.id
+                    && matches!(r.kind.as_str(), "dlna" | "dlna-file" | "dlna-asset")
+            })
+            .ok_or_else(|| Error::invalid(location, "not a location owned by this DLNA source"))
+    }
+
+    fn remember_page(&self, page: &mut BrowsePage, parent: Option<&str>) {
+        let object_ids: HashMap<_, _> = page.objects.iter().cloned().collect();
+        let mut aliases = lock(&self.aliases);
+        let mut parents = lock(&self.parents);
+        for entry in &mut page.entries {
+            if entry.kind == EntryKind::Directory {
+                if let Ok(id) = object_id_of(&entry.location) {
+                    entry.location = self.folder_location(&id);
+                    if let Some(url) = &mut entry.thumbnail_url {
+                        let stable = self.asset_location(&id, "thumbnail", 0, &last_segment(url));
+                        aliases.insert(url.clone(), stable.clone());
+                        *url = stable;
+                    }
+                }
+                continue;
+            }
+            let Some(id) = object_ids.get(&entry.location) else {
+                continue;
+            };
+            let raw = entry.location.clone();
+            entry.location = if entry.kind == EntryKind::Other {
+                self.file_location(id, &entry.name)
+            } else {
+                self.item_location(id)
+            };
+            aliases.insert(raw.clone(), entry.location.clone());
+            let parent = page
+                .parents
+                .iter()
+                .find_map(|(url, id)| (url == &raw).then_some(id.as_str()))
+                .or(parent);
+            if let Some(parent) = parent {
+                parents.insert(entry.location.clone(), parent.to_string());
+            }
+            if let Some(url) = &mut entry.thumbnail_url {
+                let stable = self.asset_location(id, "thumbnail", 0, &last_segment(url));
+                aliases.insert(url.clone(), stable.clone());
+                *url = stable;
+            }
+            for (index, subtitle) in entry.subtitles.iter_mut().enumerate() {
+                let stable = self.asset_location(id, "subtitle", index, &subtitle.name);
+                aliases.insert(subtitle.location.clone(), stable.clone());
+                subtitle.location = stable;
+            }
+            for (index, script) in entry.scripts.iter_mut().enumerate() {
+                let stable = self.asset_location(id, "script", index, &last_segment(script));
+                aliases.insert(script.clone(), stable.clone());
+                *script = stable;
+            }
+        }
+    }
+
+    /// Returns raw metadata for an exact server object ID, before replacing
+    /// its current transport URLs with durable references.
+    fn metadata(&self, object_id: &str) -> Result<(Entry, BrowsePage)> {
+        let page = self.browse_with_flag(object_id, "BrowseMetadata", 0, 0)?;
+        let entry = page
+            .objects
+            .iter()
+            .find(|(_, id)| id == object_id)
+            .and_then(|(url, _)| page.entries.iter().find(|e| &e.location == url))
+            .cloned()
+            .ok_or_else(|| Error::NotFound(format!("DLNA object {object_id}")))?;
+        Ok((entry, page))
+    }
+
+    fn resource_url(&self, location: &str) -> Result<String> {
+        if !crate::is_source_location(location) {
+            if location.starts_with("dlna:") {
+                return Err(Error::invalid(location, "a DLNA folder cannot be opened"));
+            }
+            return Ok(location.to_string());
+        }
+        let reference = self.owned_reference(location)?;
+        let (id, asset) = if reference.kind == "dlna" {
+            let id = reference
+                .key
+                .strip_prefix("item:")
+                .filter(|id| !id.is_empty())
+                .ok_or_else(|| Error::invalid(location, "a DLNA folder cannot be opened"))?;
+            (id.to_string(), None)
+        } else if reference.kind == "dlna-file" {
+            let (id, _name): (String, String) = serde_json::from_str(&reference.key)
+                .map_err(|_| Error::invalid(location, "invalid DLNA file"))?;
+            if id.is_empty() {
+                return Err(Error::invalid(location, "invalid DLNA file"));
+            }
+            (id, None)
+        } else {
+            // The filename is a playback hint; ID and role select the resource.
+            let (id, role, index, _name): (String, String, usize, String) =
+                serde_json::from_str(&reference.key)
+                    .map_err(|_| Error::invalid(location, "invalid DLNA asset"))?;
+            if id.is_empty()
+                || !matches!(role.as_str(), "thumbnail" | "subtitle" | "script")
+                || (role == "thumbnail" && index != 0)
+            {
+                return Err(Error::invalid(location, "invalid DLNA asset"));
+            }
+            (id, Some((role, index)))
+        };
+        let (entry, mut page) = self.metadata(&id)?;
+        let url = match asset.as_ref().map(|(role, index)| (role.as_str(), *index)) {
+            None => Some(entry.location),
+            Some(("thumbnail", 0)) => entry.thumbnail_url,
+            Some(("subtitle", index)) => entry.subtitles.get(index).map(|s| s.location.clone()),
+            Some(("script", index)) => entry.scripts.get(index).cloned(),
+            _ => None,
+        }
+        .ok_or_else(|| Error::NotFound("DLNA item asset".into()))?;
+        self.remember_page(&mut page, None);
+        Ok(url)
+    }
 }
 
 impl Source for DlnaSource {
@@ -695,9 +886,36 @@ impl Source for DlnaSource {
         format!("DLNA server {}", redact(&self.location))
     }
 
+    fn canonical_location(&self, location: &str) -> Option<String> {
+        if crate::is_source_location(location) {
+            let reference = self.owned_reference(location).ok()?;
+            return Some(crate::location::encode(
+                &self.id,
+                &reference.kind,
+                &reference.key,
+            ));
+        }
+        if let Ok(id) = object_id_of(location) {
+            return Some(self.folder_location(&id));
+        }
+        lock(&self.aliases).get(location).cloned()
+    }
+
     fn list(&self, location: Option<&str>) -> Result<Vec<Entry>> {
         let id = match location {
             None => ROOT_ID.to_string(),
+            Some(l) if crate::is_source_location(l) => {
+                let reference = self.owned_reference(l)?;
+                if reference.kind != "dlna" {
+                    return Err(Error::invalid(l, "not a DLNA folder"));
+                }
+                reference
+                    .key
+                    .strip_prefix("folder:")
+                    .filter(|id| !id.is_empty())
+                    .ok_or_else(|| Error::invalid(l, "not a DLNA folder"))?
+                    .to_string()
+            }
             Some(l) => object_id_of(l)?,
         };
         let mut entries = self.browse_all(&id)?;
@@ -706,16 +924,54 @@ impl Source for DlnaSource {
     }
 
     fn open(&self, location: &str) -> Result<Arc<dyn ByteSource>> {
-        if location.starts_with("dlna:") {
-            return Err(Error::invalid(location, "a DLNA folder cannot be opened"));
-        }
-        Ok(Arc::new(self.client.open(location)?))
+        Ok(Arc::new(self.client.open(&self.resource_url(location)?)?))
+    }
+
+    fn picture_request(&self, location: &str) -> Option<(HttpClient, String)> {
+        Some((self.client.clone(), self.resource_url(location).ok()?))
     }
 
     fn parent(&self, location: &str) -> Option<String> {
+        let canonical = self.canonical_location(location)?;
         lock(&self.parents)
-            .get(location)
-            .map(|id| container_location(id))
+            .get(&canonical)
+            .map(|id| self.folder_location(id))
+    }
+
+    fn details(&self, entry: &Entry) -> Result<Entry> {
+        if crate::is_source_location(&entry.location) {
+            self.owned_reference(&entry.location)?;
+        }
+        let Some(location) = self.canonical_location(&entry.location) else {
+            return Ok(entry.clone());
+        };
+        let reference = self.owned_reference(&location)?;
+        let id = match reference.kind.as_str() {
+            "dlna" => match reference.key.strip_prefix("item:") {
+                Some(id) if !id.is_empty() => id.to_string(),
+                _ => return Ok(entry.clone()),
+            },
+            "dlna-file" => {
+                let (id, _name): (String, String) = serde_json::from_str(&reference.key)
+                    .map_err(|_| Error::invalid(&location, "invalid DLNA file"))?;
+                if id.is_empty() {
+                    return Err(Error::invalid(&location, "invalid DLNA file"));
+                }
+                id
+            }
+            _ => return Ok(entry.clone()),
+        };
+        let (raw, mut page) = self.metadata(&id)?;
+        let refreshed_location = if raw.kind == EntryKind::Other {
+            self.file_location(&id, &raw.name)
+        } else {
+            self.item_location(&id)
+        };
+        self.remember_page(&mut page, None);
+        page.entries
+            .into_iter()
+            .find(|e| e.location == refreshed_location)
+            .ok_or_else(|| Error::NotFound(format!("DLNA object {id}")))
     }
 
     /// Captions the item carries, plus files in the same container whose
@@ -843,6 +1099,7 @@ mod tests {
         let Didl {
             entries: v,
             parents,
+            ..
         } = parse_didl(DIDL, "http://192.168.1.10:8200/ctl/ContentDir").unwrap();
         assert_eq!(v.len(), 3, "{v:?}");
         assert_eq!(v[0].kind, EntryKind::Directory);

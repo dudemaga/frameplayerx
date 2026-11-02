@@ -28,12 +28,9 @@ pub enum Error {
     /// The server rejected the credentials (HTTP 401/403, SMB logon failure).
     #[error("authentication failed for {0}")]
     Auth(String),
-    /// The server no longer takes the saved sign-in (it revoked a Quick
-    /// Connect token: the password changed, or the device was signed out)
-    /// and there is no password to sign in again with.
-    #[error(
-        "{0} has signed this headset out: edit the source under Sources and pair it again with Quick Connect"
-    )]
+    /// The server no longer accepts the saved sign-in and it cannot be
+    /// renewed without signing in again.
+    #[error("{0} has signed this headset out: edit the source under Sources and sign in again")]
     SignedOut(String),
     #[error("not found: {0}")]
     NotFound(String),

@@ -21,6 +21,7 @@
 mod error;
 mod image;
 mod library;
+mod locations;
 mod playlist;
 mod query;
 mod record;

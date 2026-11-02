@@ -6,11 +6,13 @@
 //! that resolves to a direct child of the listed folder is an entry (a
 //! trailing `/` marks a folder), and the text following the link on the
 //! same line or table row is searched for a date and a size.
-//! Locations are absolute `http(s)://` URLs without credentials.
+//! Listed locations are source-owned relative identities; HTTP addresses
+//! are resolved from the current configuration when opened.
 
 use crate::config::{Credentials, HttpConfig, SourceKind};
 use crate::error::{Error, Result};
 use crate::http::{HttpClient, HttpOptions};
+use crate::location;
 use crate::timeutil::parse_listing_date;
 use crate::urlutil::{
     html_unescape, is_http_url, parent_url, percent_decode, redact, resolve, split_credentials,
@@ -74,6 +76,17 @@ impl HttpDirSource {
     pub fn root(&self) -> &str {
         &self.root
     }
+
+    fn current_url(&self, value: &str) -> Result<String> {
+        if crate::is_source_location(value) {
+            let value = location::decode(value)
+                .filter(|l| l.source_id == self.id && l.kind == "http")
+                .ok_or_else(|| Error::invalid(value, "not owned by this HTTP source"))?;
+            return location::resolve_url(&self.root, &value.key)
+                .ok_or_else(|| Error::invalid("HTTP source resource", "invalid relative path"));
+        }
+        Ok(value.to_string())
+    }
 }
 
 impl Source for HttpDirSource {
@@ -93,20 +106,40 @@ impl Source for HttpDirSource {
         format!("HTTP folder {}", redact(&self.root))
     }
 
+    fn canonical_location(&self, value: &str) -> Option<String> {
+        let url = self.current_url(value).ok()?;
+        location::relative_url(&self.root, &url).map(|key| location::encode(&self.id, "http", &key))
+    }
+
     fn list(&self, location: Option<&str>) -> Result<Vec<Entry>> {
-        let url = with_trailing_slash(location.unwrap_or(&self.root));
+        let url = with_trailing_slash(&self.current_url(location.unwrap_or(&self.root))?);
         let html = self.client.get_text(&url)?;
         let mut entries = parse_autoindex(&html, &url)?;
+        for entry in &mut entries {
+            if let Some(location) = self.canonical_location(&entry.location) {
+                entry.location = location;
+            }
+        }
         sort_entries(&mut entries);
         Ok(entries)
     }
 
     fn open(&self, location: &str) -> Result<Arc<dyn ByteSource>> {
-        Ok(Arc::new(self.client.open(location)?))
+        Ok(Arc::new(self.client.open(&self.current_url(location)?)?))
+    }
+
+    fn picture_request(&self, location: &str) -> Option<(HttpClient, String)> {
+        Some((self.client.clone(), self.current_url(location).ok()?))
     }
 
     fn parent(&self, location: &str) -> Option<String> {
-        parent_url(location)
+        self.canonical_location(&parent_url(&self.current_url(location).ok()?)?)
+    }
+
+    fn sidecars(&self, video: &Entry) -> Result<crate::Sidecars> {
+        let mut video = video.clone();
+        video.location = self.current_url(&video.location)?;
+        crate::sidecars_from_folder(self, &video)
     }
 }
 

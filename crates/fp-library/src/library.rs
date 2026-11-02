@@ -123,7 +123,7 @@ pub fn default_db_path() -> PathBuf {
 /// upsert cannot overwrite it.
 #[derive(Clone, Debug, PartialEq)]
 pub struct MediaUpsert {
-    /// Path or URL; the unique key.
+    /// Stable media location (a path, source-owned URI or legacy URL); the unique key.
     pub location: String,
     /// Source that produced the entry.
     pub source_id: String,
@@ -174,8 +174,8 @@ impl MediaUpsert {
         let location = location.into();
         let name = file_name_of(&location);
         MediaUpsert {
-            title: stem_of(name).to_string(),
-            detected: detect_name(name),
+            title: stem_of(&name).to_string(),
+            detected: detect_name(&name),
             location,
             source_id: source_id.into(),
             size: None,
@@ -227,10 +227,12 @@ impl MediaUpsert {
         u.duration = entry.duration.filter(|d| d.is_finite() && *d > 0.0);
         // A server's picture only: a browse entry can carry the library's
         // own thumbnail file.
-        u.thumbnail_url = entry
-            .thumbnail_url
-            .clone()
-            .filter(|t| t.starts_with("http://") || t.starts_with("https://"));
+        u.thumbnail_url = entry.thumbnail_url.clone().filter(|t| {
+            t.starts_with("http://")
+                || t.starts_with("https://")
+                || t.starts_with("source://")
+                || t.starts_with("plex://")
+        });
         u.description = entry.description.clone();
         u.tags = (!entry.tags.is_empty()).then(|| entry.tags.clone());
         u.scripts = entry.scripts.clone();
@@ -1429,14 +1431,20 @@ impl Library {
         })
     }
 
-    /// Records a probe failure so the row is not retried endlessly.
-    pub(crate) fn store_probe_error(&self, id: MediaId, error: &str) -> Result<()> {
+    /// Records a probe failure unless its file or location changed meanwhile.
+    pub(crate) fn store_probe_error(&self, probed: &MediaRecord, error: &str) -> Result<bool> {
         self.with(|c| {
-            c.execute(
-                "UPDATE media SET probe_error = ?2 WHERE id = ?1",
-                params![id.0, error],
-            )?;
-            Ok(())
+            Ok(c.execute(
+                "UPDATE media SET probe_error = ?2 WHERE id = ?1
+                     AND location = ?3 AND size IS ?4 AND mtime IS ?5",
+                params![
+                    probed.id.0,
+                    error,
+                    probed.location,
+                    size_i64(probed.size),
+                    probed.mtime
+                ],
+            )? != 0)
         })
     }
 }
@@ -1519,6 +1527,22 @@ mod tests {
         assert!(!r.probed);
         assert_eq!(lib.get_by_location("/v/Scene_180_LR.mp4").unwrap(), Some(r));
         assert_eq!(lib.get_by_location("/nope").unwrap(), None);
+    }
+
+    #[test]
+    fn source_identity_folders_and_queries_do_not_become_filename_format_hints() {
+        let key = "VR_180_LR/Plain.mp4?projection=360_TB";
+        let location = format!(
+            "source://source/server/http/{}",
+            percent_encoding::utf8_percent_encode(key, percent_encoding::NON_ALPHANUMERIC)
+        );
+        let expected = MediaUpsert::new("Plain.mp4", "local");
+        let upsert = MediaUpsert::new(&location, "server");
+        assert_eq!(upsert.title, expected.title);
+        assert_eq!(upsert.detected, expected.detected);
+        let lib = lib();
+        let id = lib.upsert(&upsert).unwrap().id;
+        assert_eq!(lib.get(id).unwrap().unwrap().file_name(), "Plain.mp4");
     }
 
     #[test]

@@ -23,7 +23,9 @@ enum Style {
     On,
 }
 
-/// One key; true when pressed. `label` may be an icon.
+/// One key; true on the frame its press begins (rather than release, so moving
+/// on to the next key before letting go never drops the letter). `label` may be
+/// an icon.
 fn key(ui: &mut egui::Ui, label: &str, w: f32, style: Style, icon: bool) -> bool {
     let (_, resp) = ui.allocate_exact_size(Vec2::new(w, KEY_H), Sense::click());
     // Raised keys: Enter is the accent, shift glows while it is on, and
@@ -48,7 +50,7 @@ fn key(ui: &mut egui::Ui, label: &str, w: f32, style: Style, icon: bool) -> bool
         theme::font(Weight::Medium, 25.0)
     };
     p.text(face.center(), Align2::CENTER_CENTER, label, font, fg);
-    resp.clicked()
+    resp.contains_pointer() && ui.input(|i| i.pointer.primary_pressed())
 }
 
 /// Draws the keyboard; returns the events to send to the focused panel and
@@ -56,6 +58,8 @@ fn key(ui: &mut egui::Ui, label: &str, w: f32, style: Style, icon: bool) -> bool
 pub fn keyboard(ctx: &egui::Context, shift: &mut bool, symbols: &mut bool) -> (Vec<Event>, bool) {
     let mut out = Vec::new();
     let mut close = false;
+    let before = (*shift, *symbols);
+    let shifted = *shift;
     widgets::panel_slab(ctx, 24.0);
     let frame = egui::Frame::new()
         .outer_margin(widgets::SHADOW_ROOM)
@@ -69,7 +73,7 @@ pub fn keyboard(ctx: &egui::Context, shift: &mut bool, symbols: &mut bool) -> (V
             ui.horizontal(|ui| {
                 ui.add_space(i as f32 * key_w * 0.2);
                 for c in row.chars() {
-                    let ch = if *shift {
+                    let ch = if shifted {
                         c.to_uppercase().next().unwrap_or(c)
                     } else {
                         c
@@ -120,6 +124,9 @@ pub fn keyboard(ctx: &egui::Context, shift: &mut bool, symbols: &mut bool) -> (V
             }
         });
     });
+    if (*shift, *symbols) != before {
+        ctx.request_repaint();
+    }
     (out, close)
 }
 
@@ -130,5 +137,190 @@ fn key_event(key: Key) -> Event {
         pressed: true,
         repeat: false,
         modifiers: Modifiers::NONE,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::world::{Panel, Pointer};
+    use fp_xr::Hand;
+    use glam::{Mat4, Quat, Vec2, Vec3};
+
+    fn find_label(shape: &egui::Shape, want: &str) -> Option<egui::Pos2> {
+        match shape {
+            egui::Shape::Text(t) if t.galley.text() == want => Some(t.pos + t.galley.size() * 0.5),
+            egui::Shape::Vec(v) => v.iter().find_map(|s| find_label(s, want)),
+            _ => None,
+        }
+    }
+
+    struct Rig {
+        kb: Panel,
+        field: Panel,
+        ptr: Pointer,
+        hands: [Hand; 2],
+        shift: bool,
+        symbols: bool,
+        text: String,
+        shapes: Vec<egui::epaint::ClippedShape>,
+        time: f64,
+    }
+
+    impl Rig {
+        fn new() -> Self {
+            let mut kb = Panel::new([1240, 492], Vec2::new(1.0, 0.4), 1.0);
+            kb.pose = Mat4::from_translation(Vec3::new(0.0, -0.5, -1.0));
+            kb.visible = true;
+            let mut field = Panel::new([800, 200], Vec2::new(1.2, 0.3), 1.0);
+            field.pose = Mat4::from_translation(Vec3::new(0.0, 0.2, -1.5));
+            field.visible = true;
+            let mut hands = [Hand::default(), Hand::default()];
+            hands[1].active = true;
+            let mut rig = Self {
+                kb,
+                field,
+                ptr: Pointer::default(),
+                hands,
+                shift: false,
+                symbols: false,
+                text: String::new(),
+                shapes: Vec::new(),
+                time: 0.0,
+            };
+            // Warm up layout and focus the text field.
+            rig.step();
+            rig.step();
+            rig
+        }
+
+        fn aim_at(&mut self, label: &str) {
+            let pt = self
+                .shapes
+                .iter()
+                .find_map(|c| find_label(&c.shape, label))
+                .unwrap_or_else(|| panic!("missing key {label:?}"));
+            let dir = self.kb.world_point(pt).normalize();
+            self.hands[1].aim = Some((Vec3::ZERO, Quat::from_rotation_arc(Vec3::NEG_Z, dir)));
+        }
+
+        fn step(&mut self) {
+            self.ptr
+                .route(&mut [&mut self.kb, &mut self.field], &self.hands, 0.011);
+            self.time += 0.011;
+            let kb_in = self.kb.input(self.time);
+            let shift = &mut self.shift;
+            let symbols = &mut self.symbols;
+            let mut events = Vec::new();
+            let out = self.kb.ctx.run(kb_in, |ctx| {
+                let (e, _) = keyboard(ctx, shift, symbols);
+                events = e;
+            });
+            self.shapes = out.shapes;
+            // Same order as App::paint_panels: keyboard events reach the
+            // focused panel before it paints this frame.
+            for e in events {
+                self.field.push(e);
+            }
+            let field_in = self.field.input(self.time);
+            let text = &mut self.text;
+            let _ = self.field.ctx.run(field_in, |ctx| {
+                egui::CentralPanel::default().show(ctx, |ui| {
+                    let r = ui.add(egui::TextEdit::singleline(text));
+                    if !r.has_focus() {
+                        r.request_focus();
+                    }
+                });
+            });
+        }
+    }
+
+    #[test]
+    fn fast_single_hand_sweeps_type_every_letter_immediately() {
+        let mut r = Rig::new();
+
+        // Press 'f': appears in the text box on the press frame, before the
+        // trigger is let go.
+        r.aim_at("f");
+        r.hands[1].trigger = 1.0;
+        r.step();
+        assert_eq!(r.text, "f");
+
+        // Whip across the keyboard to 'a' while the trigger is still bottomed
+        // out (far past the click distance, turning the hold into a drag), then
+        // feather the trigger halfway up and press 'a'.
+        r.aim_at("a");
+        r.step();
+        assert_eq!(r.text, "f", "holding a key while sweeping does not repeat");
+        r.hands[1].trigger = 0.4;
+        r.step();
+        r.hands[1].trigger = 0.65;
+        r.step();
+        assert_eq!(r.text, "fa");
+
+        // Sweep completely off the keyboard before releasing, then whip to 's'
+        // and 't' back-to-back.
+        r.hands[1].aim = Some((Vec3::ZERO, Quat::IDENTITY));
+        r.step();
+        r.hands[1].trigger = 0.0;
+        r.step();
+        r.aim_at("s");
+        r.hands[1].trigger = 0.9;
+        r.step();
+        assert_eq!(r.text, "fas");
+        r.aim_at("t");
+        r.step();
+        r.hands[1].trigger = 0.42;
+        r.step();
+        r.hands[1].trigger = 0.8;
+        r.step();
+        assert_eq!(r.text, "fast");
+    }
+
+    #[test]
+    fn rapid_double_clicks_and_modifiers_work_on_press() {
+        let mut r = Rig::new();
+
+        // Shift held across multiple frames toggles once, capitalises the next
+        // letter on press, and drops back to lowercase.
+        r.aim_at(icons::ARROW_FAT_UP);
+        r.hands[1].trigger = 1.0;
+        r.step();
+        r.step();
+        r.hands[1].trigger = 0.0;
+        r.step();
+        assert!(r.shift);
+
+        r.aim_at("A");
+        r.hands[1].trigger = 0.85;
+        r.step();
+        assert_eq!(r.text, "A");
+        assert!(!r.shift);
+        r.hands[1].trigger = 0.0;
+        r.step();
+
+        // Rapid double-pull on the same key without fully lifting the finger.
+        r.aim_at("l");
+        r.hands[1].trigger = 0.85;
+        r.step();
+        r.hands[1].trigger = 0.4;
+        r.step();
+        r.hands[1].trigger = 0.7;
+        r.step();
+        r.hands[1].trigger = 0.0;
+        r.step();
+        assert_eq!(r.text, "All");
+
+        // Symbols page toggle and symbol key on press.
+        r.aim_at("#+=");
+        r.hands[1].trigger = 0.9;
+        r.step();
+        r.hands[1].trigger = 0.0;
+        r.step();
+        assert!(r.symbols);
+        r.aim_at("!");
+        r.hands[1].trigger = 0.9;
+        r.step();
+        assert_eq!(r.text, "All!");
     }
 }

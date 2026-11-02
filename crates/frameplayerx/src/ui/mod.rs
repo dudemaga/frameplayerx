@@ -2,6 +2,7 @@
 //! state; anything that changes more than view-local state is returned as
 //! an [`Action`] for the app to apply.
 
+pub mod catalog;
 pub mod controller_map;
 pub mod crash;
 pub mod depth;
@@ -9,7 +10,6 @@ pub mod errors;
 pub mod feeds;
 pub mod folders;
 pub mod icons;
-pub mod jellyfin;
 pub mod keyboard;
 pub mod library;
 pub mod local;
@@ -17,6 +17,7 @@ pub mod page;
 pub mod perf;
 pub mod player;
 pub mod playlists;
+pub mod plex;
 pub mod premium;
 pub mod queue;
 pub mod settings;
@@ -172,6 +173,38 @@ pub fn fmt_date(unix: i64) -> String {
     tr!("date-short", day = d, month = m, year = y)
 }
 
+/// An HTTPS browser address. Debug omits query/fragment authorization data.
+#[derive(Clone)]
+pub struct WebAddress(String);
+
+impl WebAddress {
+    pub fn as_str(&self) -> &str {
+        &self.0
+    }
+}
+
+impl From<String> for WebAddress {
+    fn from(value: String) -> Self {
+        Self(if value.starts_with("https://") {
+            value
+        } else {
+            format!("https://{value}")
+        })
+    }
+}
+
+impl From<&str> for WebAddress {
+    fn from(value: &str) -> Self {
+        value.to_string().into()
+    }
+}
+
+impl std::fmt::Debug for WebAddress {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("WebAddress(..)")
+    }
+}
+
 /// Something the UI asks the app to do.
 #[derive(Clone, Debug)]
 pub enum Action {
@@ -191,6 +224,8 @@ pub enum Action {
     StepQueue(i32),
     QueueRemove(usize),
     QueueMove(usize, usize),
+    /// Shuffles Up next, keeping the current video first.
+    QueueShuffle,
     /// Keeps only the video playing in Up next.
     QueueClear,
     /// Shows Up next in the browse panel over the video.
@@ -223,6 +258,8 @@ pub enum Action {
     AddBookmark,
     /// Plays this audio stream, and keeps it as this video's pick.
     SelectAudio(usize),
+    SelectSourceAudio(String),
+    SelectSourceSubtitles(Option<String>),
     /// Shows these subtitles, and keeps them as this video's pick.
     SelectSubtitles(crate::subtitles::Pick),
     /// Plays the file as it is, or transcoded by the server, from where it
@@ -272,24 +309,24 @@ pub enum Action {
         source: String,
         location: Option<String>,
     },
-    /// Loads a page of a Jellyfin/Emby server; the answer goes to the page
+    /// Loads a server catalog page; the answer goes to the page
     /// that asked (`seq`).
-    Jellyfin {
+    Catalog {
         source: String,
         seq: u64,
-        load: jellyfin::Load,
+        load: catalog::Load,
     },
-    /// Marks a Jellyfin/Emby item as a favourite, or as watched, on the
+    /// Marks a catalog item as a favourite, or as watched, on the
     /// server.
-    JellyfinMark {
+    CatalogMark {
         source: String,
         id: String,
-        mark: jellyfin::Mark,
+        mark: catalog::Mark,
         on: bool,
     },
-    /// Plays a Jellyfin/Emby video from one of its versions (a media
+    /// Plays a catalog video from one of its versions (a media
     /// source id) from now on; `None` from the tallest that fits.
-    JellyfinVersion {
+    CatalogVersion {
         source: String,
         location: String,
         version: Option<String>,
@@ -328,6 +365,12 @@ pub enum Action {
         secret: String,
         insecure_tls: bool,
     },
+    PlexLinkStart,
+    PlexLinkPoll {
+        generation: u64,
+        pin: fp_sources::plex::auth::PlexPin,
+    },
+    PlexConnect(fp_sources::PlexConfig),
     AddDevice(HapticDeviceConfig),
     RemoveDevice(usize),
     ReconnectDevices,
@@ -337,9 +380,8 @@ pub enum Action {
     NewPairingCode,
     CheckUpdates,
     InstallUpdate,
-    /// Opens a web page (an address without `https://`) in Steam's
-    /// browser.
-    OpenWebPage(&'static str),
+    /// Opens an HTTPS address in Steam's browser.
+    OpenWebPage(WebAddress),
     /// Send the crash report the start offered, or don't.
     SendCrashReport,
     DismissCrashReport,
@@ -431,8 +473,8 @@ pub enum SourcePage {
     Local(local::LocalView),
     /// A library's videos, and its folders.
     Library(local::LibraryView),
-    /// A Jellyfin/Emby server's libraries, series and films.
-    Jellyfin(jellyfin::JellyfinView),
+    /// A media server's libraries, series and films.
+    Catalog(catalog::CatalogView),
     /// A DeoVR feed's or HereSphere API's scenes.
     Feed(feeds::FeedView),
 }
@@ -491,11 +533,11 @@ impl SourceView {
                     Back::Done
                 }
             },
-            SourcePage::Jellyfin(j) if j.filters_open() => {
+            SourcePage::Catalog(j) if j.filters_open() => {
                 j.show_filters(false);
                 Back::Done
             }
-            SourcePage::Jellyfin(j) if j.pages.len() > 1 => {
+            SourcePage::Catalog(j) if j.pages.len() > 1 => {
                 j.pages.pop();
                 Back::Done
             }
@@ -615,6 +657,7 @@ pub struct SourceForm {
     /// password.
     pub use_quick_connect: bool,
     pub quick_connect: QuickConnect,
+    pub plex: plex::Connect,
 }
 
 /// Signing in to a Jellyfin/Emby server with Quick Connect.
@@ -650,6 +693,7 @@ impl Default for SourceForm {
             insecure_tls: false,
             use_quick_connect: true,
             quick_connect: QuickConnect::Idle,
+            plex: plex::Connect::default(),
         }
     }
 }
@@ -866,12 +910,12 @@ impl UiState {
         self.source.as_mut().and_then(SourceView::folder_mut)
     }
 
-    /// The Jellyfin/Emby page of `source`, if that is what is open.
-    pub fn jellyfin_page(&mut self, source: &str) -> Option<&mut jellyfin::JellyfinView> {
+    /// The catalog page of `source`, if that is what is open.
+    pub fn catalog_page(&mut self, source: &str) -> Option<&mut catalog::CatalogView> {
         match self.source.as_mut()? {
             SourceView {
                 source: s,
-                page: SourcePage::Jellyfin(j),
+                page: SourcePage::Catalog(j),
                 ..
             } if s == source => Some(j),
             _ => None,
@@ -1021,12 +1065,13 @@ mod tests {
         assert!(s.source_back().is_none());
         assert!(s.source.is_none());
 
-        let mut j = jellyfin::JellyfinView::new(1);
-        j.pages.push(jellyfin::Page {
+        let mut j = catalog::CatalogView::new(1);
+        j.pages.push(catalog::Page {
             seq: 2,
+            request_seq: None,
             loading: false,
             error: None,
-            body: jellyfin::Body::Item {
+            body: catalog::Body::Item {
                 item: Box::default(),
             },
         });
@@ -1034,12 +1079,12 @@ mod tests {
             source: "jf".into(),
             name: "Jellyfin".into(),
             back_to: Screen::Sources,
-            page: SourcePage::Jellyfin(j),
+            page: SourcePage::Catalog(j),
         });
         assert!(s.source_back().is_none());
         assert!(matches!(
             s.source.as_ref().map(|v| &v.page),
-            Some(SourcePage::Jellyfin(j)) if j.pages.len() == 1
+            Some(SourcePage::Catalog(j)) if j.pages.len() == 1
         ));
     }
 

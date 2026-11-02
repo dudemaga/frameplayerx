@@ -105,7 +105,7 @@ headset's Noto Sans CJK; for the preview, install it with
 | `fp-xr` | OpenXR: the session and swapchains, controller input, passthrough |
 | `fp-xr-loader` | Finds the active OpenXR runtime and loads it directly, with no Khronos loader to ship (shared with `frame-probe`) |
 | `fp-library` | The SQLite database: folder scanning, the metadata and thumbnail worker, search, watch history |
-| `fp-sources` | Sources: local folders, HTTP, WebDAV, DLNA, SMB, DeoVR and HereSphere feeds, Jellyfin and Emby |
+| `fp-sources` | Sources: local folders, HTTP, WebDAV, DLNA, SMB, DeoVR and HereSphere feeds, Jellyfin, Emby and Plex |
 | `fp-haptics` | Funscripts, the sync engine, and TCode, Buttplug and Handy devices |
 | `fp-remote` | The DeoVR remote API and the phone web remote |
 | `fp-updater` | Signed update manifests, download, install and rollback; the `fp-release` maintainer tool |
@@ -145,9 +145,105 @@ it into P010 planes in a compute pass.
 
 **Sources and browsing.** Every source implements one `Source` trait
 (`list`, `open`, `details`). Each kind gets its own browser in `ui/`:
-`local.rs`, `folders.rs`, `jellyfin.rs` and `feeds.rs`, built from the
-shared pieces in `ui/page.rs`. Browsing a network source writes nothing to
-the database; a video gets a row when it's opened.
+`local.rs`, `folders.rs`, `catalog.rs` and `feeds.rs`, built from the
+shared pieces in `ui/page.rs`. Network browsing does not index new videos
+in the database; a video gets a row when it's opened. Browsing can migrate
+existing rows after learning their stable identities.
+
+Persistent source references use
+`source://source/<encoded-source-id>/<kind>/<encoded-key>`
+(`fp-sources/src/location.rs`). Each component is encoded separately; the
+key is one opaque segment, including any encoded path separators. HTTP(S),
+WebDAV and SMB keys are relative to the configured root; Jellyfin and Emby
+keys retain item and version IDs, and DLNA uses object IDs rather than
+resource URLs. Feeds use published stable scene IDs where available;
+otherwise scene, media and asset URLs remain exactly as published,
+including external and signed URLs. Changing the configured feed address
+does not rebase those URLs. Plex keeps its existing format described below.
+Sources resolve these references against their current configuration at
+open time. The configured source ID is the namespace: editing its endpoint
+preserves identity, while removing and adding it again creates a new one.
+Local paths and removable-volume identities keep their existing formats.
+
+`Source::canonical_location` performs no I/O: it recognizes owned legacy
+locations from configuration or aliases learned while browsing. External
+or signed URLs are not guessed; a published feed ID can identify a signed
+scene URL, while an unknown old DLNA URL cannot be mapped from its address
+alone. The opener dispatches every source-qualified location to its exact
+owner, including artwork, scripts and subtitles; missing or mismatched
+owners fail without trying another source or plain HTTP.
+
+`Services` migrates legacy references before starting the metadata worker
+and before replacing source configurations, while the old endpoint/root
+is still known. Browsing retries migration after learning aliases.
+`Library::rewrite_source_locations` updates only locator columns, including
+sidecars, artwork and selected subtitle files, in one source-scoped
+transaction. Media primary keys, user settings and history/playlist
+foreign keys stay intact. A location collision rolls back the whole
+transaction and is logged; rows are never merged or replaced.
+
+Jellyfin, Emby and Plex implement `fp_sources::Catalog`, the shared catalog
+query, item and capability contract. `ui/catalog.rs` owns their page stack;
+wire parsing stays in `mediabrowser/` and `plex/`. Capability flags hide
+unsupported server favorites and filters. The old `Mb*` names remain
+aliases for callers of the MediaBrowser API.
+
+Plex genre filters use facet IDs. Studio filters use studio names with the
+string equality operator (`studio==...`), encoded once; PMS may already
+URL-encode studio choice keys.
+
+Plex linking (`ui/plex.rs`, `app/plex.rs`) uses the existing action/job
+flow. Its default **Link with code** method displays a code to enter at
+`plex.tv/link` on a phone or computer, then polls for approval; it reuses
+the common pairing-code and cancellation labels. **Access token** is the
+secondary method for an existing server URL and token. A tested configuration
+records the machine identifier, connection choices, server token and account
+credentials. New links use Plex's traditional short-PIN flow at
+`plex.tv/api/v2/pins`, without JWK registration or a device assertion, for
+PMS compatibility. Existing saved device-key/JWT credentials remain readable
+and retain their refresh path; credential updates are persisted without
+rebuilding active sources. A live test confirmed server identity and library
+access with a traditional token after the same server rejected a JWT with
+HTTP 401. Playback and remote access still need live validation.
+`plex://source/<source-id>/<machine-id>/...` locations contain no tokens;
+the opener routes them only to their owning source. Artwork and external
+subtitles use that same authenticated opener. Named HTTP headers are
+origin-scoped, including range reads and redirects.
+
+The Plex form has one **Connection** selector: **Local only** (the default
+for new sources), **Direct connections**, or **Direct + Relay**. Its UI enum
+maps to the existing `PlexConfig.local_only`/`allow_relay` flags, so saved
+configurations need no migration and edits retain their previous mode.
+The descriptions distinguish free local playback from remote video, which
+requires Plex Pass for the viewer or server owner, or Remote Watch Pass for
+the viewer. A LAN address does not guarantee local classification: Plex can
+treat another subnet or VLAN as remote. Relay uses the same subscription
+requirements and is limited to 2 Mbit/s.
+
+`HttpClient` also supports an origin-scoped address fallback after DNS
+resolution or connection failure, including a TLS handshake timeout. It
+reserves time for the advertised socket within the connection timeout and
+logs the attempt at Info level. The URL hostname, TLS SNI and certificate
+verification stay unchanged; certificate rejection never triggers a retry.
+Plex supplies the same discovered connection's advertised IP address and
+port only for non-relay `plex.direct` URLs; server machine
+identity validation still applies. This resolves DNS rebinding failures
+where the server is reachable, without changing routing or firewall rules.
+
+Original Plex playback requests a decision with `directPlay=1`, `hasMDE=1`
+and explicit `mediaIndex`/`partIndex` values. `subtitles=none` leaves
+subtitle rendering to the local player while keeping embedded tracks and
+sidecars available. Codec and container support is decided by the local
+player instead of Plex's generic client profile;
+authentication and server playback denials still apply. If the local
+player cannot open the original, Automatic uses the existing transcode
+fallback. Both MDE and legacy decision errors are checked before opening
+the original Part.
+
+Plex transcodes use progressive Matroska over `ByteSource`, not FFmpeg
+networking. Restarting after a seek creates an encoding session distinct
+from the watch-report session and stops the previous encoding. Original
+server track IDs survive the restart.
 
 **Libraries and cards.** A library is a source (`SourceConfig::Library`)
 whose folder is scanned into the database under its own id
@@ -159,7 +255,7 @@ them so, and the opener resolves them to wherever the card is mounted, so
 two cards with the same label and folders never share rows. A card's ID
 comes from `/dev/disk/by-uuid`.
 
-**Watch sync.** Servers that keep watch state (Jellyfin and Emby, HereSphere
+**Watch sync.** Servers that keep watch state (Jellyfin, Emby and Plex, HereSphere
 APIs that name an `eventServer`) also implement `Source::watch_session` and
 `Source::report_watch` (`fp-sources/src/watch.rs`). The open video's `Watch`
 (`frameplayerx/src/watch.rs`) turns what the player does each frame into

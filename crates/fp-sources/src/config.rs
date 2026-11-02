@@ -67,6 +67,8 @@ pub enum SourceKind {
     /// A Jellyfin or Emby media server (MediaBrowser API).
     #[serde(rename = "mediabrowser")]
     MediaBrowser,
+    /// A Plex Media Server.
+    Plex,
 }
 
 impl SourceKind {
@@ -82,6 +84,7 @@ impl SourceKind {
             SourceKind::HereSphere => "HereSphere API",
             SourceKind::Smb => "SMB share",
             SourceKind::MediaBrowser => "Jellyfin/Emby",
+            SourceKind::Plex => "Plex",
         }
     }
 }
@@ -234,6 +237,52 @@ pub struct MediaBrowserConfig {
     pub user_id: Option<String>,
 }
 
+/// One Plex server as one signed-in user. Locations use the source and
+/// machine identifiers, so changing its network address preserves history.
+#[derive(Clone, PartialEq, Serialize, Deserialize)]
+pub struct PlexConfig {
+    pub id: String,
+    pub name: String,
+    /// The preferred connection, or a manually supplied server address.
+    pub url: String,
+    /// The server's stable identity; filled when a manual source is tested.
+    #[serde(default)]
+    pub machine_identifier: String,
+    /// The selected server's credential, which may differ from the account's.
+    #[serde(default)]
+    pub access_token: String,
+    #[serde(default)]
+    pub connections: Vec<crate::plex::auth::PlexConnection>,
+    /// Account device credentials, when linked rather than entered manually.
+    #[serde(default)]
+    pub auth: Option<crate::plex::auth::PlexCredentials>,
+    #[serde(default)]
+    pub insecure_tls: bool,
+    #[serde(default)]
+    pub max_height: Option<u32>,
+    #[serde(default)]
+    pub local_only: bool,
+    #[serde(default = "plex_relay_default")]
+    pub allow_relay: bool,
+}
+
+fn plex_relay_default() -> bool {
+    true
+}
+
+impl fmt::Debug for PlexConfig {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("PlexConfig")
+            .field("id", &self.id)
+            .field("name", &self.name)
+            .field("url", &redact(&self.url))
+            .field("machine_identifier", &self.machine_identifier)
+            .field("access_token", &"***")
+            .field("auth", &self.auth.as_ref().map(|_| "***"))
+            .finish_non_exhaustive()
+    }
+}
+
 fn debug_with_url(
     f: &mut fmt::Formatter<'_>,
     ty: &str,
@@ -322,6 +371,7 @@ pub enum SourceConfig {
     /// A Jellyfin or Emby media server.
     #[serde(rename = "mediabrowser")]
     MediaBrowser(MediaBrowserConfig),
+    Plex(PlexConfig),
 }
 
 impl SourceConfig {
@@ -335,6 +385,7 @@ impl SourceConfig {
             SourceConfig::DeoVr(c) | SourceConfig::HereSphere(c) => &c.id,
             SourceConfig::Smb(c) => &c.id,
             SourceConfig::MediaBrowser(c) => &c.id,
+            SourceConfig::Plex(c) => &c.id,
         }
     }
 
@@ -348,6 +399,7 @@ impl SourceConfig {
             SourceConfig::DeoVr(c) | SourceConfig::HereSphere(c) => &c.name,
             SourceConfig::Smb(c) => &c.name,
             SourceConfig::MediaBrowser(c) => &c.name,
+            SourceConfig::Plex(c) => &c.name,
         }
     }
 
@@ -363,6 +415,7 @@ impl SourceConfig {
             SourceConfig::HereSphere(_) => SourceKind::HereSphere,
             SourceConfig::Smb(_) => SourceKind::Smb,
             SourceConfig::MediaBrowser(_) => SourceKind::MediaBrowser,
+            SourceConfig::Plex(_) => SourceKind::Plex,
         }
     }
 
@@ -380,6 +433,7 @@ impl SourceConfig {
             SourceConfig::DeoVr(c) | SourceConfig::HereSphere(c) => redact(&c.url),
             SourceConfig::Smb(c) => crate::smb::smb_url(&c.host, c.port, &c.share, &c.path),
             SourceConfig::MediaBrowser(c) => redact(&c.url),
+            SourceConfig::Plex(c) => redact(&c.url),
         }
     }
 

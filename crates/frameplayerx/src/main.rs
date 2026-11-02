@@ -27,6 +27,7 @@ mod queue;
 mod seektest;
 mod services;
 mod settings;
+mod shuffle;
 mod subtitles;
 mod ui;
 mod watch;

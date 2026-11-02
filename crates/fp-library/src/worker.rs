@@ -244,7 +244,7 @@ fn process_one(
     let info = prober.probe(&rec.location)?;
     // Detect from the file name only, so a URL's query string cannot add
     // format tokens.
-    let resolved = resolve(None, info.hints, rec.file_name(), info.width, info.height);
+    let resolved = resolve(None, info.hints, &rec.file_name(), info.width, info.height);
     // Evidence orders strongest first: keep a stronger earlier detection
     // (e.g. a format declared by a DeoVR feed) over a weaker new guess.
     let detected = if resolved.evidence <= rec.detected.evidence {
@@ -453,7 +453,9 @@ fn report(
         }
         Err(e) => {
             let error = e.to_string();
-            library.store_probe_error(rec.id, &error)?;
+            if !library.store_probe_error(rec, &error)? {
+                return Ok(());
+            }
             stats.failed += 1;
             on_event(WorkerEvent::Failed {
                 id: rec.id,
@@ -712,6 +714,30 @@ mod tests {
     fn watch(lib: &Library, id: MediaId, at: f64) {
         let s = lib.start_playback(id).unwrap();
         lib.update_playback(s, at, false).unwrap();
+    }
+
+    #[test]
+    fn a_source_location_uses_only_the_decoded_filename_for_probe_format_detection() {
+        let lib = Library::open_in_memory().unwrap();
+        let key = "VR_180_LR/Flat.mp4?projection=360_TB";
+        let location = format!(
+            "source://source/server/http/{}",
+            percent_encoding::utf8_percent_encode(key, percent_encoding::NON_ALPHANUMERIC)
+        );
+        let id = lib
+            .upsert(&MediaUpsert::new(&location, "server"))
+            .unwrap()
+            .id;
+        let prober =
+            FakeProber::default().with(&location, 1920, 1080, 30.0, ContainerHints::default());
+        let cache = tempfile::tempdir().unwrap();
+        let mut options = opts(cache.path());
+        options.thumbnails = false;
+        let (stats, _) = run(&lib, &prober, &options);
+        assert_eq!(stats.processed, 1);
+        let stored = lib.get(id).unwrap().unwrap();
+        assert_eq!(stored.detected.format.projection, Projection::Flat);
+        assert_eq!(stored.detected.format.stereo, StereoLayout::Mono);
     }
 
     #[test]
@@ -1198,6 +1224,46 @@ mod tests {
         u.size = Some(2);
         lib.upsert(&u).unwrap();
         assert_eq!(lib.pending_metadata_count(true).unwrap(), 1);
+    }
+
+    #[test]
+    fn migrating_a_location_during_a_failed_probe_leaves_the_new_identity_pending() {
+        let lib = Library::open_in_memory().unwrap();
+        let id = lib
+            .upsert(&MediaUpsert::new("http://old/movie.mp4", "server"))
+            .unwrap()
+            .id;
+        let snapshot = lib.get(id).unwrap().unwrap();
+        let stable = "source://source/server/http/movie.mp4";
+        lib.rewrite_source_locations("server", |_| Some(stable.into()))
+            .unwrap();
+        let mut stats = WorkerStats::default();
+        let mut events = Vec::new();
+        report(
+            &lib,
+            &snapshot,
+            1,
+            1,
+            Err(Error::Probe("old endpoint unavailable".into())),
+            &mut stats,
+            &mut |event| events.push(event),
+        )
+        .unwrap();
+        assert_eq!(stats.failed, 0);
+        assert!(events.is_empty());
+        let current = lib.get(id).unwrap().unwrap();
+        assert_eq!(current.location, stable);
+        assert!(current.probe_error.is_none());
+        assert_eq!(lib.pending_metadata_count(false).unwrap(), 1);
+
+        let prober =
+            FakeProber::default().with(stable, 1920, 1080, 10.0, ContainerHints::default());
+        let cache = tempfile::tempdir().unwrap();
+        let mut options = opts(cache.path());
+        options.thumbnails = false;
+        let (stats, _) = run(&lib, &prober, &options);
+        assert_eq!(stats.processed, 1);
+        assert!(lib.get(id).unwrap().unwrap().probed);
     }
 
     #[test]

@@ -20,10 +20,11 @@ use crate::urlutil::{basic_auth_value, redact, same_origin, split_credentials};
 use fp_core::ByteSource;
 use fp_core::sync::lock;
 use std::io::{self, Read};
+use std::net::SocketAddr;
 use std::sync::Mutex;
 use std::time::Duration;
 use ureq::http;
-use ureq::unversioned::resolver::DefaultResolver;
+use ureq::unversioned::resolver::{DefaultResolver, ResolvedSocketAddrs, Resolver};
 use ureq::unversioned::transport::{
     Buffers, ConnectionDetails, Connector, DefaultConnector, NextTimeout, Transport,
 };
@@ -145,6 +146,10 @@ type Response = http::Response<ureq::Body>;
 /// timeout: ureq's body deadline covers a whole body, which a video stream
 /// can't have, and without one a stalled server blocks its reader forever.
 fn agent(opts: &HttpOptions) -> ureq::Agent {
+    agent_redirects(opts, true)
+}
+
+fn agent_redirects(opts: &HttpOptions, follow_redirects: bool) -> ureq::Agent {
     let tls = ureq::tls::TlsConfig::builder()
         .disable_verification(opts.insecure_tls)
         .build();
@@ -156,10 +161,214 @@ fn agent(opts: &HttpOptions) -> ureq::Agent {
         .timeout_recv_body(Some(opts.read_timeout))
         .max_idle_connections_per_host(4)
         .user_agent(opts.user_agent.as_str())
-        .tls_config(tls)
-        .build();
+        .tls_config(tls);
+    let config = if follow_redirects {
+        config
+    } else {
+        config.max_redirects(0)
+    }
+    .build();
     let connector = DefaultConnector::new().chain(StallLimit(opts.read_timeout));
     ureq::Agent::with_parts(config, connector, DefaultResolver::default())
+}
+
+/// One scoped socket alternative. The request URI remains the source of
+/// the HTTP Host header and TLS server name.
+#[derive(Clone, Debug)]
+struct AddressFallback {
+    scheme: String,
+    host: String,
+    port: u16,
+    address: SocketAddr,
+}
+
+impl AddressFallback {
+    fn applies(&self, uri: &http::Uri, config: &ureq::config::Config) -> bool {
+        let port = uri.port_u16().or_else(|| match uri.scheme_str() {
+            Some("http") => Some(80),
+            Some("https") => Some(443),
+            _ => None,
+        });
+        uri.scheme_str() == Some(self.scheme.as_str())
+            && uri
+                .host()
+                .is_some_and(|host| host.eq_ignore_ascii_case(&self.host))
+            && port == Some(self.port)
+            && config.proxy().is_none_or(|proxy| proxy.is_no_proxy(uri))
+    }
+
+    fn addresses(&self) -> ResolvedSocketAddrs {
+        let mut addresses = DefaultResolver::default().empty();
+        addresses.push(self.address);
+        addresses
+    }
+
+    fn connect_error(&self, error: ureq::Error) -> ureq::Error {
+        let kind = match &error {
+            ureq::Error::Io(error) => error.kind(),
+            ureq::Error::Timeout(_) => io::ErrorKind::TimedOut,
+            _ => return error,
+        };
+        ureq::Error::Io(io::Error::new(
+            kind,
+            format!("advertised address {} failed: {error}", self.address),
+        ))
+    }
+}
+
+#[derive(Debug)]
+struct AddressFallbackResolver {
+    resolver: DefaultResolver,
+    fallback: AddressFallback,
+}
+
+impl Resolver for AddressFallbackResolver {
+    fn resolve(
+        &self,
+        uri: &http::Uri,
+        config: &ureq::config::Config,
+        timeout: NextTimeout,
+    ) -> std::result::Result<ResolvedSocketAddrs, ureq::Error> {
+        let result = self.resolver.resolve(uri, config, timeout);
+        if !self.fallback.applies(uri, config) {
+            return result;
+        }
+        match result {
+            Ok(addresses) if !addresses.is_empty() => Ok(addresses),
+            Ok(_)
+            | Err(ureq::Error::HostNotFound | ureq::Error::Io(_) | ureq::Error::Timeout(_)) => {
+                log::debug!(
+                    "DNS lookup for {}:{} failed; using advertised address {}",
+                    self.fallback.host,
+                    self.fallback.port,
+                    self.fallback.address
+                );
+                Ok(self.fallback.addresses())
+            }
+            Err(error) => Err(error),
+        }
+    }
+}
+
+/// Retry connection establishment, including TLS, before any HTTP request
+/// can be sent. A successful DNS lookup need not mean a reachable socket.
+#[derive(Debug)]
+struct AddressFallbackConnector<C> {
+    inner: C,
+    fallback: AddressFallback,
+}
+
+fn retryable_connect_error(error: &ureq::Error) -> bool {
+    match error {
+        ureq::Error::Timeout(ureq::Timeout::Connect) | ureq::Error::ConnectionFailed => true,
+        ureq::Error::Io(error) => matches!(
+            error.kind(),
+            io::ErrorKind::ConnectionRefused
+                | io::ErrorKind::ConnectionReset
+                | io::ErrorKind::ConnectionAborted
+                | io::ErrorKind::HostUnreachable
+                | io::ErrorKind::NetworkUnreachable
+                | io::ErrorKind::AddrNotAvailable
+                | io::ErrorKind::TimedOut
+                | io::ErrorKind::UnexpectedEof
+                | io::ErrorKind::BrokenPipe
+        ),
+        // Certificate, TLS protocol and global deadline errors are final.
+        _ => false,
+    }
+}
+
+impl<C: Connector<(), Out = Box<dyn Transport>>> Connector<()> for AddressFallbackConnector<C> {
+    type Out = Box<dyn Transport>;
+
+    fn connect(
+        &self,
+        details: &ConnectionDetails,
+        chained: Option<()>,
+    ) -> std::result::Result<Option<Self::Out>, ureq::Error> {
+        if !self.fallback.applies(details.uri, details.config) {
+            return self.inner.connect(details, chained);
+        }
+        if details.timeout.after.is_zero() {
+            return Err(ureq::Error::Timeout(details.timeout.reason));
+        }
+        // Keep the advertised socket for one explicit attempt, even when it
+        // appeared after another DNS address whose TLS handshake can stall.
+        let mut normal = details.resolver.empty();
+        for address in &details.addrs {
+            if *address != self.fallback.address {
+                normal.push(*address);
+            }
+        }
+        if normal.is_empty() {
+            log::info!(
+                "Connecting to {}:{} using advertised address {}",
+                self.fallback.host,
+                self.fallback.port,
+                self.fallback.address
+            );
+            return self
+                .inner
+                .connect(details, chained)
+                .map_err(|error| self.fallback.connect_error(error));
+        }
+        let now = (details.current_time)();
+        let mut attempt = ConnectionDetails {
+            uri: details.uri,
+            addrs: normal,
+            config: details.config,
+            request_level: details.request_level,
+            resolver: details.resolver,
+            now,
+            timeout: NextTimeout {
+                // Reserve time for the advertised socket rather than letting
+                // an unreachable DNS address consume the whole deadline.
+                after: if details.timeout.reason == ureq::Timeout::Connect {
+                    details.timeout.after / 2
+                } else {
+                    details.timeout.after
+                },
+                ..details.timeout
+            },
+            current_time: details.current_time.clone(),
+            run_connector: details.run_connector.clone(),
+            register_shutdown: details.register_shutdown.clone(),
+        };
+        match self.inner.connect(&attempt, chained) {
+            Err(error) if retryable_connect_error(&error) => {
+                let now = (details.current_time)();
+                let remaining = if details.timeout.after.is_not_happening() {
+                    details.timeout.after
+                } else {
+                    use ureq::unversioned::transport::time::Instant;
+                    let elapsed = match (details.now, now) {
+                        (Instant::Exact(start), Instant::Exact(now)) => {
+                            now.saturating_duration_since(start)
+                        }
+                        _ => Duration::ZERO,
+                    };
+                    let remaining = (*details.timeout.after).saturating_sub(elapsed);
+                    if remaining.is_zero() {
+                        return Err(error);
+                    }
+                    remaining.into()
+                };
+                log::info!(
+                    "Connection to {}:{} failed ({error}); trying advertised address {}",
+                    self.fallback.host,
+                    self.fallback.port,
+                    self.fallback.address
+                );
+                attempt.addrs = self.fallback.addresses();
+                attempt.now = now;
+                attempt.timeout.after = remaining;
+                self.inner
+                    .connect(&attempt, chained)
+                    .map_err(|error| self.fallback.connect_error(error))
+            }
+            result => result,
+        }
+    }
 }
 
 /// Wraps each connection in a [`Stalling`] transport.
@@ -238,6 +447,9 @@ pub struct HttpClient {
     /// The server `auth` is for: other origins a server links to (a CDN,
     /// another host's media or scripts) get no credentials.
     scope: Option<String>,
+    /// Named credentials are not delegated to the HTTP library's redirect
+    /// handling: an arbitrary custom token header might otherwise follow.
+    headers: Vec<(String, String)>,
     opts: HttpOptions,
 }
 
@@ -259,6 +471,7 @@ impl HttpClient {
             agent: agent(&opts),
             auth: credentials.map(basic_auth_value),
             scope: None,
+            headers: Vec::new(),
             opts,
         }
     }
@@ -283,8 +496,66 @@ impl HttpClient {
             agent: agent(&opts),
             auth: Some(auth_header.into()),
             scope: Some(scope.to_string()),
+            headers: Vec::new(),
             opts,
         }
+    }
+
+    /// Sends named headers only to `scope`'s origin, including every range
+    /// request. Same-origin redirects keep them; cross-origin redirects
+    /// are refused rather than forwarding credentials or request bodies.
+    pub fn new_with_headers(
+        opts: HttpOptions,
+        headers: Vec<(String, String)>,
+        scope: &str,
+    ) -> HttpClient {
+        HttpClient {
+            agent: agent_redirects(&opts, false),
+            auth: None,
+            scope: Some(scope.to_string()),
+            headers,
+            opts,
+        }
+    }
+
+    /// Uses an advertised socket address if DNS fails or the ordinary
+    /// connection cannot be established, including its TLS handshake.
+    /// Other origins still use ordinary DNS, including other ports on the
+    /// same host. HTTPS keeps the original hostname and certificate checks.
+    /// A client without a valid HTTP(S) scope is returned unchanged.
+    pub fn with_address_fallback(mut self, address: SocketAddr) -> Self {
+        let Some(scope) = self
+            .scope
+            .as_deref()
+            .and_then(|scope| url::Url::parse(scope).ok())
+        else {
+            return self;
+        };
+        if !matches!(scope.scheme(), "http" | "https") {
+            return self;
+        }
+        let (Some(host), Some(port)) = (scope.host_str(), scope.port_or_known_default()) else {
+            return self;
+        };
+        let fallback = AddressFallback {
+            scheme: scope.scheme().into(),
+            host: host.into(),
+            port,
+            address,
+        };
+        let resolver = AddressFallbackResolver {
+            resolver: DefaultResolver::default(),
+            fallback: fallback.clone(),
+        };
+        let connector = AddressFallbackConnector {
+            inner: DefaultConnector::new(),
+            fallback,
+        }
+        .chain(StallLimit(self.opts.read_timeout));
+        // Reuse the complete configuration, including redirect policy and
+        // TLS verification, rather than constructing alternate TLS options.
+        self.agent = ureq::Agent::with_parts(self.agent.config().clone(), connector, resolver);
+        self
     }
 
     /// The options this client was created with.
@@ -329,6 +600,19 @@ impl HttpClient {
         body: Option<&[u8]>,
         unbounded_body: bool,
     ) -> std::result::Result<Response, Failure> {
+        self.send_redirects(method, url, headers, body, unbounded_body, 0)
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn send_redirects(
+        &self,
+        method: &str,
+        url: &str,
+        headers: &[(&str, &str)],
+        body: Option<&[u8]>,
+        unbounded_body: bool,
+        redirects: u8,
+    ) -> std::result::Result<Response, Failure> {
         let (clean_url, url_creds) = split_credentials(url)?;
         let auth = self
             .auth
@@ -342,6 +626,15 @@ impl HttpClient {
         let mut builder = http::Request::builder().method(method).uri(&clean_url);
         for (k, v) in headers {
             builder = builder.header(*k, *v);
+        }
+        if self
+            .scope
+            .as_deref()
+            .is_some_and(|s| same_origin(s, &clean_url))
+        {
+            for (k, v) in &self.headers {
+                builder = builder.header(k.as_str(), v.as_str());
+            }
         }
         if let Some(a) = &auth {
             builder = builder.header("Authorization", a.as_str());
@@ -372,7 +665,7 @@ impl HttpClient {
                 }
             }
         };
-        result.map_err(|e| {
+        let response = result.map_err(|e| {
             let err = Error::Http {
                 url: redact(&clean_url),
                 message: e.to_string(),
@@ -382,7 +675,56 @@ impl HttpClient {
             } else {
                 Failure::Fatal(err)
             }
-        })
+        })?;
+        if !self.headers.is_empty()
+            && matches!(response.status().as_u16(), 301 | 302 | 303 | 307 | 308)
+        {
+            let Some(location) = response
+                .headers()
+                .get("location")
+                .and_then(|h| h.to_str().ok())
+            else {
+                return Ok(response);
+            };
+            let next = url::Url::parse(&clean_url)
+                .and_then(|base| base.join(location))
+                .map_err(|_| Failure::Fatal(Error::invalid(url, "invalid HTTP redirect")))?;
+            if !same_origin(&clean_url, next.as_str()) {
+                return Err(Failure::Fatal(Error::invalid(
+                    url,
+                    "authenticated redirect changed origin",
+                )));
+            }
+            if !next.username().is_empty() || next.password().is_some() {
+                return Err(Failure::Fatal(Error::invalid(
+                    url,
+                    "HTTP redirect contains credentials",
+                )));
+            }
+            if redirects >= 10 {
+                return Err(Failure::Fatal(Error::invalid(
+                    url,
+                    "too many HTTP redirects",
+                )));
+            }
+            let (method, body) = if response.status().as_u16() == 303
+                || (matches!(response.status().as_u16(), 301 | 302) && method == "POST")
+            {
+                ("GET", None)
+            } else {
+                (method, body)
+            };
+            drop(response);
+            return self.send_redirects(
+                method,
+                next.as_str(),
+                headers,
+                body,
+                unbounded_body,
+                redirects + 1,
+            );
+        }
+        Ok(response)
     }
 
     /// Sends a request and reads the whole response body (at most `limit`
@@ -1005,6 +1347,203 @@ impl std::fmt::Debug for HttpFile {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::collections::VecDeque;
+    use std::sync::Arc;
+    use std::time::Instant;
+
+    #[derive(Debug)]
+    struct ConnectAttempt {
+        uri: http::Uri,
+        addresses: Vec<SocketAddr>,
+        timeout: Duration,
+    }
+
+    #[derive(Debug)]
+    struct ScriptedConnector {
+        clock: Arc<Mutex<Instant>>,
+        steps: Mutex<VecDeque<(Duration, std::result::Result<(), ureq::Error>)>>,
+        attempts: Mutex<Vec<ConnectAttempt>>,
+    }
+
+    type ConnectResult = std::result::Result<Option<Box<dyn Transport>>, ureq::Error>;
+
+    impl Connector<()> for ScriptedConnector {
+        type Out = Box<dyn Transport>;
+
+        fn connect(
+            &self,
+            details: &ConnectionDetails,
+            _: Option<()>,
+        ) -> std::result::Result<Option<Self::Out>, ureq::Error> {
+            lock(&self.attempts).push(ConnectAttempt {
+                uri: details.uri.clone(),
+                addresses: details.addrs.iter().copied().collect(),
+                timeout: *details.timeout.after,
+            });
+            let (elapsed, result) = lock(&self.steps).pop_front().expect("planned connect");
+            *lock(&self.clock) += elapsed;
+            result.map(|()| None)
+        }
+    }
+
+    fn scripted_address_fallback(
+        uri: &str,
+        config: &ureq::config::Config,
+        addresses: &[SocketAddr],
+        steps: Vec<(Duration, std::result::Result<(), ureq::Error>)>,
+    ) -> (ConnectResult, Vec<ConnectAttempt>) {
+        use ureq::unversioned::transport::time::Instant as ConnectInstant;
+
+        let now = Instant::now();
+        let clock = Arc::new(Mutex::new(now));
+        let connector = AddressFallbackConnector {
+            inner: ScriptedConnector {
+                clock: clock.clone(),
+                steps: Mutex::new(steps.into()),
+                attempts: Mutex::new(Vec::new()),
+            },
+            fallback: AddressFallback {
+                scheme: "https".into(),
+                host: "server.plex.direct".into(),
+                port: 32400,
+                address: "192.168.1.10:32400".parse().unwrap(),
+            },
+        };
+        let resolver = DefaultResolver::default();
+        let mut addrs = resolver.empty();
+        for address in addresses {
+            addrs.push(*address);
+        }
+        let uri = uri.parse().unwrap();
+        let details = ConnectionDetails {
+            uri: &uri,
+            addrs,
+            config,
+            request_level: false,
+            resolver: &resolver,
+            now: ConnectInstant::Exact(now),
+            timeout: NextTimeout {
+                after: Duration::from_secs(10).into(),
+                reason: ureq::Timeout::Connect,
+                ..NextTimeout::default()
+            },
+            current_time: Arc::new(move || ConnectInstant::Exact(*lock(&clock))),
+            run_connector: Arc::new(|_| Err(ureq::Error::ConnectionFailed)),
+            register_shutdown: Arc::new(|_| Ok(())),
+        };
+        let result = connector.connect(&details, None);
+        let attempts = std::mem::take(&mut *lock(&connector.inner.attempts));
+        (result, attempts)
+    }
+
+    #[test]
+    fn an_advertised_address_gets_the_remaining_connect_budget_after_a_timeout() {
+        let dns = "192.0.2.1:32400".parse().unwrap();
+        let advertised = "192.168.1.10:32400".parse().unwrap();
+        let config = ureq::Agent::config_builder().proxy(None).build();
+        let uri = "https://server.plex.direct:32400/identity";
+        // This also models a TCP connection that succeeded before its TLS
+        // handshake timed out: the wrapper retries the complete connector.
+        let (result, attempts) = scripted_address_fallback(
+            uri,
+            &config,
+            &[dns, advertised],
+            vec![
+                (
+                    Duration::from_secs(5),
+                    Err(ureq::Error::Timeout(ureq::Timeout::Connect)),
+                ),
+                (Duration::ZERO, Ok(())),
+            ],
+        );
+        assert!(result.is_ok());
+        assert_eq!(attempts.len(), 2);
+        assert_eq!(attempts[0].addresses, [dns]);
+        assert_eq!(attempts[1].addresses, [advertised]);
+        assert_eq!(attempts[0].timeout, Duration::from_secs(5));
+        assert_eq!(attempts[1].timeout, Duration::from_secs(5));
+        assert!(attempts.iter().all(|attempt| attempt.uri == uri));
+    }
+
+    #[test]
+    fn address_fallback_preserves_failures_and_never_retries_certificate_errors() {
+        let dns = "192.0.2.1:32400".parse().unwrap();
+        let advertised: SocketAddr = "192.168.1.10:32400".parse().unwrap();
+        let config = ureq::Agent::config_builder().proxy(None).build();
+        let uri = "https://server.plex.direct:32400/identity";
+        let (result, attempts) = scripted_address_fallback(
+            uri,
+            &config,
+            &[dns],
+            vec![
+                (
+                    Duration::from_secs(2),
+                    Err(io::Error::from(io::ErrorKind::ConnectionRefused).into()),
+                ),
+                (
+                    Duration::ZERO,
+                    Err(ureq::Error::Timeout(ureq::Timeout::Connect)),
+                ),
+            ],
+        );
+        assert_eq!(attempts[1].timeout, Duration::from_secs(8));
+        let error = result.unwrap_err().to_string();
+        assert!(error.contains(&advertised.to_string()), "{error}");
+        assert!(error.contains("timeout: connect"), "{error}");
+
+        for error in [
+            ureq::Error::Tls("invalid certificate"),
+            io::Error::new(io::ErrorKind::InvalidData, "invalid certificate").into(),
+            ureq::Error::Timeout(ureq::Timeout::Global),
+        ] {
+            let (result, attempts) =
+                scripted_address_fallback(uri, &config, &[dns], vec![(Duration::ZERO, Err(error))]);
+            assert!(result.is_err());
+            assert_eq!(attempts.len(), 1);
+        }
+    }
+
+    #[test]
+    fn address_fallback_is_scoped_respects_proxies_and_does_not_repeat_an_address() {
+        let advertised: SocketAddr = "192.168.1.10:32400".parse().unwrap();
+        let config = ureq::Agent::config_builder().proxy(None).build();
+        let (result, attempts) = scripted_address_fallback(
+            "https://server.plex.direct:32400/identity",
+            &config,
+            &[advertised],
+            vec![(Duration::ZERO, Err(ureq::Error::ConnectionFailed))],
+        );
+        assert!(result.is_err());
+        assert_eq!(attempts.len(), 1);
+        assert_eq!(attempts[0].timeout, Duration::from_secs(10));
+        for uri in [
+            "http://server.plex.direct:32400/identity",
+            "https://server.plex.direct:32401/identity",
+            "https://other.plex.direct:32400/identity",
+        ] {
+            let (result, attempts) = scripted_address_fallback(
+                uri,
+                &config,
+                &["192.0.2.1:32400".parse().unwrap()],
+                vec![(Duration::ZERO, Err(ureq::Error::ConnectionFailed))],
+            );
+            assert!(result.is_err());
+            assert_eq!(attempts.len(), 1);
+            assert_eq!(attempts[0].timeout, Duration::from_secs(10));
+        }
+        let config = ureq::Agent::config_builder()
+            .proxy(Some(ureq::Proxy::new("http://127.0.0.1:8888").unwrap()))
+            .build();
+        let (result, attempts) = scripted_address_fallback(
+            "https://server.plex.direct:32400/identity",
+            &config,
+            &["192.0.2.1:32400".parse().unwrap()],
+            vec![(Duration::ZERO, Err(ureq::Error::ConnectionFailed))],
+        );
+        assert!(result.is_err());
+        assert_eq!(attempts.len(), 1);
+        assert_eq!(attempts[0].timeout, Duration::from_secs(10));
+    }
 
     #[test]
     fn content_range_parsing() {

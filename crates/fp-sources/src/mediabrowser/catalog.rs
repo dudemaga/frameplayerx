@@ -9,12 +9,11 @@
 use super::{
     MediaBrowserSource, detect_from_name, encode_location, ticks_to_seconds, video_3d_format,
 };
+use crate::Source;
 use crate::error::{Error, Result};
 use crate::json::{array, boolean, get, num, text};
 use crate::timeutil::parse_iso8601;
 use crate::urlutil::encode_form_value;
-use fp_core::format::VideoFormat;
-use fp_core::source::{Entry, EntryKind};
 use fp_core::sync::lock;
 use serde_json::Value;
 
@@ -43,30 +42,11 @@ const NOT_VIDEO: [&str; 6] = [
     "audiobooks",
 ];
 
-/// What a library item is.
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
-pub enum MbKind {
-    Movie,
-    /// A TV series (holds seasons).
-    Series,
-    /// A season of a series (holds episodes).
-    Season,
-    /// An episode of a series.
-    Episode,
-    /// Any other video (home videos, mixed libraries).
-    Video,
-    MusicVideo,
-    /// A collection of films.
-    BoxSet,
-    Folder,
-    /// One of the user's libraries (a view).
-    Library,
-    /// Someone in the cast or crew.
-    Person,
-    /// Anything else (photos...).
-    #[default]
-    Other,
-}
+pub use crate::catalog::{
+    CatalogFacets as MbFacets, CatalogFilter as MbFilter, CatalogHome as MbHome,
+    CatalogItem as MbItem, CatalogKind as MbKind, CatalogPage as MbPage, CatalogQuery as MbQuery,
+    CatalogSort as MbSort, CatalogVersion as MbVersion,
+};
 
 impl MbKind {
     fn parse(t: &str) -> MbKind {
@@ -84,125 +64,30 @@ impl MbKind {
             _ => MbKind::Other,
         }
     }
+}
 
-    /// Plays rather than opens.
-    pub fn playable(self) -> bool {
-        matches!(
-            self,
-            MbKind::Movie | MbKind::Episode | MbKind::Video | MbKind::MusicVideo
-        )
-    }
-
-    /// Shown as a 2:3 poster rather than 16:9 art.
-    pub fn portrait(self) -> bool {
-        matches!(
-            self,
-            MbKind::Movie | MbKind::Series | MbKind::Season | MbKind::BoxSet | MbKind::Person
-        )
+fn kind_api(kind: MbKind) -> &'static str {
+    match kind {
+        MbKind::Movie => "Movie",
+        MbKind::Series => "Series",
+        MbKind::Season => "Season",
+        MbKind::Episode => "Episode",
+        MbKind::Video => "Video",
+        MbKind::MusicVideo => "MusicVideo",
+        MbKind::BoxSet => "BoxSet",
+        MbKind::Folder => "Folder",
+        MbKind::Library => "CollectionFolder",
+        MbKind::Person => "Person",
+        MbKind::Other => "Other",
     }
 }
 
-/// One item of a Jellyfin/Emby library, with what a client shows of it.
-#[derive(Clone, Debug, Default, PartialEq)]
-pub struct MbItem {
-    /// Server id.
-    pub id: String,
-    pub name: String,
-    pub kind: MbKind,
-    /// Of a library: `movies`, `tvshows`, `boxsets`, `homevideos`...
-    pub collection_type: Option<String>,
-    /// Plot or description.
-    pub overview: Option<String>,
-    /// Production year.
-    pub year: Option<i32>,
-    /// Length in seconds.
-    pub runtime: Option<f64>,
-    /// Audience rating out of 10.
-    pub community_rating: Option<f32>,
-    /// Age rating ("PG-13").
-    pub official_rating: Option<String>,
-    pub genres: Vec<String>,
-    /// Tags (details only).
-    pub tags: Vec<String>,
-    /// Studios (details only).
-    pub studios: Vec<String>,
-    /// Cast and crew as (name, role), actors first (details only).
-    pub people: Vec<(String, String)>,
-    /// Series of an episode or season.
-    pub series_id: Option<String>,
-    /// Name of that series.
-    pub series_name: Option<String>,
-    /// Season of an episode.
-    pub season_id: Option<String>,
-    /// Episode number, or a season's number.
-    pub index: Option<u32>,
-    /// Season number of an episode.
-    pub parent_index: Option<u32>,
-    /// Items inside (seasons of a series, films of a collection).
-    pub child_count: Option<u32>,
-    /// Watched.
-    pub played: bool,
-    /// Resume position in seconds (0 when not started).
-    pub position: f64,
-    /// The user's favourite.
-    pub favorite: bool,
-    /// Unwatched episodes of a series or season.
-    pub unplayed: Option<u32>,
-    /// When it was added, Unix seconds.
-    pub added: Option<i64>,
-    /// 2:3 poster (an episode's still for episodes).
-    pub poster: Option<String>,
-    /// 16:9 art for rows of landscape cards.
-    pub landscape: Option<String>,
-    /// Large wide art for the top of a details page.
-    pub backdrop: Option<String>,
-    /// Location for [`Source::open`](crate::Source::open) and browsing.
-    pub location: String,
-    /// Projection and stereo layout from the file name or 3D metadata.
-    pub format: Option<VideoFormat>,
-    /// The files it can be played from (details only): one, or several
-    /// when the server keeps more than one version (4K and 1080p, a cut).
-    pub versions: Vec<MbVersion>,
-    /// The version chosen with [`MediaBrowserSource::set_version`]
-    /// (details only); `None` plays the tallest that fits the source's
-    /// maximum height.
-    pub version: Option<String>,
-}
-
-/// One version of a film or video: a media source of the item.
-#[derive(Clone, Debug, Default, PartialEq)]
-pub struct MbVersion {
-    /// The media source id, for [`MediaBrowserSource::set_version`].
-    pub id: String,
-    /// The server's name for it ("2160p", "Director's Cut").
-    pub name: String,
-    /// Picture height in pixels.
-    pub height: Option<u32>,
-    /// Video codec ("hevc").
-    pub codec: Option<String>,
-    /// Dynamic range other than SDR ("HDR", "DOVI").
-    pub range: Option<String>,
-    /// File size in bytes.
-    pub size: Option<u64>,
-    /// Projection and stereo layout from its file name or 3D metadata.
-    pub format: Option<VideoFormat>,
-}
-
-impl MbVersion {
-    /// What tells it apart: "2160p · HEVC · HDR · 18.2 GB", after the
-    /// server's name when that says something more.
-    pub fn label(&self) -> String {
-        let mut parts = Vec::new();
-        let height = self.height.map(|h| format!("{h}p"));
-        if !self.name.is_empty() && height.as_deref() != Some(self.name.as_str()) {
-            parts.push(self.name.clone());
-        }
-        parts.extend(height);
-        parts.extend(self.codec.as_ref().map(|c| c.to_uppercase()));
-        parts.extend(self.range.clone());
-        parts.extend(self.size.map(|b| format!("{:.1} GB", b as f64 / 1e9)));
-        parts.join(" · ")
-    }
+fn type_names(types: &[MbKind]) -> String {
+    types
+        .iter()
+        .map(|kind| kind_api(*kind))
+        .collect::<Vec<_>>()
+        .join(",")
 }
 
 /// The versions in an item's `MediaSources`.
@@ -232,77 +117,6 @@ fn parse_versions(v: &Value) -> Vec<MbVersion> {
         .collect()
 }
 
-impl MbItem {
-    /// Fraction watched when partly watched.
-    pub fn progress(&self) -> Option<f32> {
-        let d = self.runtime.filter(|d| *d > 0.0)?;
-        (self.position > 0.0).then(|| (self.position / d).clamp(0.0, 1.0) as f32)
-    }
-
-    /// "S1:E3" for an episode.
-    pub fn episode_label(&self) -> Option<String> {
-        match (self.parent_index, self.index) {
-            (Some(s), Some(e)) => Some(format!("S{s}:E{e}")),
-            (None, Some(e)) => Some(format!("E{e}")),
-            _ => None,
-        }
-    }
-
-    /// The format of the version chosen, else the item's own.
-    pub fn shown_format(&self) -> Option<VideoFormat> {
-        self.version
-            .as_ref()
-            .and_then(|id| self.versions.iter().find(|v| &v.id == id))
-            .and_then(|v| v.format)
-            .or(self.format)
-    }
-
-    /// The name to remember it by: episodes carry their series and number.
-    pub fn full_title(&self) -> String {
-        match (&self.series_name, self.episode_label()) {
-            (Some(series), Some(ep)) if self.kind == MbKind::Episode => {
-                format!("{series} {ep} · {}", self.name)
-            }
-            _ => self.name.clone(),
-        }
-    }
-
-    /// A browse entry to open it with.
-    pub fn to_entry(&self) -> Entry {
-        let kind = if self.kind.playable() {
-            EntryKind::Video
-        } else {
-            EntryKind::Directory
-        };
-        let mut e = Entry::new(self.full_title(), self.location.clone(), kind);
-        e.duration = self.runtime;
-        e.thumbnail_url = self.landscape.clone().or_else(|| self.poster.clone());
-        e.modified = self.added;
-        e.format = self.format;
-        e
-    }
-}
-
-/// Order of a listing.
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
-pub enum MbSort {
-    /// By title.
-    #[default]
-    Name,
-    /// Newest additions first.
-    Added,
-    /// By release date.
-    Released,
-    /// By audience rating.
-    Rating,
-    /// By length.
-    Runtime,
-    /// Most recently watched first.
-    LastWatched,
-    /// Shuffled.
-    Random,
-}
-
 impl MbSort {
     fn api(self) -> &'static str {
         match self {
@@ -315,28 +129,6 @@ impl MbSort {
             MbSort::Random => "Random",
         }
     }
-
-    /// Whether this order reads best largest first.
-    pub fn default_descending(self) -> bool {
-        matches!(
-            self,
-            MbSort::Added | MbSort::Released | MbSort::Rating | MbSort::LastWatched
-        )
-    }
-}
-
-/// Which items a listing keeps.
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
-pub enum MbFilter {
-    /// Everything.
-    #[default]
-    All,
-    /// Not watched yet.
-    Unplayed,
-    /// Partly watched.
-    Resumable,
-    /// The user's favourites.
-    Favorites,
 }
 
 impl MbFilter {
@@ -350,107 +142,7 @@ impl MbFilter {
     }
 }
 
-/// A server-side listing: search, sort, filter and paging.
-#[derive(Clone, Debug, PartialEq)]
-pub struct MbQuery {
-    /// Library, folder or collection to list; `None` for the whole server.
-    pub parent: Option<String>,
-    /// Item types to keep (`Movie`, `Series`...); empty keeps every type.
-    pub types: Vec<String>,
-    /// Look inside sub-folders too.
-    pub recursive: bool,
-    /// Words to search for; empty lists everything.
-    pub search: String,
-    pub sort: MbSort,
-    /// Largest first.
-    pub descending: bool,
-    /// Which items to keep.
-    pub filter: MbFilter,
-    /// Items to skip (paging).
-    pub start: usize,
-    /// Items per page.
-    pub limit: usize,
-    /// Only items with one of these tags.
-    pub tags: Vec<String>,
-    /// Only items in one of these genres.
-    pub genres: Vec<String>,
-    /// Only items from one of these years.
-    pub years: Vec<i32>,
-    /// Only items from one of these studios.
-    pub studios: Vec<String>,
-    /// Only videos at least this many pixels wide.
-    pub min_width: Option<u32>,
-    /// Only items this person is in, by id (one: Jellyfin and Emby separate
-    /// several differently).
-    pub person: Option<String>,
-    /// These items, in this order (a page of a shuffle); the other fields
-    /// still choose what is listed.
-    pub ids: Vec<String>,
-}
-
-impl Default for MbQuery {
-    fn default() -> MbQuery {
-        MbQuery {
-            parent: None,
-            types: Vec::new(),
-            recursive: false,
-            search: String::new(),
-            sort: MbSort::Name,
-            descending: false,
-            filter: MbFilter::All,
-            start: 0,
-            limit: 60,
-            tags: Vec::new(),
-            genres: Vec::new(),
-            years: Vec::new(),
-            studios: Vec::new(),
-            min_width: None,
-            person: None,
-            ids: Vec::new(),
-        }
-    }
-}
-
 impl MbQuery {
-    /// Everything on the server with `tag`, by name.
-    pub fn tagged(tag: &str) -> MbQuery {
-        MbQuery {
-            types: TAGGED.iter().map(ToString::to_string).collect(),
-            recursive: true,
-            tags: vec![tag.to_string()],
-            ..MbQuery::default()
-        }
-    }
-
-    /// What opening `item` lists: a film library its films, a TV library
-    /// its series, a collection or folder what is in it, a person what they
-    /// are in.
-    pub fn children(item: &MbItem) -> MbQuery {
-        if item.kind == MbKind::Person {
-            return MbQuery {
-                types: TAGGED.iter().map(ToString::to_string).collect(),
-                recursive: true,
-                person: Some(item.id.clone()),
-                ..MbQuery::default()
-            };
-        }
-        let types: &[&str] = match (item.kind, item.collection_type.as_deref()) {
-            (MbKind::Library, Some("movies")) => &["Movie"],
-            (MbKind::Library, Some("tvshows")) => &["Series"],
-            (MbKind::Library, Some("boxsets")) => &["BoxSet"],
-            (MbKind::Library, Some("homevideos")) => &["Video"],
-            (MbKind::Library, Some("musicvideos")) => &["MusicVideo"],
-            (MbKind::Library, _) => &["Movie", "Series", "Video", "MusicVideo"],
-            _ => &[],
-        };
-        MbQuery {
-            parent: Some(item.id.clone()),
-            types: types.iter().map(ToString::to_string).collect(),
-            recursive: item.kind == MbKind::Library,
-            ..MbQuery::default()
-        }
-    }
-
     /// Path and query string of `/Users/{user}/Items` for this listing.
     pub(crate) fn path(&self, user: &str) -> String {
         let mut q = format!(
@@ -470,7 +162,7 @@ impl MbQuery {
             q += &format!("&ParentId={}", encode_form_value(p));
         }
         if !self.types.is_empty() {
-            q += &format!("&IncludeItemTypes={}", self.types.join(","));
+            q += &format!("&IncludeItemTypes={}", type_names(&self.types));
         }
         if let Some(f) = self.filter.api() {
             q += &format!("&Filters={f}");
@@ -494,7 +186,7 @@ impl MbQuery {
             q += &format!("&ParentId={}", encode_form_value(p));
         }
         if !self.types.is_empty() {
-            q += &format!("&IncludeItemTypes={}", self.types.join(","));
+            q += &format!("&IncludeItemTypes={}", type_names(&self.types));
         }
         if let Some(f) = self.filter.api() {
             q += &format!("&Filters={f}");
@@ -546,21 +238,10 @@ impl MbQuery {
         let types = if self.types.is_empty() {
             TAGGED.join(",")
         } else {
-            self.types.join(",")
+            type_names(&self.types)
         };
         q + &format!("&IncludeItemTypes={types}")
     }
-}
-
-/// What a listing can be filtered by: the genres, years, studios and tags
-/// its items have.
-#[derive(Clone, Debug, Default, PartialEq)]
-pub struct MbFacets {
-    pub genres: Vec<String>,
-    /// Newest first.
-    pub years: Vec<i32>,
-    pub studios: Vec<String>,
-    pub tags: Vec<String>,
 }
 
 /// The names of a `{"Items": [{"Name": ...}]}` answer, as `/Genres`,
@@ -639,28 +320,6 @@ pub(crate) fn people_search_path(user: &str, text: &str, limit: usize) -> String
         encode_form_value(text.trim()),
         limit.max(1),
     )
-}
-
-/// One page of a listing.
-#[derive(Clone, Debug, Default, PartialEq)]
-pub struct MbPage {
-    /// Items on this page.
-    pub items: Vec<MbItem>,
-    /// Items in the whole listing.
-    pub total: usize,
-}
-
-/// A server's front page.
-#[derive(Clone, Debug, Default, PartialEq)]
-pub struct MbHome {
-    /// The user's video libraries.
-    pub libraries: Vec<MbItem>,
-    /// Partly watched films and episodes.
-    pub resume: Vec<MbItem>,
-    /// The next episode of each series being watched.
-    pub next_up: Vec<MbItem>,
-    /// Newest additions, per library.
-    pub latest: Vec<(MbItem, Vec<MbItem>)>,
 }
 
 /// `{base}/Items/{id}/Images/{kind}?...`
@@ -891,6 +550,26 @@ pub(crate) fn video_libraries(items: Vec<MbItem>) -> Vec<MbItem> {
 }
 
 impl MediaBrowserSource {
+    fn stable_item(&self, item: &mut MbItem) {
+        if let Some(location) = self.canonical_location(&item.location) {
+            item.location = location;
+        }
+        for asset in [&mut item.poster, &mut item.landscape, &mut item.backdrop] {
+            if let Some(url) = asset.as_mut()
+                && let Some(stable) = self.stable_asset(url)
+            {
+                *url = stable;
+            }
+        }
+    }
+
+    fn stable_items(&self, mut items: Vec<MbItem>) -> Vec<MbItem> {
+        for item in &mut items {
+            self.stable_item(item);
+        }
+        items
+    }
+
     fn user(&self) -> Result<String> {
         Ok(self.client()?.1)
     }
@@ -899,7 +578,7 @@ impl MediaBrowserSource {
     pub fn libraries(&self) -> Result<Vec<MbItem>> {
         let user = self.user()?;
         let v = self.api_get_json(&format!("/Users/{user}/Views?{IMAGES}"))?;
-        Ok(video_libraries(parse_list(&v, &self.base_url)))
+        Ok(self.stable_items(video_libraries(parse_list(&v, &self.base_url))))
     }
 
     /// One page of a listing; a page of a shuffle (`query.ids`) in the
@@ -911,6 +590,7 @@ impl MediaBrowserSource {
         if !query.ids.is_empty() {
             page.items = in_order(page.items, &query.ids);
         }
+        page.items = self.stable_items(page.items);
         Ok(page)
     }
 
@@ -965,6 +645,7 @@ impl MediaBrowserSource {
         item.version = self
             .chosen_version(id)
             .filter(|c| item.versions.iter().any(|v| &v.id == c));
+        self.stable_item(&mut item);
         Ok(item)
     }
 
@@ -976,14 +657,14 @@ impl MediaBrowserSource {
         let mut found = Vec::new();
         for (section, types) in SEARCH_SECTIONS {
             let v = self.api_get_json(&search_path(&user, text, types, limit))?;
-            let items = parse_list(&v, &self.base_url);
+            let items = self.stable_items(parse_list(&v, &self.base_url));
             if !items.is_empty() {
                 found.push((section, items));
             }
         }
         // The titles still show when this fails.
         if let Ok(v) = self.api_get_json(&people_search_path(&user, text, limit)) {
-            let people = parse_list(&v, &self.base_url);
+            let people = self.stable_items(parse_list(&v, &self.base_url));
             if !people.is_empty() {
                 found.push(("People", people));
             }
@@ -1040,7 +721,7 @@ impl MediaBrowserSource {
         let v = self.api_get_json(&format!(
             "/Users/{user}/Items/Resume?Limit={limit}&MediaTypes=Video&Fields={LIST_FIELDS}&{IMAGES}"
         ))?;
-        Ok(parse_list(&v, &self.base_url))
+        Ok(self.stable_items(parse_list(&v, &self.base_url)))
     }
 
     /// The next episode to watch of each series (of one series with
@@ -1053,7 +734,7 @@ impl MediaBrowserSource {
             path += &format!("&SeriesId={}", encode_form_value(s));
         }
         let v = self.api_get_json(&path)?;
-        Ok(parse_list(&v, &self.base_url))
+        Ok(self.stable_items(parse_list(&v, &self.base_url)))
     }
 
     /// Newest additions to a library.
@@ -1063,7 +744,7 @@ impl MediaBrowserSource {
             "/Users/{user}/Items/Latest?ParentId={}&Limit={limit}&Fields={LIST_FIELDS}&{IMAGES}",
             encode_form_value(library)
         ))?;
-        Ok(parse_list(&v, &self.base_url))
+        Ok(self.stable_items(parse_list(&v, &self.base_url)))
     }
 
     /// The seasons of a series.
@@ -1073,7 +754,7 @@ impl MediaBrowserSource {
             "/Shows/{}/Seasons?UserId={user}&Fields={LIST_FIELDS}&{IMAGES}",
             encode_form_value(series)
         ))?;
-        Ok(parse_list(&v, &self.base_url))
+        Ok(self.stable_items(parse_list(&v, &self.base_url)))
     }
 
     /// The episodes of a series, of one season with `season`.
@@ -1087,7 +768,7 @@ impl MediaBrowserSource {
             path += &format!("&SeasonId={}", encode_form_value(s));
         }
         let v = self.api_get_json(&path)?;
-        Ok(parse_list(&v, &self.base_url))
+        Ok(self.stable_items(parse_list(&v, &self.base_url)))
     }
 
     /// The front page: libraries, then rows that are left out when the
@@ -1135,10 +816,50 @@ impl MediaBrowserSource {
     }
 }
 
+impl crate::Catalog for MediaBrowserSource {
+    fn home(&self) -> Result<MbHome> {
+        Self::home(self)
+    }
+    fn search(&self, text: &str, limit: usize) -> Result<Vec<(&'static str, Vec<MbItem>)>> {
+        Self::search(self, text, limit)
+    }
+    fn items(&self, query: &MbQuery) -> Result<MbPage> {
+        Self::items(self, query)
+    }
+    fn shuffled(&self, query: &MbQuery) -> Result<Vec<String>> {
+        Self::shuffled(self, query)
+    }
+    fn facets(&self, query: &MbQuery) -> Result<MbFacets> {
+        Self::facets(self, query)
+    }
+    fn item(&self, id: &str) -> Result<MbItem> {
+        Self::item(self, id)
+    }
+    fn seasons(&self, series: &str) -> Result<Vec<MbItem>> {
+        Self::seasons(self, series)
+    }
+    fn next_up(&self, series: Option<&str>, limit: usize) -> Result<Vec<MbItem>> {
+        Self::next_up(self, series, limit)
+    }
+    fn episodes(&self, series: &str, season: Option<&str>) -> Result<Vec<MbItem>> {
+        Self::episodes(self, series, season)
+    }
+    fn set_favorite(&self, id: &str, favorite: bool) -> Result<()> {
+        Self::set_favorite(self, id, favorite)
+    }
+    fn set_played(&self, id: &str, played: bool) -> Result<()> {
+        Self::set_played(self, id, played)
+    }
+    fn set_version(&self, location: &str, version: Option<&str>) {
+        Self::set_version(self, location, version);
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use fp_core::format::{Projection, StereoLayout};
+    use fp_core::source::EntryKind;
     use serde_json::json;
 
     const BASE: &str = "http://jf:8096";
@@ -1311,8 +1032,8 @@ mod tests {
         let names: Vec<&str> = libs.iter().map(|l| l.name.as_str()).collect();
         assert_eq!(names, ["Movies", "VR", "Shows"]);
         assert!(libs.iter().all(|l| l.kind == MbKind::Library));
-        assert_eq!(MbQuery::children(&libs[0]).types, ["Movie"]);
-        assert_eq!(MbQuery::children(&libs[2]).types, ["Series"]);
+        assert_eq!(MbQuery::children(&libs[0]).types, [MbKind::Movie]);
+        assert_eq!(MbQuery::children(&libs[2]).types, [MbKind::Series]);
         assert_eq!(MbQuery::children(&libs[1]).types.len(), 4);
         assert!(MbQuery::children(&libs[0]).recursive);
     }
@@ -1321,7 +1042,7 @@ mod tests {
     fn listing_paths() {
         let q = MbQuery {
             parent: Some("lib 1".into()),
-            types: vec!["Movie".into()],
+            types: vec![MbKind::Movie],
             recursive: true,
             search: " blade runner ".into(),
             sort: MbSort::Added,

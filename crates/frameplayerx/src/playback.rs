@@ -36,6 +36,12 @@ pub struct OpenRequest {
     /// ([`TranscodeTarget::id`]): what [`Quality::Transcode`] names, or
     /// what Automatic fell back to.
     pub transcode: Option<String>,
+    /// Stable original server track IDs, rather than transcoded stream indexes.
+    pub source_audio: Option<String>,
+    /// "0" explicitly disables server subtitles.
+    pub source_subtitle: Option<String>,
+    /// Keep the current pause state while changing quality or server tracks.
+    pub paused: bool,
 }
 
 /// Whether the file plays as it is or the server transcodes it, as the
@@ -53,6 +59,18 @@ pub enum Quality {
 }
 
 impl OpenRequest {
+    /// A persistent resource can only be opened through its embedded owner.
+    pub(crate) fn bound_source_id(&self) -> Result<Option<String>, String> {
+        if !fp_sources::is_source_location(&self.location) {
+            return Ok(self.source_id.clone());
+        }
+        let owner = fp_sources::location_owner(&self.location).ok_or(tr!("open-no-source"))?;
+        if self.source_id.as_deref().is_some_and(|id| id != owner) {
+            return Err(tr!("open-no-source").into());
+        }
+        Ok(Some(owner))
+    }
+
     /// What to call the video while it opens: the entry's or the record's
     /// title, else its file name.
     pub fn shown_title(&self) -> String {
@@ -106,6 +124,7 @@ pub struct Playback {
     pub targets: Vec<TranscodeTarget>,
     /// What the server is transcoding it to; `None` for the file as it is.
     pub transcoding: Option<TranscodeTarget>,
+    pub source_tracks: Vec<fp_sources::PlaybackTrack>,
 }
 
 /// The result of opening on a background thread.
@@ -146,34 +165,69 @@ fn kept_with_video(mut s: ViewSettings, format: VideoFormat) -> ViewSettings {
 
 /// Opens media; blocking (network probing), so run it on a job thread.
 pub fn open(
-    req: OpenRequest,
+    mut req: OpenRequest,
     opener: &Opener,
     library: &Library,
     settings: &Settings,
     reports: &Reports,
 ) -> Result<Opened, String> {
+    req.source_id = req.bound_source_id()?;
+    let legacy_record = (!fp_sources::is_source_location(&req.location))
+        .then(|| library.get_by_location(&req.location).ok().flatten())
+        .flatten()
+        .filter(|record| req.source_id.as_deref() == Some(record.source_id.as_str()));
     let name = last_segment(&req.location);
     let source = req.source_id.as_deref().and_then(|id| opener.source(id));
     // Feeds may need a details call to get the stream URL and metadata.
     let entry = match (&req.entry, &source) {
+        (Some(e), Some(src)) if fp_sources::is_source_location(&e.location) => {
+            Some(src.details(e).map_err(|e| crate::ui::errors::source(&e))?)
+        }
         (Some(e), Some(src)) => Some(src.details(e).unwrap_or_else(|_| e.clone())),
         // From the library or home: a server's details still carry the
         // video's subtitle files and chapters. Its address only names the
         // server, so it goes by the title the library has until then.
-        (None, Some(src)) if src.as_media_browser().is_some() => {
+        (None, Some(src))
+            if fp_sources::is_source_location(&req.location)
+                || src.canonical_location(&req.location).is_some()
+                || src.as_catalog().is_some() =>
+        {
             let title = req.title.clone().unwrap_or_else(|| name.clone());
             let e = Entry::new(title, req.location.clone(), EntryKind::Video);
-            src.details(&e).ok()
+            let details = src.details(&e);
+            if fp_sources::is_source_location(&req.location) {
+                Some(details.map_err(|e| crate::ui::errors::source(&e))?)
+            } else {
+                details.ok()
+            }
         }
         (e, _) => e.clone(),
     };
+    if let Some(entry) = &entry
+        && fp_sources::is_source_location(&entry.location)
+    {
+        let owner = fp_sources::location_owner(&entry.location).ok_or(tr!("open-no-source"))?;
+        if req.source_id.as_deref() != Some(owner.as_str()) {
+            return Err(tr!("open-no-source").into());
+        }
+    }
     let location = entry
         .as_ref()
         .map_or_else(|| req.location.clone(), |e| e.location.clone());
+    // What messages call it: a Plex location names no file.
+    let label = if name.is_empty() {
+        entry
+            .as_ref()
+            .map_or_else(|| req.shown_title(), |e| e.name.clone())
+    } else {
+        name.clone()
+    };
 
     // Library record: existing, or created for remote entries (and deleted
     // again if the video doesn't open, so nothing invisible is left behind).
-    let mut record = library.get_by_location(&location).ok().flatten();
+    // A colliding legacy record is kept during migration rather than losing
+    // its user data. Opening that history row must retain its own record ID.
+    let mut record = legacy_record.or_else(|| library.get_by_location(&location).ok().flatten());
     let mut created = None;
     if let (Some(e), Some(sid)) = (&entry, &req.source_id) {
         match &record {
@@ -242,25 +296,82 @@ pub fn open(
         .as_ref()
         .map(|r| r.tracks.clone())
         .unwrap_or_default();
+    let source_tracks = source
+        .as_ref()
+        .filter(|s| s.kind() == fp_sources::SourceKind::Plex)
+        .map(|src| {
+            let video = entry
+                .clone()
+                .unwrap_or_else(|| Entry::new(name.clone(), location.clone(), EntryKind::Video));
+            src.playback_tracks(&video).unwrap_or_default()
+        })
+        .unwrap_or_default();
+    // What was picked for this video, as the server's track IDs: a transcode
+    // has only the tracks the server puts in it.
+    if !source_tracks.is_empty() {
+        use_saved_source_tracks(&mut req, &picked, &source_tracks);
+    }
     let open_player = |src: Arc<dyn fp_core::ByteSource>, config: PlayerConfig| {
+        let direct = config.timeline.is_none();
+        let server_tracks = !direct && !source_tracks.is_empty();
         let mut pick = Pick::Off;
         Player::open(src, &name, config, |info| {
+            let audio = if server_tracks {
+                None
+            } else {
+                req.source_audio
+                    .as_ref()
+                    .and_then(|id| source_tracks.iter().find(|t| !t.subtitle && t.id == *id))
+                    .and_then(|t| t.index)
+                    .or(picked.audio)
+            };
             pick = subtitles::starting(
                 picked.subtitles.as_ref(),
-                picked.audio,
+                audio,
                 settings.subtitles,
                 &settings.subtitle_language,
                 info,
                 &subs,
                 &name,
             );
+            if let Some(id) = req.source_subtitle.as_deref() {
+                let track = source_tracks.iter().find(|t| t.subtitle && t.id == id);
+                pick = track
+                    .and_then(|t| {
+                        t.location
+                            .as_ref()
+                            .and_then(|location| subs.iter().position(|s| &s.location == location))
+                            .map(Pick::File)
+                            .or_else(|| t.index.map(Pick::Stream))
+                    })
+                    .unwrap_or(Pick::Off);
+            }
+            if server_tracks {
+                pick = Pick::Off;
+            }
             fp_media::Tracks {
-                audio: picked.audio,
+                audio,
                 subtitle: pick.stream(),
             }
         })
         .map(|p| (p, pick))
     };
+    let mut source_session = source.as_ref().and_then(|src| {
+        let video = entry
+            .clone()
+            .unwrap_or_else(|| Entry::new(name.clone(), location.clone(), EntryKind::Video));
+        src.watch_session(&video)
+    });
+    if source
+        .as_ref()
+        .is_some_and(|s| s.kind() == fp_sources::SourceKind::Plex)
+        && let Some(session) = source_session.as_mut()
+    {
+        if req.source_audio.is_some() {
+            session.audio_stream = req.source_audio.clone();
+        }
+        session.subtitle_stream = Some(req.source_subtitle.clone().unwrap_or_else(|| "0".into()));
+    }
     let targets = source
         .as_ref()
         .map(|src| {
@@ -278,9 +389,9 @@ pub fn open(
     // From where it was asked to start when the server can start it there
     // (and so seek), else from the beginning.
     let transcoded = |t: &TranscodeTarget| {
-        let fail = |e: String| format!("{name} ({}): {e}", t.label);
+        let fail = |e: String| format!("{label} ({}): {e}", t.label);
         let src = source.clone().ok_or_else(|| fail("no server".into()))?;
-        let restart = restart_at(src, &location, t);
+        let restart = restart_at(src, &location, t, source_session.clone());
         let first = if t.seekable { start_at } else { 0.0 };
         let stream = restart(first).map_err(fail)?;
         let config = PlayerConfig {
@@ -305,31 +416,58 @@ pub fn open(
             (p, pick, Some(t))
         }
         None => {
-            let src = opener
-                .open_in(req.source_id.as_deref(), &location)
-                .map_err(failed)?;
-            match open_player(src, player_config(settings, start_at)) {
-                Ok((p, pick)) => (p, pick, None),
-                Err(e)
+            let src = match (&source, &source_session) {
+                (Some(src), Some(session)) => match src.open_playback(&location, session) {
+                    Ok(bytes) => Ok(Some(bytes)),
+                    Err(e)
+                        if src.kind() == fp_sources::SourceKind::Plex
+                            && req.quality == Quality::Automatic
+                            && !targets.is_empty()
+                            && matches!(e, fp_sources::Error::Unsupported(_)) =>
+                    {
+                        log::info!("{label}: {e}; asking Plex to transcode");
+                        Ok(None)
+                    }
+                    Err(e) => Err(crate::ui::errors::source(&e)),
+                },
+                _ => opener
+                    .open_in(req.source_id.as_deref(), &location)
+                    .map(Some),
+            }
+            .map_err(failed)?;
+            match src.map(|src| open_player(src, player_config(settings, start_at))) {
+                Some(Ok((p, pick))) => (p, pick, None),
+                Some(Err(e))
                     if e.cannot_play_here()
                         && req.quality == Quality::Automatic
                         && !targets.is_empty() =>
                 {
                     let t = targets[0].clone();
-                    log::warn!("{name}: {e}; the server transcodes it to {}", t.label);
+                    log::warn!("{label}: {e}; the server transcodes it to {}", t.label);
                     let (p, pick) = transcoded(&t).map_err(failed)?;
                     notice = Some(tr!("transcode-cannot-play", quality = t.label.as_str()));
                     (p, pick, Some(t))
                 }
-                Err(e) => {
-                    return Err(failed(format!("{name}: {}", crate::ui::errors::media(&e))));
+                Some(Err(e)) => {
+                    return Err(failed(format!("{label}: {}", crate::ui::errors::media(&e))));
+                }
+                None => {
+                    let t = targets[0].clone();
+                    let (p, pick) = transcoded(&t).map_err(failed)?;
+                    notice = Some(tr!("transcode-cannot-play", quality = t.label.as_str()));
+                    (p, pick, Some(t))
                 }
             }
         }
     };
+    // Only for this open: the request is cloned for later ones (a Loop
+    // restart, Up next), which start playing.
+    if std::mem::take(&mut req.paused) {
+        player.pause();
+    }
     let info = player.info().clone();
     if settings.hardware_decoding {
-        warn_if_software(&name, &info, &player.stats());
+        warn_if_software(&label, &info, &player.stats());
     }
     let (resolved, detected) =
         detect_format(&name, &info, entry.as_ref(), record.as_ref(), settings);
@@ -386,13 +524,19 @@ pub fn open(
         let video = entry
             .clone()
             .unwrap_or_else(|| Entry::new(title.clone(), location.clone(), EntryKind::Video));
-        Watch::start(reports, src, &video, start_at)
+        match source_session {
+            Some(session) => Some(Watch::start_session(reports, src, session, start_at)),
+            None => Watch::start(reports, src, &video, start_at),
+        }
     });
     Ok(Opened {
         playback: Playback {
             player,
             request: OpenRequest {
-                location,
+                // A legacy row retained after a migration collision keeps
+                // its own user state across quality changes and reopens.
+                location: record.as_ref().map_or(location, |r| r.location.clone()),
+                entry,
                 transcode: transcoding.as_ref().map(|t| t.id.clone()),
                 ..req
             },
@@ -421,18 +565,26 @@ pub fn open(
             watch,
             targets,
             transcoding,
+            source_tracks,
         },
         scripts,
     })
 }
 
 /// Asks `source` to transcode `location` to `t` from a time (seconds).
-fn restart_at(source: Arc<dyn Source>, location: &str, t: &TranscodeTarget) -> fp_media::Restart {
+fn restart_at(
+    source: Arc<dyn Source>,
+    location: &str,
+    t: &TranscodeTarget,
+    session: Option<fp_sources::WatchSession>,
+) -> fp_media::Restart {
     let (location, id) = (location.to_string(), t.id.clone());
     Arc::new(move |at| {
-        source
-            .open_transcode(&location, &id, at)
-            .map_err(|e| e.to_string())
+        match &session {
+            Some(session) => source.open_transcode_session(&location, &id, at, session),
+            None => source.open_transcode(&location, &id, at),
+        }
+        .map_err(|e| e.to_string())
     })
 }
 
@@ -451,6 +603,63 @@ fn player_config(settings: &Settings, start_at: f64) -> PlayerConfig {
         volume: settings.volume,
         ..Default::default()
     }
+}
+
+/// Puts what was picked for a video on its request. The saved pick goes first:
+/// the request can be an old copy, kept in Up next before the pick was made.
+fn use_saved_source_tracks(
+    req: &mut OpenRequest,
+    picked: &fp_library::PickedTracks,
+    tracks: &[fp_sources::PlaybackTrack],
+) {
+    let (audio, subtitle) = saved_source_tracks(picked, tracks);
+    req.source_audio = audio.or(req.source_audio.take());
+    req.source_subtitle = subtitle.or(req.source_subtitle.take());
+}
+
+/// What was picked for a video, as its server's track IDs: audio, then
+/// subtitles ("0" for off).
+fn saved_source_tracks(
+    picked: &fp_library::PickedTracks,
+    tracks: &[fp_sources::PlaybackTrack],
+) -> (Option<String>, Option<String>) {
+    use fp_library::PickedSubtitles;
+    let audio = picked
+        .audio
+        .and_then(|i| tracks.iter().find(|t| !t.subtitle && t.index == Some(i)))
+        .map(|t| t.id.clone());
+    let subtitles = tracks.iter().filter(|t| t.subtitle);
+    let subtitle = match &picked.subtitles {
+        None => None,
+        Some(PickedSubtitles::Off) => Some("0".to_string()),
+        Some(PickedSubtitles::Stream(i)) => subtitles
+            .clone()
+            .find(|t| t.index == Some(*i))
+            .map(|t| t.id.clone()),
+        Some(PickedSubtitles::File(file)) => subtitles
+            .clone()
+            .find(|t| t.location.as_ref() == Some(file))
+            .map(|t| t.id.clone()),
+    };
+    (audio, subtitle)
+}
+
+/// How to keep a server's subtitle track picked while transcoding (`None` is
+/// off), the way a pick in the player is kept.
+pub(crate) fn picked_source_subtitles(
+    id: Option<&str>,
+    tracks: &[fp_sources::PlaybackTrack],
+) -> Option<fp_library::PickedSubtitles> {
+    use fp_library::PickedSubtitles;
+    let Some(id) = id else {
+        return Some(PickedSubtitles::Off);
+    };
+    let track = tracks.iter().find(|t| t.subtitle && t.id == id)?;
+    track
+        .location
+        .clone()
+        .map(PickedSubtitles::File)
+        .or_else(|| track.index.map(PickedSubtitles::Stream))
 }
 
 /// Logs why a video the hardware could decode is decoded in software.
@@ -994,8 +1203,234 @@ mod tests {
     use super::*;
 
     #[test]
+    fn source_owned_requests_bind_the_owner_without_a_library_record() {
+        let location = fp_sources::location::encode("server", "mb", "item=movie&version=edition");
+        let mut request = OpenRequest {
+            location,
+            ..Default::default()
+        };
+        assert_eq!(
+            request.bound_source_id().unwrap().as_deref(),
+            Some("server")
+        );
+        request.source_id = Some("another-account".into());
+        assert!(request.bound_source_id().is_err());
+        request.source_id = None;
+        request.location = "source://wrong/server/mb/item".into();
+        assert!(request.bound_source_id().is_err());
+        request.location = "http://public.example/movie.mp4".into();
+        assert!(request.bound_source_id().unwrap().is_none());
+    }
+
+    #[test]
+    fn an_entry_cannot_change_another_sources_saved_metadata() {
+        let library = Library::open_in_memory().unwrap();
+        let private = fp_sources::location::encode("private", "http", "clip.mp4");
+        let id = library
+            .upsert_entry(
+                "private",
+                &Entry::new("Private title", &private, EntryKind::Video),
+            )
+            .unwrap()
+            .id;
+        let opener = Opener::new();
+        opener.insert_source(Arc::new(fp_sources::LocalSource::new(
+            &fp_sources::LocalConfig {
+                id: "public".into(),
+                name: "Public".into(),
+                root: "/".into(),
+            },
+        )));
+        let request = OpenRequest {
+            location: "/public/clip.mp4".into(),
+            source_id: Some("public".into()),
+            entry: Some(Entry::new("Changed title", private, EntryKind::Video)),
+            ..Default::default()
+        };
+        assert!(
+            open(
+                request,
+                &opener,
+                &library,
+                &Settings::default(),
+                &Reports::start()
+            )
+            .is_err()
+        );
+        assert_eq!(library.get(id).unwrap().unwrap().title, "Private title");
+        assert!(library.history(10).unwrap().is_empty());
+    }
+
+    #[test]
     fn titles_from_names() {
         assert_eq!(title_from_name("My.Video_2024.mkv"), "My Video 2024");
+    }
+
+    struct RootedClip {
+        root: &'static str,
+        opened: Arc<Mutex<Vec<(String, String)>>>,
+    }
+
+    impl Source for RootedClip {
+        fn id(&self) -> &str {
+            "rooted"
+        }
+        fn name(&self) -> &str {
+            "Rooted clip"
+        }
+        fn kind(&self) -> fp_sources::SourceKind {
+            fp_sources::SourceKind::Http
+        }
+        fn describe(&self) -> String {
+            self.root.into()
+        }
+        fn canonical_location(&self, location: &str) -> Option<String> {
+            let key = if fp_sources::is_source_location(location) {
+                let reference = fp_sources::location::decode(location)?;
+                if reference.source_id != self.id() || reference.kind != "http" {
+                    return None;
+                }
+                reference.key
+            } else {
+                location.strip_prefix(self.root)?.into()
+            };
+            Some(fp_sources::location::encode(self.id(), "http", &key))
+        }
+        fn list(&self, _: Option<&str>) -> fp_sources::Result<Vec<Entry>> {
+            Ok(Vec::new())
+        }
+        fn open(&self, location: &str) -> fp_sources::Result<Arc<dyn fp_core::ByteSource>> {
+            let reference = fp_sources::location::decode(location)
+                .filter(|r| r.source_id == self.id() && r.kind == "http" && r.key == "clip.mp4")
+                .ok_or_else(|| fp_sources::Error::Unsupported("not this source's clip".into()))?;
+            lock(&self.opened).push((self.root.into(), reference.key));
+            let clip = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+                .join("../fp-media/tests/data/h264_aac_180_LR.mp4");
+            Ok(Arc::new(fp_core::source::FileSource::open(&clip)?))
+        }
+    }
+
+    fn reopen_rooted_clip(legacy_collision: bool) {
+        let library = Library::open_in_memory().unwrap();
+        let stable = fp_sources::location::encode("rooted", "http", "clip.mp4");
+        let original = "http://old.example/videos/clip.mp4";
+        let canonical_id = library
+            .upsert(&fp_library::MediaUpsert::new(&stable, "rooted"))
+            .unwrap()
+            .id;
+        let canonical_view = ViewSettings {
+            zoom: 1.25,
+            brightness: 0.1,
+            ..Default::default()
+        };
+        library
+            .set_view_settings(canonical_id, Some(&canonical_view))
+            .unwrap();
+        let (expected_id, expected_view) = if legacy_collision {
+            let id = library
+                .upsert(&fp_library::MediaUpsert::new(original, "rooted"))
+                .unwrap()
+                .id;
+            let view = ViewSettings {
+                zoom: 1.75,
+                brightness: -0.2,
+                ..Default::default()
+            };
+            library.set_view_settings(id, Some(&view)).unwrap();
+            library.set_favorite(id, true).unwrap();
+            (id, view)
+        } else {
+            (canonical_id, canonical_view)
+        };
+        let playlist = library.create_playlist("Keep this version").unwrap();
+        library.add_to_playlist(playlist, &[expected_id]).unwrap();
+        let opened = Arc::new(Mutex::new(Vec::new()));
+        let opener = Opener::new();
+        opener.insert_source(Arc::new(RootedClip {
+            root: "http://old.example/videos/",
+            opened: opened.clone(),
+        }));
+        let settings = Settings {
+            hardware_decoding: false,
+            resume: false,
+            haptics_enabled: false,
+            ..Default::default()
+        };
+        let reports = Reports::start();
+        let request = OpenRequest {
+            location: original.into(),
+            source_id: Some("rooted".into()),
+            entry: Some(Entry::new("Clip", original, EntryKind::Video)),
+            paused: true,
+            ..Default::default()
+        };
+        let first = open(request, &opener, &library, &settings, &reports)
+            .unwrap()
+            .playback;
+        assert_eq!(first.record_id, Some(expected_id));
+        assert_eq!(first.settings, expected_view);
+        assert_eq!(first.request.entry.as_ref().unwrap().location, stable);
+        assert!(first.player.is_paused());
+        assert!(!first.request.paused, "for this open only");
+        let mut reopen = first.request.clone();
+        reopen.paused = true;
+        reopen.quality = Quality::Original;
+        reopen.start_at = Some(0.0);
+        first.close(&library);
+
+        // Quality changes clone Playback.request. The source now has a
+        // different endpoint and must receive the canonical entry, while
+        // a legacy row retained after a collision must keep its own ID.
+        opener.insert_source(Arc::new(RootedClip {
+            root: "https://new.example/moved/",
+            opened: opened.clone(),
+        }));
+        let second = open(reopen, &opener, &library, &settings, &reports)
+            .unwrap()
+            .playback;
+        assert_eq!(second.record_id, Some(expected_id));
+        assert_eq!(second.settings, expected_view);
+        assert_eq!(second.request.entry.as_ref().unwrap().location, stable);
+        assert_eq!(
+            second.request.location,
+            if legacy_collision { original } else { &stable }
+        );
+        assert_eq!(
+            *lock(&opened),
+            [
+                ("http://old.example/videos/".into(), "clip.mp4".into()),
+                ("https://new.example/moved/".into(), "clip.mp4".into()),
+            ]
+        );
+        let history = library.history(10).unwrap();
+        assert_eq!(history.len(), 2);
+        assert!(history.iter().all(|entry| entry.media_id == expected_id));
+        assert_eq!(
+            library.playlist_items(playlist).unwrap()[0].record.id,
+            expected_id
+        );
+        assert_eq!(
+            library.get(canonical_id).unwrap().unwrap().view_settings,
+            Some(canonical_view)
+        );
+        if legacy_collision {
+            assert!(library.get(expected_id).unwrap().unwrap().favorite);
+            assert!(library.get_by_location(original).unwrap().is_some());
+        } else {
+            assert!(library.get_by_location(original).unwrap().is_none());
+        }
+        second.close(&library);
+        assert!(wait_closed(Duration::from_secs(5)));
+    }
+
+    #[test]
+    fn canonical_entries_survive_endpoint_changes_and_quality_reopens() {
+        reopen_rooted_clip(false);
+    }
+
+    #[test]
+    fn colliding_legacy_history_keeps_its_user_data_on_quality_reopen() {
+        reopen_rooted_clip(true);
     }
 
     /// A server whose file this player can't read, which transcodes it to
@@ -1004,6 +1439,7 @@ mod tests {
     struct Unplayable {
         files: Mutex<u32>,
         asked: Mutex<Vec<(String, f64)>>,
+        plex: bool,
     }
 
     impl Source for Unplayable {
@@ -1014,7 +1450,11 @@ mod tests {
             "Server"
         }
         fn kind(&self) -> fp_sources::SourceKind {
-            fp_sources::SourceKind::MediaBrowser
+            if self.plex {
+                fp_sources::SourceKind::Plex
+            } else {
+                fp_sources::SourceKind::MediaBrowser
+            }
         }
         fn describe(&self) -> String {
             String::new()
@@ -1024,7 +1464,24 @@ mod tests {
         }
         fn open(&self, _: &str) -> fp_sources::Result<Arc<dyn fp_core::ByteSource>> {
             *lock(&self.files) += 1;
+            if self.plex {
+                return Err(fp_sources::Error::Unsupported(
+                    "Plex requires conversion".into(),
+                ));
+            }
             Ok(Arc::new(fp_core::source::MemorySource(vec![7; 64 << 10])))
+        }
+        fn watch_session(&self, _: &Entry) -> Option<fp_sources::WatchSession> {
+            self.plex.then(|| fp_sources::WatchSession {
+                item: "1".into(),
+                title: "Film".into(),
+                endpoint: None,
+                id: "session".into(),
+                duration_ms: Some(300000),
+                media_id: Some("10".into()),
+                audio_stream: None,
+                subtitle_stream: None,
+            })
         }
         fn transcode_targets(&self, _: &Entry) -> Vec<TranscodeTarget> {
             [1080, 720]
@@ -1089,6 +1546,23 @@ mod tests {
         assert_eq!(pb.player.duration(), 300.0);
         assert!(pb.player.can_seek());
         assert_eq!(pb.targets.len(), 2);
+    }
+
+    #[test]
+    fn plex_conversion_required_falls_back_only_under_automatic() {
+        let server = Arc::new(Unplayable {
+            plex: true,
+            ..Default::default()
+        });
+        let pb = open_from(server.clone(), Quality::Automatic, None)
+            .unwrap()
+            .playback;
+        assert_eq!(pb.transcoding.as_ref().map(|t| t.id.as_str()), Some("1080"));
+        assert_eq!(*lock(&server.asked), [("1080".into(), 30.0)]);
+        drop(pb);
+        lock(&server.asked).clear();
+        assert!(open_from(server.clone(), Quality::Original, None).is_err());
+        assert!(lock(&server.asked).is_empty());
     }
 
     #[test]
@@ -1291,5 +1765,82 @@ mod tests {
         s422.pixel_format = "yuv422p10le".into();
         assert!(!hardware_decodes(&s422, true));
         assert!(hardware_decodes(&stream("h264", 8), false));
+    }
+
+    #[test]
+    fn picks_become_the_servers_tracks_and_back() {
+        use fp_library::{PickedSubtitles, PickedTracks};
+        use fp_sources::PlaybackTrack;
+        let track =
+            |id: &str, index: Option<usize>, location: Option<&str>, subtitle| PlaybackTrack {
+                id: id.into(),
+                index,
+                location: location.map(Into::into),
+                subtitle,
+                title: String::new(),
+                codec: String::new(),
+                selected: false,
+            };
+        let tracks = [
+            track("201", Some(1), None, false),
+            track("202", Some(2), None, false),
+            track("301", Some(3), None, true),
+            track("302", None, Some("plex://sub"), true),
+        ];
+        let saved =
+            |audio, subtitles| saved_source_tracks(&PickedTracks { audio, subtitles }, &tracks);
+        assert_eq!(saved(None, None), (None, None), "nothing picked");
+        assert_eq!(
+            saved(Some(2), Some(PickedSubtitles::Stream(3))),
+            (Some("202".into()), Some("301".into()))
+        );
+        assert_eq!(
+            saved(None, Some(PickedSubtitles::File("plex://sub".into()))).1,
+            Some("302".into())
+        );
+        assert_eq!(saved(None, Some(PickedSubtitles::Off)).1, Some("0".into()));
+        assert_eq!(
+            saved(Some(9), Some(PickedSubtitles::Stream(9))),
+            (None, None)
+        );
+
+        assert_eq!(
+            picked_source_subtitles(None, &tracks),
+            Some(PickedSubtitles::Off)
+        );
+        assert_eq!(
+            picked_source_subtitles(Some("301"), &tracks),
+            Some(PickedSubtitles::Stream(3))
+        );
+        assert_eq!(
+            picked_source_subtitles(Some("302"), &tracks),
+            Some(PickedSubtitles::File("plex://sub".into()))
+        );
+        assert_eq!(picked_source_subtitles(Some("999"), &tracks), None);
+
+        // An old copy of the request from Up next, then subtitles turned off
+        // and another audio track picked: the saved picks win.
+        let mut old = OpenRequest {
+            source_audio: Some("201".into()),
+            source_subtitle: Some("301".into()),
+            ..Default::default()
+        };
+        use_saved_source_tracks(
+            &mut old,
+            &PickedTracks {
+                audio: Some(2),
+                subtitles: Some(PickedSubtitles::Off),
+            },
+            &tracks,
+        );
+        assert_eq!(old.source_audio.as_deref(), Some("202"));
+        assert_eq!(old.source_subtitle.as_deref(), Some("0"));
+        // Nothing saved: what the request asks for stands.
+        let mut asked = OpenRequest {
+            source_audio: Some("201".into()),
+            ..Default::default()
+        };
+        use_saved_source_tracks(&mut asked, &PickedTracks::default(), &tracks);
+        assert_eq!(asked.source_audio.as_deref(), Some("201"));
     }
 }

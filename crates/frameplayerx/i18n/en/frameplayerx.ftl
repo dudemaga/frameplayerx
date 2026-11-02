@@ -111,6 +111,16 @@ settings-screen-curvature = Screen curvature
 settings-vr-videos = 180° and 360° videos
 settings-height = Height
 settings-height-desc = Raise or lower yourself in videos without their own.
+settings-background = Background
+settings-background-desc = Around flat videos and the menus. Your room replaces it while it shows.
+# Short: a chip.
+background-black = Black
+# Short: a chip.
+background-dark-grey = Dark grey
+# Short: a chip.
+background-grey = Grey
+# Short: a chip.
+background-navy = Navy
 settings-sound-heading = Sound
 settings-volume = Volume
 settings-audio-device = Audio device
@@ -620,7 +630,7 @@ source-kind-dlna-desc = DLNA media server on your network (Plex, Jellyfin, Emby,
 # A name field's hint.
 source-name-hint-jellyfin = Optional (e.g. Jellyfin)
 source-name-hint-deovr = Optional (e.g. DeoVR feed)
-source-name-hint-heresphere = Optional (e.g. HereSphere feed)
+source-name-hint-heresphere = Optional (e.g. HereSphere API)
 source-name-hint-webdav = Optional (e.g. Nextcloud)
 source-name-hint-http = Optional (e.g. Video server)
 source-name-hint-smb = Optional (e.g. Home NAS)
@@ -680,7 +690,7 @@ sort-feed = Feed order
 sort-title = Title
 # Short: a sort.
 sort-newest = Newest
-# Short: a sort, a random order.
+# Short: a random order in the sorts, and the button that shuffles Up next.
 sort-shuffle = Shuffle
 feed-no-scenes = No scenes
 feed-no-scenes-desc = The server lists no scenes here.
@@ -1003,8 +1013,6 @@ local-no-drives = None inserted
 source-not-available = That source is not available
 source-not-inserted = The microSD card or USB drive this is on is not inserted.
 source-no-drives = No microSD card or USB drive is inserted.
-source-not-jellyfin = not a Jellyfin or Emby server
-source-not-jellyfin-toast = Not a Jellyfin or Emby server
 source-not-feed = Not a DeoVR feed or HereSphere API
 source-not-scene-feed = not a scene feed
 # Short: a button.
@@ -1209,7 +1217,7 @@ error-io = I/O error: { $error }
 error-http-status = HTTP { $status } from { $url }
 error-http = request to { $url } failed: { $error }
 error-auth = authentication failed for { $server }
-error-signed-out = { $server } has signed this headset out: edit the source under Sources and pair it again with Quick Connect
+error-signed-out = { $server } has signed this headset out: edit the source under Sources and sign in again
 error-not-found = not found: { $what }
 error-not-inserted = the microSD card or USB drive it is on is not inserted
 error-invalid-location = invalid location { $location }: { $reason }
@@ -1296,3 +1304,33 @@ remote-position = { $position } of { $duration }
 
 # Short: the space bar's label.
 keyboard-space = space
+
+## Plex source setup
+
+source-kind-plex-desc = Plex Media Server
+# Short: selects account linking with a code entered on a phone or computer.
+plex-sign-in = Link with code
+plex-link-desc = Get a code, then enter it at plex.tv/link on your phone or computer.
+plex-link-waiting = On your phone or computer, visit this address and enter the code:
+plex-link-expired = This code has expired. Get another code and try again.
+plex-server-select = Choose a server
+plex-server-owned = Your server
+plex-server-shared = Shared with you
+plex-no-servers = No accessible servers were found.
+# Short: selects manual credentials instead of account linking; also labels the token field.
+plex-token = Access token
+# Short: verifies the address, credentials and server identity.
+plex-connect = Test connection
+plex-connection-mode = Connection
+plex-local-only = Local only
+plex-connection-direct = Direct connections
+plex-connection-relay = Direct + Relay
+plex-connection-local-desc = Use LAN addresses only. No remote addresses or Plex Relay.
+plex-connection-direct-desc = Try LAN addresses first, then direct remote addresses.
+plex-connection-relay-desc = Try direct connections first, then Plex Relay if needed. Relay is limited to 2 Mbit/s.
+plex-connection-pass-desc = Local playback is free. Remote video needs Plex Pass for you or the server owner, or Remote Watch Pass for you.
+plex-connection-subnet-desc = Plex may treat another subnet or VLAN as remote, even with a LAN address.
+plex-connection-manual-local-desc = For an access token, use a LAN IP address with Local only.
+plex-test-required = Connect to a server before saving.
+# Plex edit form: changing credentials keeps the existing source separate.
+plex-new-account-source = Linking again or replacing the token adds a separate source and keeps this one.

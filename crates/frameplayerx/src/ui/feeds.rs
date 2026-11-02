@@ -11,9 +11,10 @@
 
 use super::page::{self, Card};
 use super::theme::{self, Weight};
-use super::widgets::{self, Kind, Tip};
+use super::widgets::{self, Kind, ListArea, Tip};
 use super::{Action, FormatFilter, View, fmt_date, fmt_time, icons};
 use crate::playback::OpenRequest;
+use crate::shuffle::{key as shuffle_key, new_seed};
 use egui::{RichText, Sense, Vec2};
 use fp_sources::{FeedLibrary, FeedScene, SceneInfo, SourceKind};
 use std::collections::{BTreeSet, HashMap, HashSet};
@@ -245,23 +246,6 @@ fn tally<'a>(names: impl Iterator<Item = &'a String>) -> Vec<(String, usize)> {
             .then_with(|| a.0.to_lowercase().cmp(&b.0.to_lowercase()))
     });
     out
-}
-
-/// Where `url` falls in shuffle `seed`: the same while the seed is.
-fn shuffle_key(seed: u64, url: &str) -> u64 {
-    let mut h = 0xcbf2_9ce4_8422_2325 ^ seed;
-    for b in url.bytes() {
-        h = (h ^ b as u64).wrapping_mul(0x100_0000_01b3);
-    }
-    // splitmix64's finish, so nearby seeds give unrelated orders.
-    h = (h ^ (h >> 30)).wrapping_mul(0xbf58_476d_1ce4_e5b9);
-    h = (h ^ (h >> 27)).wrapping_mul(0x94d0_49bb_1331_11eb);
-    h ^ (h >> 31)
-}
-
-/// A seed for a new shuffle.
-fn new_seed() -> u64 {
-    fp_core::playback::now_ms() as u64
 }
 
 pub struct FeedView {
@@ -927,7 +911,7 @@ fn filters(ui: &mut egui::Ui, f: &mut FeedView, haptics: bool) -> bool {
         egui::ScrollArea::horizontal()
             .id_salt("feed-groups")
             .scroll_bar_visibility(egui::scroll_area::ScrollBarVisibility::AlwaysHidden)
-            .show(ui, |ui| {
+            .show_rail(ui, |ui| {
                 ui.horizontal(|ui| {
                     ui.spacing_mut().item_spacing.x = 8.0;
                     if widgets::chip(ui, tr!("filter-all"), f.group.is_none()).clicked() {
@@ -1089,7 +1073,7 @@ fn details(ui: &mut egui::Ui, v: &mut View, source: &str, name: &str, f: &mut Fe
     let queued = scene_request(source, &scene, info.as_deref(), None);
     egui::ScrollArea::vertical()
         .auto_shrink(false)
-        .show(ui, |ui| {
+        .show_list(ui, |ui| {
             ui.add_space(8.0);
             ui.horizontal_top(|ui| {
                 ui.spacing_mut().item_spacing.x = 28.0;

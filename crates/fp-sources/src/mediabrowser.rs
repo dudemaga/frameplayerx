@@ -536,6 +536,66 @@ pub struct QuickConnectState {
 }
 
 impl MediaBrowserSource {
+    fn stable_asset(&self, location: &str) -> Option<String> {
+        let mut url = url::Url::parse(location).ok()?;
+        let pairs: Vec<_> = url
+            .query_pairs()
+            .filter(|(key, _)| {
+                !matches!(
+                    key.to_ascii_lowercase().as_str(),
+                    "api_key" | "access_token" | "token" | "x-emby-token"
+                )
+            })
+            .map(|(key, value)| (key.into_owned(), value.into_owned()))
+            .collect();
+        url.set_query(None);
+        if !pairs.is_empty() {
+            url.query_pairs_mut().extend_pairs(pairs);
+        }
+        let relative = crate::location::relative_url(&self.base_url, url.as_str())?;
+        Some(crate::location::encode(&self.id, "mb-asset", &relative))
+    }
+
+    fn stable_entry(&self, entry: &mut Entry) {
+        if let Some(location) = self.canonical_location(&entry.location) {
+            entry.location = location;
+        }
+        if let Some(url) = entry.thumbnail_url.as_mut()
+            && let Some(stable) = self.stable_asset(url)
+        {
+            *url = stable;
+        }
+        for subtitle in &mut entry.subtitles {
+            if let Some(stable) = self.stable_asset(&subtitle.location) {
+                subtitle.location = stable;
+            }
+        }
+        for script in &mut entry.scripts {
+            if let Some(stable) = self.stable_asset(script) {
+                *script = stable;
+            }
+        }
+    }
+
+    /// Restores a source-owned item reference to the adapter's internal form.
+    /// The embedded owner is checked before any server request is made.
+    fn resolved_location(&self, location: &str) -> Result<String> {
+        if !crate::is_source_location(location) {
+            return Ok(location.to_string());
+        }
+        let reference = crate::location::decode(location)
+            .filter(|reference| reference.source_id == self.id && reference.kind == "mb")
+            .ok_or_else(|| Error::invalid(location, "not an item of this MediaBrowser source"))?;
+        let restored = format!("mb:{}#{}", self.base_url, reference.key);
+        if decode_location(&restored).is_none() {
+            return Err(Error::invalid(
+                location,
+                "invalid MediaBrowser item reference",
+            ));
+        }
+        Ok(restored)
+    }
+
     /// Creates a new MediaBrowser (Jellyfin/Emby) source from configuration.
     pub fn new(config: &MediaBrowserConfig) -> Result<Self> {
         let base_url = config.url.trim_end_matches('/').to_string();
@@ -579,6 +639,8 @@ impl MediaBrowserSource {
     /// The media source of `location` that plays: the version it names,
     /// the one chosen, else the tallest that fits the maximum height.
     fn playing_version(&self, location: &str, item: &Value) -> Option<Value> {
+        let location = self.resolved_location(location).ok()?;
+        let location = location.as_str();
         let id = text(item, "Id").unwrap_or_default();
         let chosen = location_version(location)
             .map(str::to_string)
@@ -608,6 +670,10 @@ impl MediaBrowserSource {
     /// now on (subtitles included); `None` goes back to the tallest that
     /// fits the maximum height.
     pub fn set_version(&self, location: &str, version: Option<&str>) {
+        let Ok(location) = self.resolved_location(location) else {
+            return;
+        };
+        let location = location.as_str();
         let Ok(id) = item_id(location) else {
             return;
         };
@@ -957,15 +1023,61 @@ impl Source for MediaBrowserSource {
         format!("MediaBrowser server {}", redact(&self.base_url))
     }
 
+    fn canonical_location(&self, location: &str) -> Option<String> {
+        if crate::is_source_location(location) {
+            let reference = crate::location::decode(location)?;
+            return (reference.source_id == self.id
+                && matches!(reference.kind.as_str(), "mb" | "mb-asset"))
+            .then(|| crate::location::encode(&self.id, &reference.kind, &reference.key));
+        }
+        if let Some((_, key)) = location
+            .strip_prefix("mb:")
+            .and_then(|rest| rest.rsplit_once('#'))
+            && decode_location(location).is_some()
+        {
+            return Some(crate::location::encode(&self.id, "mb", key));
+        }
+        // Older callers may have saved the direct-play URL rather than the
+        // item's MediaBrowser location. Recover its exact item/version,
+        // excluding ephemeral authentication and streaming parameters.
+        let asset = self.stable_asset(location)?;
+        if let Some(reference) = crate::location::decode(&asset) {
+            let path = reference.key.split('?').next()?;
+            let segments: Vec<_> = path.split('/').collect();
+            if let ["Videos", id, "stream"] = segments.as_slice()
+                && !id.is_empty()
+            {
+                let parsed = url::Url::parse(location).ok()?;
+                let version = parsed.query_pairs().find_map(|(key, value)| {
+                    key.eq_ignore_ascii_case("MediaSourceId")
+                        .then(|| value.into_owned())
+                });
+                let id = crate::urlutil::percent_decode(id);
+                let key = match version.filter(|version| !version.is_empty()) {
+                    Some(version) => format!("item={id}&version={version}"),
+                    None => format!("item={id}"),
+                };
+                return Some(crate::location::encode(&self.id, "mb", &key));
+            }
+        }
+        Some(asset)
+    }
+
     fn list(&self, location: Option<&str>) -> Result<Vec<Entry>> {
         match location {
             None => {
                 let (_, user_id) = self.client()?;
                 let path = format!("/Users/{user_id}/Views");
                 let v = self.api_get_json(&path)?;
-                Ok(parse_views(&v, &self.base_url))
+                let mut entries = parse_views(&v, &self.base_url);
+                for entry in &mut entries {
+                    self.stable_entry(entry);
+                }
+                Ok(entries)
             }
             Some(loc) => {
+                let resolved = self.resolved_location(loc)?;
+                let loc = resolved.as_str();
                 let id = item_id(loc)?;
                 let (_, user_id) = self.client()?;
                 let mut start_index: usize = 0;
@@ -980,7 +1092,11 @@ impl Source for MediaBrowserSource {
                     let v = self.api_get_json(&query)?;
                     // The page as sent: one of only photos still goes on.
                     let count = array(&v, "Items").len();
-                    all_entries.extend(parse_items(&v, &self.base_url));
+                    let mut entries = parse_items(&v, &self.base_url);
+                    for entry in &mut entries {
+                        self.stable_entry(entry);
+                    }
+                    all_entries.extend(entries);
 
                     let total = num(&v, "TotalRecordCount").map(|n| n as usize).unwrap_or(0);
                     start_index += PAGE_SIZE;
@@ -992,7 +1108,11 @@ impl Source for MediaBrowserSource {
                 {
                     let mut parents = lock(&self.parents);
                     for entry in &all_entries {
-                        parents.insert(entry.location.clone(), loc.to_string());
+                        parents.insert(
+                            entry.location.clone(),
+                            self.canonical_location(loc)
+                                .unwrap_or_else(|| loc.to_string()),
+                        );
                     }
                 }
 
@@ -1002,6 +1122,16 @@ impl Source for MediaBrowserSource {
     }
 
     fn open(&self, location: &str) -> Result<Arc<dyn ByteSource>> {
+        if let Some(reference) = crate::location::decode(location)
+            && reference.source_id == self.id
+            && reference.kind == "mb-asset"
+        {
+            let url = crate::location::resolve_url(&self.base_url, &reference.key)
+                .ok_or_else(|| Error::invalid(location, "invalid MediaBrowser resource path"))?;
+            return Ok(Arc::new(self.client()?.0.open(&url)?));
+        }
+        let resolved = self.resolved_location(location)?;
+        let location = resolved.as_str();
         let id = item_id(location)?;
         let (client, user_id) = self.client()?;
         let token = self.auth_credentials().map(|(t, _)| t).unwrap_or_default();
@@ -1028,12 +1158,23 @@ impl Source for MediaBrowserSource {
         Ok(Arc::new(client.open(&url)?))
     }
 
+    fn picture_request(&self, location: &str) -> Option<(HttpClient, String)> {
+        let reference = crate::location::decode(location)?;
+        if reference.source_id != self.id || reference.kind != "mb-asset" {
+            return None;
+        }
+        let url = crate::location::resolve_url(&self.base_url, &reference.key)?;
+        Some((self.client().ok()?.0, url))
+    }
+
     fn parent(&self, location: &str) -> Option<String> {
-        lock(&self.parents).get(location).cloned()
+        let location = self.canonical_location(location)?;
+        lock(&self.parents).get(&location).cloned()
     }
 
     fn details(&self, entry: &Entry) -> Result<Entry> {
-        let Ok(id) = item_id(&entry.location) else {
+        let resolved = self.resolved_location(&entry.location)?;
+        let Ok(id) = item_id(&resolved) else {
             return Ok(entry.clone());
         };
         let (_, user_id) = self.client()?;
@@ -1041,7 +1182,7 @@ impl Source for MediaBrowserSource {
             format!("/Users/{user_id}/Items/{id}?Fields=MediaSources,Chapters,Path,Overview,Tags");
         let v = self.api_get_json(&path)?;
         let mut out = entry.clone();
-        let chosen = location_version(&entry.location)
+        let chosen = location_version(&resolved)
             .map(str::to_string)
             .or_else(|| self.chosen_version(&id));
         apply_item_details(
@@ -1052,6 +1193,7 @@ impl Source for MediaBrowserSource {
             chosen.as_deref(),
             self.max_height,
         );
+        self.stable_entry(&mut out);
         Ok(out)
     }
 
@@ -1065,7 +1207,8 @@ impl Source for MediaBrowserSource {
     }
 
     fn watch_session(&self, video: &Entry) -> Option<WatchSession> {
-        let id = item_id(&video.location).ok()?;
+        let resolved = self.resolved_location(&video.location).ok()?;
+        let id = item_id(&resolved).ok()?;
         Some(WatchSession::new(id, video.name.clone(), None))
     }
 
@@ -1102,10 +1245,13 @@ impl Source for MediaBrowserSource {
     /// The sizes the playing version can be transcoded to: its own and the
     /// usual heights below, none above the maximum height.
     fn transcode_targets(&self, video: &Entry) -> Vec<TranscodeTarget> {
-        let found = item_id(&video.location).and_then(|id| {
-            let (_, user) = self.client()?;
-            self.api_get_json(&format!("/Users/{user}/Items/{id}?Fields=MediaSources"))
-        });
+        let found = self
+            .resolved_location(&video.location)
+            .and_then(|location| item_id(&location))
+            .and_then(|id| {
+                let (_, user) = self.client()?;
+                self.api_get_json(&format!("/Users/{user}/Items/{id}?Fields=MediaSources"))
+            });
         match found {
             Ok(item) => self
                 .playing_version(&video.location, &item)
@@ -1122,6 +1268,8 @@ impl Source for MediaBrowserSource {
     /// one. Dropping the stream stops its encode: Emby otherwise encodes on
     /// to the end, Jellyfin for a while.
     fn open_transcode(&self, location: &str, id: &str, start: f64) -> Result<Arc<dyn ByteSource>> {
+        let resolved = self.resolved_location(location)?;
+        let location = resolved.as_str();
         let item = item_id(location)?;
         let (source, width, height, bitrate) = parse_transcode_id(id)
             .ok_or_else(|| Error::invalid(location, format!("no transcode {id}")))?;
@@ -1160,6 +1308,10 @@ impl Source for MediaBrowserSource {
     }
 
     fn as_media_browser(&self) -> Option<&MediaBrowserSource> {
+        Some(self)
+    }
+
+    fn as_catalog(&self) -> Option<&dyn crate::Catalog> {
         Some(self)
     }
 }

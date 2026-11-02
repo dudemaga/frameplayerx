@@ -141,9 +141,10 @@ fn mediabrowser_full_lifecycle_browse_stream_and_progress() {
     assert_eq!(detailed.markers[1], (30.0, "Drop".to_string()));
     assert_eq!(detailed.subtitles.len(), 1);
     assert!(
-        detailed.subtitles[0]
-            .location
-            .contains("/Videos/item_rollercoaster/ms_1/Subtitles/2/Stream.srt")
+        fp_sources::location::decode(&detailed.subtitles[0].location)
+            .unwrap()
+            .key
+            .contains("Videos/item_rollercoaster/ms_1/Subtitles/2/Stream.srt")
     );
 
     // 4. Sidecars
@@ -259,7 +260,9 @@ fn mediabrowser_search_finds_titles_by_kind_not_episodes() {
         Some(Credentials::new("alice", "secret123")),
     ))
     .unwrap();
-    let found = mb.search(" alien ", 50).unwrap();
+    let catalog = fp_sources::Source::as_catalog(&mb).expect("a rich server catalog");
+    assert!(catalog.capabilities().favorites);
+    let found = catalog.search(" alien ", 50).unwrap();
     let sections: Vec<(&str, Vec<&str>)> = found
         .iter()
         .map(|(s, items)| (*s, items.iter().map(|i| i.name.as_str()).collect()))
@@ -368,7 +371,7 @@ fn emby_tags_and_no_quick_connect() {
 /// A Quick Connect sign-in the server revoked (the password changed, or the
 /// device was signed out) can't be renewed: no password is kept.
 #[test]
-fn revoked_quick_connect_sign_in_says_pair_again() {
+fn revoked_quick_connect_sign_in_says_sign_in_again() {
     let server = TestServer::start(|_| resp(401, "", &[]));
     let mut config = mediabrowser_config(server.url(""), None);
     config.access_token = Some("revoked".into());
@@ -377,7 +380,7 @@ fn revoked_quick_connect_sign_in_says_pair_again() {
     for _ in 0..2 {
         let err = src.list(None).unwrap_err();
         assert!(matches!(err, fp_sources::Error::SignedOut(_)), "{err}");
-        assert!(err.to_string().contains("Quick Connect"), "{err}");
+        assert!(err.to_string().contains("sign in again"), "{err}");
     }
 }
 
@@ -448,10 +451,18 @@ fn a_version_location_streams_that_version() {
     // The details name the version that plays: the tallest, else the one chosen.
     let entry = Entry::new("Beach", plain.clone(), EntryKind::Video);
     let tallest = src.details(&entry).unwrap();
-    assert_eq!(tallest.location, format!("{plain}&version=ms_8k"));
+    assert_eq!(
+        tallest.location,
+        src.canonical_location(&format!("{plain}&version=ms_8k"))
+            .unwrap()
+    );
     mb.set_version(&plain, Some("ms_4k"));
     let chosen = src.details(&entry).unwrap();
-    assert_eq!(chosen.location, format!("{plain}&version=ms_4k"));
+    assert_eq!(
+        chosen.location,
+        src.canonical_location(&format!("{plain}&version=ms_4k"))
+            .unwrap()
+    );
 
     // A version's location plays it, whatever is chosen now.
     mb.set_version(&plain, None);

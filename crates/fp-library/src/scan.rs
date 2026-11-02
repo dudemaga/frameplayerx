@@ -29,10 +29,10 @@ pub const SCRIPT_AXES: &[&str] = &[
 /// `Some("roll")`), `None` for a main script or anything else.
 pub fn script_axis(location: &str) -> Option<String> {
     let name = crate::record::file_name_of(location);
-    if !is_script_name(name) {
+    if !is_script_name(&name) {
         return None;
     }
-    let (_, axis) = stem_of(name).rsplit_once('.')?;
+    let (_, axis) = stem_of(&name).rsplit_once('.')?;
     let axis = axis.to_ascii_lowercase();
     SCRIPT_AXES.contains(&axis.as_str()).then_some(axis)
 }
@@ -572,6 +572,12 @@ mod tests {
         );
         assert_eq!(script_axis("/x/a.funscript"), None);
         assert_eq!(script_axis("/x/a.roll.mp4"), None);
+        let key = "VR_180_LR/Caf%C3%A9%20clip.roll.funscript?token=ignored";
+        let owned = format!(
+            "source://source/server/http/{}",
+            percent_encoding::utf8_percent_encode(key, percent_encoding::NON_ALPHANUMERIC)
+        );
+        assert_eq!(script_axis(&owned).as_deref(), Some("roll"));
     }
 
     #[test]

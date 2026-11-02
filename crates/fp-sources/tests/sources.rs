@@ -81,7 +81,7 @@ fn autoindex_listing_open_and_sidecars() {
     assert_eq!(sc.subtitles[0].language.as_deref(), Some("en"));
     assert_eq!(
         sc.subtitles[0].location,
-        server.url("/vr/Beach_180_LR.en.srt")
+        fp_sources::location::encode("x", "http", "Beach_180_LR.en.srt")
     );
 }
 
@@ -128,7 +128,9 @@ fn webdav_propfind_and_read() {
         ["Season 1", "Trip #1_360_TB.funscript", "Trip #1_360_TB.mkv"]
     );
     for e in &list {
-        assert!(e.location.starts_with(&server.base), "{}", e.location);
+        let location = fp_sources::location::decode(&e.location).unwrap();
+        assert_eq!(location.source_id, "x");
+        assert_eq!(location.kind, "webdav");
     }
     let mkv = &list[2];
     assert_eq!(mkv.size, Some(4096));
@@ -139,7 +141,10 @@ fn webdav_propfind_and_read() {
         (Projection::EQUIRECT_360, StereoLayout::TopBottom)
     );
     assert_eq!(list[0].kind, EntryKind::Directory);
-    assert!(list[0].location.ends_with("/dav/vr/Season%201/"));
+    assert_eq!(
+        fp_sources::location::decode(&list[0].location).unwrap().key,
+        "Season%201/"
+    );
 
     let f = src.open(&mkv.location).unwrap();
     let mut buf = vec![0u8; 5000];
@@ -188,6 +193,9 @@ fn browse_reply(base: &str, req: &Req) -> Resp {
             didl_item(11, "Beach_180_LR.en.srt", &format!("{base}/media/11.srt"), "text/srt"),
             didl_item(12, "Dome Tour", "/media/12.mkv", "video/x-matroska"),
         ],
+        "10" if tag("BrowseFlag") == "BrowseMetadata" => vec![
+            didl_item(10, "Beach_180_LR", &format!("{base}/media/10.mp4"), "video/mp4"),
+        ],
         _ => {
             return resp(
                 500,
@@ -234,6 +242,7 @@ fn dlna_description_browse_paging_and_read() {
             assert!(
                 req.body
                     .contains("<BrowseFlag>BrowseDirectChildren</BrowseFlag>")
+                    || req.body.contains("<BrowseFlag>BrowseMetadata</BrowseFlag>")
             );
             browse_reply(b.get().unwrap(), req)
         }
@@ -274,7 +283,12 @@ fn dlna_description_browse_paging_and_read() {
     assert_eq!(beach.duration, Some(60.0));
     assert_eq!(beach.size, Some(1000));
     assert_eq!(beach.format.unwrap().stereo, StereoLayout::SideBySide);
-    assert_eq!(items[2].location, server.url("/media/12.mkv"));
+    assert_eq!(
+        fp_sources::location::decode(&items[2].location)
+            .unwrap()
+            .key,
+        "item:12"
+    );
 
     let f = src.open(&beach.location).unwrap();
     let mut buf = [0u8; 10];
@@ -636,7 +650,7 @@ fn heresphere_library_details_and_open() {
             (3, 31_000.0)
         ]
     );
-    assert!(events.iter().all(|e| e["id"] == beach.location.as_str()
+    assert!(events.iter().all(|e| e["id"] == server.url("/heresphere/1")
         && e["username"] == "bob"
         && e["title"] == "Beach Day"
         && e.get("password").is_none()));

@@ -23,8 +23,8 @@ A VR video player for the Valve Steam Frame. It plays flat, 180°, 360° and fis
 - **3D Blu-ray**: disc images (`.iso`), MKV rips and the disc's `.ssif` files play in full 3D (H.264 MVC) on the hardware decoder
 - **Picture adjustments**: position, zoom, depth, picture settings and fisheye lens calibration, saved for each video, and a screen that follows your head for watching lying down
 - **Videos on the headset**: browse any folder on the headset, a microSD card or a USB drive, including cards formatted on Windows or a Mac, and make libraries of your folders, with thumbnails, filters and sorting
-- **Media servers**: browse and play from Jellyfin, Emby, any server with a DeoVR feed or HereSphere API, network shares (SMB), WebDAV, DLNA servers and web folders. Server transcoding and watch state sync are supported
-- **Watch history, Up next and playlists**: carry on where you left off, queue what plays next, autoplay it, loop a video or the whole queue, keep playlists of videos from any source, and mark favorites and ratings
+- **Media servers**: browse and play from Jellyfin, Emby, Plex, any server with a DeoVR feed or HereSphere API, network shares (SMB), WebDAV, DLNA servers and web folders. Server transcoding and watch state sync are supported
+- **Watch history, Up next and playlists**: carry on where you left off, queue what plays next, shuffle the queue, autoplay it, loop a video or the whole queue, keep playlists of videos from any source, and mark favorites and ratings
 - **PIN locks**: hide a source behind a PIN until you unlock it
 - **Passthrough videos**: see your room around the people in passthrough videos, and behind green or blue screens
 - **Subtitles and spatial audio**: subtitles from a file or inside the video, picked in your language and shown in any script, and 360° audio that follows your head
@@ -33,7 +33,7 @@ A VR video player for the Valve Steam Frame. It plays flat, 180°, 360° and fis
 - **Custom controls**: choose what each controller button does
 - **Languages**: English, German, Spanish, French, Japanese and Simplified Chinese, following the language Steam is set to; the phone remote follows the headset
 - **Updates**: checks for a new version when it starts, and installs it from Settings when you choose to, on a Stable or a Beta channel
-- **No accounts or tracking**: it only connects to the servers you add, and to GitHub to check for updates. After a crash it asks whether to send a crash report, shows what's in it (no video names, folders or server addresses) and sends nothing unless you choose to
+- **No FramePlayerX account or tracking**: it connects to the servers you add and to GitHub to check for updates. Linking Plex also contacts Plex's account services to sign in, discover servers and renew access. After a crash it asks whether to send a crash report, shows what's in it (no video names, folders or server addresses) and sends nothing unless you choose to
 
 ---
 
@@ -43,7 +43,7 @@ A VR video player for the Valve Steam Frame. It plays flat, 180°, 360° and fis
 |---|---|
 | Valve Steam Frame | Developer Mode only to install with Frame Control<!-- , FrameDrop --> or a PC |
 | A PC (Windows, macOS or Linux) | Optional: only to install from a PC |
-| Media server | Optional: Jellyfin or Emby, a DeoVR feed or HereSphere API, a NAS share, WebDAV or DLNA |
+| Media server | Optional: Jellyfin, Emby or Plex, a DeoVR feed or HereSphere API, a NAS share, WebDAV or DLNA |
 
 ---
 
@@ -84,6 +84,7 @@ To update later, open **Settings › Updates** and press **Download and install*
 |---|---|
 | [User guide](docs/USER-GUIDE.md) | Installing, updating and uninstalling, sources, browsing, PIN locks, video formats, controls, passthrough, haptics, remote control and troubleshooting |
 | [Development](docs/DEVELOPMENT.md) | Building and testing, how the code is organised, running without a headset (Monado and the preview harness), and releasing |
+| [Contributing](CONTRIBUTING.md) | What to do before opening a pull request, what it has to say and how to test it |
 
 ---
 
@@ -138,7 +139,7 @@ Usually because it's AV1 or 4:2:2, which the Frame's hardware decoder can't play
 
 ### Does it work with my media server or NAS?
 
-Yes, if it offers one of these: Jellyfin (sign in with Quick Connect or a password), Emby (a password), a DeoVR feed or HereSphere API, SMB, WebDAV or DLNA. Add it under Sources › Add source.
+Yes, if it offers one of these: Jellyfin (sign in with Quick Connect or a password), Emby (a password), Plex (sign in with a linking code or an access token), a DeoVR feed or HereSphere API, SMB, WebDAV or DLNA. Add it under Sources › Add source.
 
 ---
 

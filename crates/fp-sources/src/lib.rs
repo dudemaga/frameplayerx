@@ -16,12 +16,14 @@
 //! | DeoVR / HereSphere feeds | [`feed`] | feed and scene URLs |
 //! | SMB2/3 | [`smb`] | `smb://host/share/path` |
 //! | Jellyfin / Emby | [`mediabrowser`] | `mb:<url>#<kind>=<id>` |
+//! | Plex | [`plex`] | `plex://source/<source>/<machine>/<kind>/<id>` |
 //!
 //! Sources are built from a serializable [`SourceConfig`] with [`build`];
 //! [`save_configs`] / [`load_configs`] persist them (credentials included)
 //! in a 0600 JSON file. Blocking I/O and plain threads only.
 
 pub mod cache;
+pub mod catalog;
 pub mod config;
 pub mod dlna;
 pub mod error;
@@ -30,9 +32,14 @@ pub mod http;
 pub mod httpdir;
 mod json;
 pub mod local;
+pub mod location;
 pub mod mediabrowser;
+pub mod plex;
 pub mod sidecar;
 pub mod smb;
+#[cfg(test)]
+#[path = "../tests/common/mod.rs"]
+mod test_server;
 pub mod timeutil;
 pub mod transcode;
 pub mod urlutil;
@@ -41,10 +48,14 @@ pub mod webdav;
 mod xml;
 
 pub use cache::{CacheOptions, CacheStats};
+pub use catalog::{
+    Catalog, CatalogCapabilities, CatalogFacets, CatalogFilter, CatalogHome, CatalogItem,
+    CatalogKind, CatalogPage, CatalogQuery, CatalogSort, CatalogVersion,
+};
 pub use config::{
     CardRef, Credentials, DlnaConfig, FeedConfig, HttpConfig, LibraryConfig, LocalConfig,
-    MediaBrowserConfig, SmbConfig, SourceConfig, SourceKind, default_config_path, load_configs,
-    save_configs,
+    MediaBrowserConfig, PlexConfig, SmbConfig, SourceConfig, SourceKind, default_config_path,
+    load_configs, save_configs,
 };
 pub use dlna::{DlnaDevice, DlnaSource, SsdpResponse, discover};
 pub use error::{Error, Result};
@@ -59,7 +70,7 @@ pub use mediabrowser::{
 pub use sidecar::{ScriptFile, Sidecars, SubtitleFile, match_sidecars};
 pub use smb::SmbSource;
 pub use transcode::TranscodeTarget;
-pub use watch::{WatchEvent, WatchKind, WatchSession};
+pub use watch::{PlaybackTrack, WatchEvent, WatchKind, WatchSession};
 pub use webdav::WebDavSource;
 
 use fp_core::source::{ByteSource, Entry, EntryKind, is_video_name};
@@ -83,11 +94,39 @@ pub trait Source: Send + Sync {
     /// One-line description for logs and the UI, without secrets.
     fn describe(&self) -> String;
 
+    /// Converts a location owned by this source to its persistent identity.
+    /// This performs no I/O. Unknown or external locations are left unchanged.
+    fn canonical_location(&self, _location: &str) -> Option<String> {
+        None
+    }
+
     /// Lists a folder. `None` lists the root of the source.
     fn list(&self, location: Option<&str>) -> Result<Vec<Entry>>;
 
     /// Opens a file for random access.
     fn open(&self, location: &str) -> Result<Arc<dyn ByteSource>>;
+
+    /// Opens media using the same session as its playback reports.
+    fn open_playback(
+        &self,
+        location: &str,
+        _session: &WatchSession,
+    ) -> Result<Arc<dyn ByteSource>> {
+        self.open(location)
+    }
+
+    /// A refreshed configuration to persist; taking it performs no network I/O.
+    fn updated_config(&self) -> Option<SourceConfig> {
+        None
+    }
+
+    /// A picture of this source as an HTTP request: the client allowed to ask
+    /// for it, and its address. The image cache uses it to ask whether the
+    /// picture changed, where opening it could only download it again. `None`
+    /// for one that isn't over HTTP.
+    fn picture_request(&self, _location: &str) -> Option<(HttpClient, String)> {
+        None
+    }
 
     /// Folder containing `location`, when the source can list it.
     fn parent(&self, _location: &str) -> Option<String> {
@@ -95,10 +134,28 @@ pub trait Source: Send + Sync {
     }
 
     /// Completes an entry with details that are too expensive to fetch for a
-    /// whole listing (feeds: format, scripts, subtitles, markers). Other
-    /// sources return the entry unchanged.
+    /// whole listing (feeds: format, scripts, subtitles, markers). The default
+    /// converts recognized locations to this source's persistent identities.
     fn details(&self, entry: &Entry) -> Result<Entry> {
-        Ok(entry.clone())
+        let mut entry = entry.clone();
+        if let Some(location) = self.canonical_location(&entry.location) {
+            entry.location = location;
+        }
+        if let Some(url) = entry.thumbnail_url.as_mut()
+            && let Some(location) = self.canonical_location(url)
+        {
+            *url = location;
+        }
+        for location in entry
+            .scripts
+            .iter_mut()
+            .chain(entry.subtitles.iter_mut().map(|s| &mut s.location))
+        {
+            if let Some(stable) = self.canonical_location(location) {
+                *location = stable;
+            }
+        }
+        Ok(entry)
     }
 
     /// Finds the haptic scripts (`stem.funscript`, `stem.<axis>.funscript`)
@@ -113,6 +170,11 @@ pub trait Source: Send + Sync {
     /// track (see [`watch`]). May ask the server, so not on the frame loop.
     fn watch_session(&self, _video: &Entry) -> Option<WatchSession> {
         None
+    }
+
+    /// Original track choices when an encoding exposes only its selected tracks.
+    fn playback_tracks(&self, _video: &Entry) -> Result<Vec<PlaybackTrack>> {
+        Ok(Vec::new())
     }
 
     /// Tells the server one change in a [`Source::watch_session`].
@@ -136,6 +198,17 @@ pub trait Source: Send + Sync {
         Err(Error::NotFound(format!("transcode {id} of {location}")))
     }
 
+    /// Restarts an encoding within the video's existing playback session.
+    fn open_transcode_session(
+        &self,
+        location: &str,
+        id: &str,
+        start: f64,
+        _session: &WatchSession,
+    ) -> Result<Arc<dyn ByteSource>> {
+        self.open_transcode(location, id, start)
+    }
+
     /// This source as a DeoVR feed or HereSphere API, when it is one.
     fn as_scene_feed(&self) -> Option<&dyn SceneFeed> {
         None
@@ -145,6 +218,23 @@ pub trait Source: Send + Sync {
     fn as_media_browser(&self) -> Option<&MediaBrowserSource> {
         None
     }
+
+    /// This source's rich media catalog, when it has one.
+    fn as_catalog(&self) -> Option<&dyn Catalog> {
+        None
+    }
+}
+
+/// Whether a location binds its resource to one configured source.
+pub fn is_source_location(location: &str) -> bool {
+    location.split_once(':').is_some_and(|(scheme, _)| {
+        scheme.eq_ignore_ascii_case("source") || scheme.eq_ignore_ascii_case("plex")
+    })
+}
+
+/// The exact owner of a persistent source location, including Plex items.
+pub fn location_owner(location: &str) -> Option<String> {
+    location::owner(location).or_else(|| plex::owner(location))
 }
 
 /// Default [`Source::sidecars`]: the entry's own scripts and subtitles plus
@@ -175,6 +265,7 @@ pub fn build(config: &SourceConfig) -> Result<Box<dyn Source>> {
         SourceConfig::HereSphere(c) => Box::new(FeedSource::heresphere(c)?),
         SourceConfig::Smb(c) => Box::new(SmbSource::new(c)?),
         SourceConfig::MediaBrowser(c) => Box::new(MediaBrowserSource::new(c)?),
+        SourceConfig::Plex(c) => Box::new(plex::PlexSource::new(c)?),
     })
 }
 

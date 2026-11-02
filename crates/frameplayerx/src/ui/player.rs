@@ -1,7 +1,7 @@
 //! Playback UI: the control bar, the adjustments panel and subtitles.
 
 use super::theme::Weight;
-use super::widgets::{Kind, Tip};
+use super::widgets::{Kind, ListArea, Tip};
 use super::{Action, View, depth, fmt_time, icons, premium, theme, widgets};
 use crate::playback::Quality;
 use crate::subtitles::Pick;
@@ -874,12 +874,22 @@ fn seek_bar(
     {
         state.scrub = Some(to_time(p.x));
     }
+    // A click seeks to where it was pressed: by the let-go the ray has moved
+    // on a little, which along this bar could be minutes.
+    let pressed_at = resp.id.with("pressed-at");
+    if resp.is_pointer_button_down_on()
+        && let Some(origin) = ui.input(|i| i.pointer.press_origin())
+    {
+        ui.data_mut(|d| d.insert_temp(pressed_at, origin));
+    }
     if resp.drag_stopped() {
         if let Some(t) = state.scrub.take() {
             actions.push(Action::Seek(t));
         }
     } else if resp.clicked()
-        && let Some(p) = resp.interact_pointer_pos()
+        && let Some(p) = ui
+            .data(|d| d.get_temp::<egui::Pos2>(pressed_at))
+            .or(resp.interact_pointer_pos())
     {
         // Snap to a marker when clicking right on it.
         let t = to_time(p.x);
@@ -937,7 +947,7 @@ pub fn adjust_panel(ctx: &egui::Context, v: &mut View) {
         egui::ScrollArea::vertical()
             .max_height(page)
             .auto_shrink([false, false])
-            .show(ui, |ui| {
+            .show_list(ui, |ui| {
                 ui.spacing_mut().item_spacing.y = 10.0;
                 let before = pb.settings;
                 match v.state.adjust_tab {
@@ -1240,6 +1250,9 @@ fn position_tab(ui: &mut egui::Ui, s: &mut ViewSettings, moved: bool, actions: &
         );
     });
     ui.label(RichText::new(tr!("adjust-position-hint")).color(theme::TEXT_3));
+    ui.add_space(6.0);
+    widgets::section_label(ui, tr!("settings-background"));
+    background_controls(ui, &mut s.background);
 }
 
 fn stereo_tab(ui: &mut egui::Ui, s: &mut ViewSettings) {
@@ -1468,53 +1481,7 @@ pub(super) fn chroma_controls(
     });
     if s.chroma_key {
         premium::label(ui, tr!("adjust-chroma-colour-heading"));
-        ui.horizontal_wrapped(|ui| {
-            ui.spacing_mut().item_spacing = Vec2::new(8.0, 8.0);
-            for (label, c) in key_colors() {
-                let on = s.key_color.iter().zip(c).all(|(a, b)| (a - b).abs() < 0.02);
-                if premium::swatch(ui, label, c, on).clicked() {
-                    s.key_color = c;
-                }
-            }
-        });
-        widgets::rows(ui, |r| {
-            r.row(tr!("adjust-chroma-colour"), None, |ui| {
-                let [cr, cg, cb] = s.key_color.map(|c| (c.clamp(0.0, 1.0) * 255.0) as u8);
-                let (rect, _) = ui.allocate_exact_size(Vec2::new(64.0, 32.0), Sense::hover());
-                ui.painter().rect_filled(
-                    rect,
-                    egui::CornerRadius::same(8),
-                    Color32::from_rgb(cr, cg, cb),
-                );
-            });
-            r.slider(
-                tr!("adjust-red"),
-                None,
-                &mut s.key_color[0],
-                0.0..=1.0,
-                d.key_color[0],
-                "",
-                2,
-            );
-            r.slider(
-                tr!("adjust-green"),
-                None,
-                &mut s.key_color[1],
-                0.0..=1.0,
-                d.key_color[1],
-                "",
-                2,
-            );
-            r.slider(
-                tr!("adjust-blue"),
-                None,
-                &mut s.key_color[2],
-                0.0..=1.0,
-                d.key_color[2],
-                "",
-                2,
-            );
-        });
+        colour_picker(ui, &key_colors(), &mut s.key_color, d.key_color);
         premium::label(ui, tr!("adjust-fine-tune"));
         widgets::rows(ui, |r| {
             r.slider(
@@ -1547,6 +1514,69 @@ pub(super) fn chroma_controls(
         });
     }
     s.key() != before
+}
+
+/// Background colours offered as one tap.
+fn backgrounds() -> [(&'static str, [f32; 3]); 4] {
+    [
+        (tr!("background-black"), [0.0, 0.0, 0.0]),
+        (tr!("background-dark-grey"), fp_core::view::BACKGROUND),
+        (tr!("background-grey"), [0.25, 0.25, 0.25]),
+        (tr!("background-navy"), [0.04, 0.06, 0.16]),
+    ]
+}
+
+/// The colour around flat videos and the menus while the room doesn't
+/// show, for the open video (the Position tab) or the one videos start
+/// with (Settings > Video position).
+pub(super) fn background_controls(ui: &mut egui::Ui, c: &mut [f32; 3]) {
+    ui.label(
+        RichText::new(tr!("settings-background-desc"))
+            .font(theme::font(Weight::Regular, 15.0))
+            .color(theme::TEXT_3),
+    );
+    colour_picker(ui, &backgrounds(), c, fp_core::view::BACKGROUND);
+}
+
+/// A colour, sRGB 0..1: `choices` as one-tap swatches, then a preview and
+/// red, green and blue sliders that reset to `default`.
+fn colour_picker(
+    ui: &mut egui::Ui,
+    choices: &[(&str, [f32; 3])],
+    c: &mut [f32; 3],
+    default: [f32; 3],
+) {
+    ui.horizontal_wrapped(|ui| {
+        ui.spacing_mut().item_spacing = Vec2::new(8.0, 8.0);
+        for &(label, choice) in choices {
+            let on = c.iter().zip(choice).all(|(a, b)| (a - b).abs() < 0.02);
+            if premium::swatch(ui, label, choice, on).clicked() {
+                *c = choice;
+            }
+        }
+    });
+    widgets::rows(ui, |r| {
+        r.row(tr!("adjust-chroma-colour"), None, |ui| {
+            let [cr, cg, cb] = c.map(|x| (x.clamp(0.0, 1.0) * 255.0) as u8);
+            let (rect, _) = ui.allocate_exact_size(Vec2::new(64.0, 32.0), Sense::hover());
+            let p = ui.painter();
+            let radius = egui::CornerRadius::same(8);
+            p.rect_filled(rect, radius, Color32::from_rgb(cr, cg, cb));
+            // A dark colour would vanish into the card without an edge.
+            p.rect_stroke(
+                rect,
+                radius,
+                (1.0, Color32::from_white_alpha(60)),
+                egui::StrokeKind::Inside,
+            );
+        });
+        for (i, label) in [tr!("adjust-red"), tr!("adjust-green"), tr!("adjust-blue")]
+            .into_iter()
+            .enumerate()
+        {
+            r.slider(label, None, &mut c[i], 0.0..=1.0, default[i], "", 2);
+        }
+    });
 }
 
 /// Chapters tab: the video's chapters and bookmarks to go to, and how
@@ -1606,6 +1636,7 @@ pub fn tracks_panel(ctx: &egui::Context, v: &mut View) {
         return;
     };
     let info = pb.player.info();
+    let server_tracks = pb.transcoding.is_some() && !pb.source_tracks.is_empty();
     let audio: Vec<_> = info.audio_streams().collect();
     let subtitles = crate::subtitles::rows(&v.settings.subtitle_language, info, &pb.subtitle_files);
     let label_h = ctx.fonts(|f| f.row_height(&theme::font(Weight::SemiBold, 13.0)));
@@ -1616,6 +1647,11 @@ pub fn tracks_panel(ctx: &egui::Context, v: &mut View) {
     };
     let rows = audio
         .len()
+        .max(if server_tracks {
+            pb.source_tracks.len()
+        } else {
+            0
+        })
         .max(1)
         .max(subtitles.len() + 1)
         .max(quality_rows) as f32;
@@ -1652,6 +1688,23 @@ pub fn tracks_panel(ctx: &egui::Context, v: &mut View) {
                 tr!("tracks-audio"),
                 &pb.title,
                 |ui, fresh| {
+                    if server_tracks {
+                        for s in pb.source_tracks.iter().filter(|s| !s.subtitle) {
+                            let on = pb
+                                .request
+                                .source_audio
+                                .as_deref()
+                                .map_or(s.selected, |id| id == s.id);
+                            let row = track_row(ui, &s.title, &s.codec, on);
+                            if on && fresh {
+                                row.scroll_to_me(Some(Align::Center));
+                            }
+                            if row.clicked() && !on {
+                                actions.push(Action::SelectSourceAudio(s.id.clone()));
+                            }
+                        }
+                        return;
+                    }
                     if audio.is_empty() {
                         ui.label(RichText::new(tr!("tracks-no-audio")).color(theme::TEXT_3));
                     }
@@ -1678,6 +1731,27 @@ pub fn tracks_panel(ctx: &egui::Context, v: &mut View) {
                 tr!("settings-subtitles"),
                 &pb.title,
                 |ui, fresh| {
+                    if server_tracks {
+                        let off = pb
+                            .request
+                            .source_subtitle
+                            .as_deref()
+                            .is_none_or(|id| id == "0");
+                        if track_row(ui, tr!("tracks-off"), "", off).clicked() && !off {
+                            actions.push(Action::SelectSourceSubtitles(None));
+                        }
+                        for s in pb.source_tracks.iter().filter(|s| s.subtitle) {
+                            let on = pb.request.source_subtitle.as_deref() == Some(s.id.as_str());
+                            let row = track_row(ui, &s.title, &s.codec, on);
+                            if on && fresh {
+                                row.scroll_to_me(Some(Align::Center));
+                            }
+                            if row.clicked() && !on {
+                                actions.push(Action::SelectSourceSubtitles(Some(s.id.clone())));
+                            }
+                        }
+                        return;
+                    }
                     let mut pick = |ui: &mut egui::Ui, title: &str, detail: &str, pick: Pick| {
                         let on = showing(pb, pick);
                         let row = track_row(ui, title, detail, on);
@@ -1763,7 +1837,7 @@ fn track_list(
         egui::ScrollArea::vertical()
             .id_salt(salt)
             .auto_shrink([false, true])
-            .show(ui, |ui| add(ui, fresh));
+            .show_list(ui, |ui| add(ui, fresh));
     });
 }
 

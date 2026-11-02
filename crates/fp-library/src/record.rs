@@ -1,5 +1,6 @@
 //! Rows of the library as Rust values.
 
+use std::borrow::Cow;
 use std::fmt;
 use std::path::PathBuf;
 
@@ -133,7 +134,7 @@ pub(crate) fn effective_columns(
 #[derive(Clone, Debug, PartialEq)]
 pub struct MediaRecord {
     pub id: MediaId,
-    /// Path for local files, URL for remote ones. Unique.
+    /// Stable media location (a path, source-owned URI or legacy URL). Unique.
     pub location: String,
     /// Which configured source produced this row (`"local"`, a share id...).
     pub source_id: String,
@@ -231,7 +232,7 @@ impl MediaRecord {
     }
 
     /// Last path segment of the location.
-    pub fn file_name(&self) -> &str {
+    pub fn file_name(&self) -> Cow<'_, str> {
         file_name_of(&self.location)
     }
 
@@ -264,7 +265,33 @@ impl MediaRecord {
 }
 
 /// Last segment of a path or URL, without a query string.
-pub(crate) fn file_name_of(location: &str) -> &str {
+pub(crate) fn file_name_of(location: &str) -> Cow<'_, str> {
+    if fp_core::source::location_names_no_file(location) {
+        return Cow::Borrowed("");
+    }
+    if let Some(rest) = location.strip_prefix("source://source/") {
+        let mut parts = rest.splitn(3, '/');
+        if let (Some(source), Some(kind), Some(key)) = (parts.next(), parts.next(), parts.next())
+            && !source.is_empty()
+            && !kind.is_empty()
+            && !key.contains(['/', '?', '#'])
+            && let Ok(key) = percent_encoding::percent_decode_str(key).decode_utf8()
+        {
+            // The outer URI stores the provider key as one opaque segment.
+            // Extract its basename before decoding the original URL escapes,
+            // so folders and query values cannot masquerade as format hints.
+            let name = path_file_name(&key);
+            return Cow::Owned(
+                percent_encoding::percent_decode_str(name)
+                    .decode_utf8_lossy()
+                    .into_owned(),
+            );
+        }
+    }
+    Cow::Borrowed(path_file_name(location))
+}
+
+fn path_file_name(location: &str) -> &str {
     let no_query = location.split(['?', '#']).next().unwrap_or(location);
     let trimmed = no_query.trim_end_matches(['/', '\\']);
     trimmed.rsplit(['/', '\\']).next().unwrap_or(trimmed)
@@ -353,7 +380,7 @@ fn user_format_col(
     let mut f: VideoFormat = serde_json::from_str(&text)
         .map_err(|e| rusqlite::Error::FromSqlConversionFailure(idx, Type::Text, Box::new(e)))?;
     if !text.contains("alpha_packed") {
-        f.alpha_packed = fp_core::format::detect_from_name(file_name_of(location))
+        f.alpha_packed = fp_core::format::detect_from_name(&file_name_of(location))
             .is_some_and(|d| d.alpha_packed);
     }
     Ok(Some(f))
@@ -456,9 +483,58 @@ mod tests {
     #[test]
     fn names() {
         assert_eq!(file_name_of("/a/b/c.mp4"), "c.mp4");
+        assert_eq!(file_name_of("plex://source/s/m/item/180?media=1"), "");
+        assert_eq!(file_name_of("source://source/s/deovr-id/180"), "");
+        assert_eq!(
+            file_name_of("plex://source/s/m/image/resource?path=%2Fa.jpg"),
+            "resource",
+            "as last_segment says"
+        );
+        assert_eq!(
+            file_name_of("source://source/s/dlna/item%3A64%241%24180"),
+            ""
+        );
         assert_eq!(file_name_of("http://h/x/y.mp4?token=1"), "y.mp4");
         assert_eq!(file_name_of("smb://h/share/dir/"), "dir");
         assert_eq!(stem_of("a.b.mp4"), "a.b");
         assert_eq!(stem_of(".hidden"), ".hidden");
+    }
+
+    #[test]
+    fn source_locations_extract_the_provider_basename_before_decoding_url_escapes() {
+        let source = |key: &str| {
+            format!(
+                "source://source/server/http/{}",
+                percent_encoding::utf8_percent_encode(key, percent_encoding::NON_ALPHANUMERIC)
+            )
+        };
+        assert_eq!(
+            file_name_of(&source("VR_180_LR/Flat.mp4?projection=360_TB")),
+            "Flat.mp4"
+        );
+        assert_eq!(
+            file_name_of(&source("films/Caf%C3%A9%20%23%3F_180_LR.mkv?token=ignored")),
+            "Café #?_180_LR.mkv"
+        );
+        assert_eq!(
+            file_name_of(&source("films/Literal%2520name.mkv")),
+            "Literal%20name.mkv",
+            "URL filename escapes are decoded once, not recursively"
+        );
+        assert_eq!(
+            file_name_of(&source("films/休暇_180_LR.mkv")),
+            "休暇_180_LR.mkv"
+        );
+    }
+
+    #[test]
+    fn legacy_filenames_remain_borrowed_and_unchanged() {
+        for location in [
+            "/v/a%20b.mp4",
+            "http://host/VR_180_LR/a%20b.mp4?projection=360_TB",
+            "smb://nas/share/a%20b.mp4",
+        ] {
+            assert!(matches!(file_name_of(location), Cow::Borrowed("a%20b.mp4")));
+        }
     }
 }

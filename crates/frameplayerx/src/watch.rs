@@ -111,6 +111,22 @@ impl Watch {
         position: f64,
     ) -> Option<Watch> {
         let session = Arc::new(source.watch_session(video)?);
+        Some(Self::start_session(
+            reports,
+            source,
+            (*session).clone(),
+            position,
+        ))
+    }
+
+    /// Starts reports using the session that opened the media stream.
+    pub fn start_session(
+        reports: &Reports,
+        source: Arc<dyn Source>,
+        session: WatchSession,
+        position: f64,
+    ) -> Watch {
+        let session = Arc::new(session);
         let mut w = Watch {
             reports: reports.clone(),
             source,
@@ -119,7 +135,7 @@ impl Watch {
             last_report: Instant::now(),
         };
         w.send(WatchKind::Start, position, false, 1.0);
-        Some(w)
+        w
     }
 
     /// Every frame: a pause, resume, seek or change of speed goes out at
@@ -266,6 +282,10 @@ mod tests {
     impl Recorder {
         fn session(item: &str) -> WatchSession {
             WatchSession {
+                duration_ms: None,
+                media_id: None,
+                audio_stream: None,
+                subtitle_stream: None,
                 item: item.into(),
                 title: String::new(),
                 endpoint: None,

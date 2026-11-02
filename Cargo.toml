@@ -51,7 +51,7 @@ thiserror = "2.0.18"
 tiny_http = "0.12"
 # No TLS by default; crates that need it add the `rustls` feature (ring and
 # webpki roots), so there is no OpenSSL anywhere in the tree.
-ureq = { version = "3.4", default-features = false }
+ureq = { version = "3.5", default-features = false }
 # Pure-Rust inflate (zlib-rs backend); no C zlib, bzip2, zstd or lzma.
 zip = { version = "7", default-features = false, features = ["deflate-flate2-zlib-rs"] }
 

@@ -13,9 +13,9 @@
 //! A source is one share (`smb://host/share[/folder]`) or a whole server
 //! (`smb://host/`), whose root lists its shares.
 //!
-//! Locations are `smb://host[:port]/share/dir/file` with percent-encoded
-//! segments and no credentials. Files are read through the shared block
-//! cache with read-ahead.
+//! Listed locations retain the source ID and relative share/path; the SMB
+//! host comes from the current configuration. Files are read through the
+//! shared block cache with read-ahead.
 
 use crate::config::{SmbConfig, SourceKind};
 use crate::error::{Error, Result};
@@ -187,6 +187,49 @@ impl SmbSource {
             Err(Error::invalid(&loc.to_url(), "not on this source's share"))
         }
     }
+
+    fn current_url(&self, value: &str) -> Result<String> {
+        if !crate::is_source_location(value) {
+            return Ok(value.to_string());
+        }
+        let value = crate::location::decode(value)
+            .filter(|l| l.source_id == self.id && l.kind == "smb")
+            .ok_or_else(|| Error::invalid(value, "not owned by this SMB source"))?;
+        if value.key.starts_with('/') || value.key.contains(['?', '#', '\\']) {
+            return Err(Error::invalid(
+                "SMB source resource",
+                "invalid relative path",
+            ));
+        }
+        let relative = SmbLocation::parse(&format!("smb://relative/{}", value.key))?;
+        if matches!(relative.share.as_str(), "." | "..")
+            || relative.share.contains(['/', '\\', '\0'])
+            || relative
+                .path
+                .iter()
+                .any(|s| matches!(s.as_str(), "." | "..") || s.contains(['/', '\\', '\0']))
+        {
+            return Err(Error::invalid(
+                "SMB source resource",
+                "invalid path segment",
+            ));
+        }
+        let mut current = SmbLocation::parse(&self.root)?;
+        if self.whole_server() {
+            current.share = relative.share;
+            current.path = relative.path;
+        } else {
+            if !relative.share.is_empty() {
+                current.path.push(relative.share);
+            }
+            current.path.extend(relative.path);
+        }
+        let mut url = current.to_url();
+        if value.key.ends_with('/') && !url.ends_with('/') {
+            url.push('/');
+        }
+        Ok(url)
+    }
 }
 
 impl Source for SmbSource {
@@ -214,8 +257,44 @@ impl Source for SmbSource {
         }
     }
 
+    fn canonical_location(&self, value: &str) -> Option<String> {
+        let url = self.current_url(value).ok()?;
+        let loc = SmbLocation::parse(&url).ok()?;
+        self.check_same_share(&loc).ok()?;
+        let root = SmbLocation::parse(&self.root).ok()?;
+        let mut parts = Vec::new();
+        if self.whole_server() {
+            if !loc.share.is_empty() {
+                parts.push(loc.share.as_str());
+            }
+            parts.extend(loc.path.iter().map(String::as_str));
+        } else {
+            parts.extend(
+                loc.path
+                    .strip_prefix(root.path.as_slice())?
+                    .iter()
+                    .map(String::as_str),
+            );
+        }
+        if parts
+            .iter()
+            .any(|s| s.is_empty() || matches!(*s, "." | "..") || s.contains(['/', '\\', '\0']))
+        {
+            return None;
+        }
+        let mut key = parts
+            .into_iter()
+            .map(encode_segment)
+            .collect::<Vec<_>>()
+            .join("/");
+        if url.ends_with('/') && !key.is_empty() {
+            key.push('/');
+        }
+        Some(crate::location::encode(&self.id, "smb", &key))
+    }
+
     fn list(&self, location: Option<&str>) -> Result<Vec<Entry>> {
-        let loc = SmbLocation::parse(location.unwrap_or(&self.root))?;
+        let loc = SmbLocation::parse(&self.current_url(location.unwrap_or(&self.root))?)?;
         self.check_same_share(&loc)?;
         if loc.is_server() {
             let mut out: Vec<Entry> = self
@@ -224,7 +303,8 @@ impl Source for SmbSource {
                 .filter(|share| self.can_open_share(share))
                 .map(|share| {
                     let url = smb_url(&loc.host, loc.port, &share, "");
-                    dir_entry(share, format!("{url}/"), None)
+                    let location = self.canonical_location(&format!("{url}/")).unwrap_or(url);
+                    dir_entry(share, location, None)
                 })
                 .collect();
             sort_entries(&mut out);
@@ -238,8 +318,10 @@ impl Source for SmbSource {
             let mut child = loc.clone();
             child.path.push(item.name.clone());
             let url = child.to_url();
+            let url = if item.is_dir { format!("{url}/") } else { url };
+            let url = self.canonical_location(&url).unwrap_or(url);
             out.push(if item.is_dir {
-                dir_entry(item.name, format!("{url}/"), item.modified)
+                dir_entry(item.name, url, item.modified)
             } else {
                 file_entry(item.name, url, Some(item.size), item.modified)
             });
@@ -249,7 +331,7 @@ impl Source for SmbSource {
     }
 
     fn open(&self, location: &str) -> Result<Arc<dyn ByteSource>> {
-        let loc = SmbLocation::parse(location)?;
+        let loc = SmbLocation::parse(&self.current_url(location)?)?;
         self.check_same_share(&loc)?;
         if loc.path.is_empty() {
             return Err(Error::invalid(
@@ -261,7 +343,7 @@ impl Source for SmbSource {
     }
 
     fn parent(&self, location: &str) -> Option<String> {
-        let mut loc = SmbLocation::parse(location).ok()?;
+        let mut loc = SmbLocation::parse(&self.current_url(location).ok()?).ok()?;
         if loc.path.pop().is_none() {
             // A share's root goes up to the server's list of shares, when
             // the source is the whole server.
@@ -269,9 +351,15 @@ impl Source for SmbSource {
                 return None;
             }
             loc.share.clear();
-            return Some(loc.to_url());
+            return self.canonical_location(&loc.to_url());
         }
-        Some(format!("{}/", loc.to_url()))
+        self.canonical_location(&format!("{}/", loc.to_url()))
+    }
+
+    fn sidecars(&self, video: &Entry) -> Result<crate::Sidecars> {
+        let mut video = video.clone();
+        video.location = self.current_url(&video.location)?;
+        crate::sidecars_from_folder(self, &video)
     }
 }
 
@@ -632,6 +720,92 @@ mod tests {
     use super::*;
     use crate::config::Credentials;
 
+    #[cfg(feature = "smb")]
+    #[test]
+    fn stable_locations_follow_the_configured_smb_host_share_and_root() {
+        let original = SmbConfig {
+            id: "smb-source".into(),
+            name: "NAS".into(),
+            host: "old".into(),
+            port: Some(1445),
+            share: "Videos".into(),
+            path: "old-root".into(),
+            credentials: None,
+        };
+        let before = SmbSource::new(&original).unwrap();
+        let stable = before
+            .canonical_location("smb://old:1445/Videos/old-root/sub/Clip%20%231.mp4")
+            .unwrap();
+        let mut changed = original.clone();
+        changed.host = "new".into();
+        changed.port = Some(2445);
+        changed.share = "Moved Videos".into();
+        changed.path = "new-root".into();
+        let after = SmbSource::new(&changed).unwrap();
+        assert_eq!(
+            after.current_url(&stable).unwrap(),
+            "smb://new:2445/Moved%20Videos/new-root/sub/Clip%20%231.mp4"
+        );
+        assert_eq!(after.canonical_location(&stable), Some(stable.clone()));
+        let parent = after.parent(&stable).unwrap();
+        assert_eq!(crate::location::decode(&parent).unwrap().key, "sub/");
+        let root = after.parent(&parent).unwrap();
+        assert!(after.parent(&root).is_none());
+        for bad in [
+            crate::location::encode("other", "smb", "file.mp4"),
+            crate::location::encode("smb-source", "http", "file.mp4"),
+            crate::location::encode("smb-source", "smb", "../file.mp4"),
+            crate::location::encode("smb-source", "smb", "%2e%2e/file.mp4"),
+            crate::location::encode("smb-source", "smb", "%2Foutside/file.mp4"),
+        ] {
+            assert!(after.current_url(&bad).is_err(), "{bad}");
+        }
+        assert!(
+            before
+                .canonical_location("smb://old:1445/Videos/old-root-other/file.mp4")
+                .is_none()
+        );
+        assert!(
+            before
+                .canonical_location("smb://other:1445/Videos/old-root/file.mp4")
+                .is_none()
+        );
+        assert!(
+            before
+                .canonical_location("smb://old:1445/Other/old-root/file.mp4")
+                .is_none()
+        );
+    }
+
+    #[cfg(feature = "smb")]
+    #[test]
+    fn whole_server_smb_locations_keep_the_share_in_the_key() {
+        let config = SmbConfig {
+            id: "server".into(),
+            name: "NAS".into(),
+            host: "old".into(),
+            port: None,
+            share: String::new(),
+            path: String::new(),
+            credentials: None,
+        };
+        let before = SmbSource::new(&config).unwrap();
+        let stable = before
+            .canonical_location("smb://old/My%20Share/sub/clip.mp4")
+            .unwrap();
+        assert_eq!(
+            crate::location::decode(&stable).unwrap().key,
+            "My%20Share/sub/clip.mp4"
+        );
+        let mut config = config;
+        config.host = "new".into();
+        let after = SmbSource::new(&config).unwrap();
+        assert_eq!(
+            after.current_url(&stable).unwrap(),
+            "smb://new/My%20Share/sub/clip.mp4"
+        );
+    }
+
     #[test]
     fn urls_roundtrip() {
         assert_eq!(smb_url("nas", None, "media", ""), "smb://nas/media");
@@ -686,8 +860,8 @@ mod tests {
         assert!(!s.describe().contains("hunter2"));
         assert!(!format!("{s:?}").contains("hunter2"));
         assert_eq!(
-            s.parent("smb://nas.local/media/vr/new/a.mp4").as_deref(),
-            Some("smb://nas.local/media/vr/new/")
+            s.parent("smb://nas.local/media/vr/new/a.mp4"),
+            Some(crate::location::encode("s", "smb", ""))
         );
         assert_eq!(s.parent("smb://nas.local/media"), None);
         assert!(matches!(
@@ -727,12 +901,12 @@ mod tests {
         );
         // Up from a share's root is the list of shares; nothing above that.
         assert_eq!(
-            s.parent("smb://nas.local/tv/").as_deref(),
-            Some("smb://nas.local/")
+            s.parent("smb://nas.local/tv/"),
+            Some(crate::location::encode("s", "smb", ""))
         );
         assert_eq!(
-            s.parent("smb://nas.local/tv/shows/").as_deref(),
-            Some("smb://nas.local/tv/")
+            s.parent("smb://nas.local/tv/shows/"),
+            Some(crate::location::encode("s", "smb", "tv/"))
         );
         assert_eq!(s.parent("smb://nas.local/"), None);
         assert!(matches!(

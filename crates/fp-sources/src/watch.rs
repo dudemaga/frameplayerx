@@ -1,10 +1,24 @@
 //! Watch sync: telling the server a video came from how watching it goes,
-//! for servers that keep track (Jellyfin and Emby; HereSphere APIs that
+//! for servers that keep track (Jellyfin, Emby and Plex; HereSphere APIs that
 //! name an event server). From it they keep resume points, count plays and
 //! mark videos watched.
 
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{SystemTime, UNIX_EPOCH};
+
+/// An original source track whose identity survives server transcoding.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct PlaybackTrack {
+    pub id: String,
+    /// Index in the original container; absent for external tracks.
+    pub index: Option<usize>,
+    /// Source-owned location for an external subtitle file.
+    pub location: Option<String>,
+    pub subtitle: bool,
+    pub title: String,
+    pub codec: String,
+    pub selected: bool,
+}
 
 /// One playback of one video, as its server knows it.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -17,6 +31,13 @@ pub struct WatchSession {
     pub endpoint: Option<String>,
     /// Ties one playback's reports together.
     pub id: String,
+    /// Original item duration, for servers whose progress reports require it.
+    pub duration_ms: Option<u64>,
+    /// Selected source media and stream identities, independent of output
+    /// stream indexes after a server transcode.
+    pub media_id: Option<String>,
+    pub audio_stream: Option<String>,
+    pub subtitle_stream: Option<String>,
 }
 
 impl WatchSession {
@@ -26,6 +47,10 @@ impl WatchSession {
             title,
             endpoint,
             id: session_id(),
+            duration_ms: None,
+            media_id: None,
+            audio_stream: None,
+            subtitle_stream: None,
         }
     }
 }

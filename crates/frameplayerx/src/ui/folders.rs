@@ -4,7 +4,7 @@
 
 use super::page;
 use super::theme::{self, Weight};
-use super::widgets::{self, Kind, Tip};
+use super::widgets::{self, Kind, ListArea, Tip};
 use super::{Action, Browse, View, fmt_date, fmt_size, fmt_time, icons};
 use crate::playback::OpenRequest;
 use egui::{Align2, Color32, Sense, Vec2};
@@ -98,7 +98,7 @@ pub fn page(ui: &mut egui::Ui, v: &mut View, title: &str, root: &str, b: &mut Br
     let mut go: Option<String> = None;
     egui::ScrollArea::vertical()
         .auto_shrink(false)
-        .show(ui, |ui| {
+        .show_list(ui, |ui| {
             if shown.is_empty() && !b.loading && b.error.is_none() {
                 ui.add_space(30.0);
                 ui.vertical_centered(|ui| {

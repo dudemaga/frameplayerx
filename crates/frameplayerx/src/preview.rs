@@ -26,6 +26,7 @@
 //! | `loop video` / `loop playlist` | turn Loop video or Up next's Loop on or off |
 //! | `autoplay` | turn Autoplay on or off |
 //! | `open-list` | open the library's videos as a grid does, from the first |
+//! | `shuffle` | shuffle Up next, keeping the current video first |
 //! | `shot NAME` | save the left eye as OUT_DIR/NAME.png |
 //! | `sbs NAME` | save both eyes side by side |
 //! | `screen NAME [TAB]` | show a browser screen (`home`, `library`, `sources`, `settings` and its tab) |
@@ -314,7 +315,7 @@ impl Sim {
                 use crate::ui::SourcePage;
                 match self.app.ui.source.as_mut().map(|s| &mut s.page) {
                     Some(SourcePage::Feed(f)) => f.filters_open = true,
-                    Some(SourcePage::Jellyfin(j)) => j.show_filters(true),
+                    Some(SourcePage::Catalog(j)) => j.show_filters(true),
                     _ => return Err("no Jellyfin grid or feed is open".into()),
                 }
                 self.app.repaint_all();
@@ -601,13 +602,12 @@ impl Sim {
                 self.app.repaint_all();
                 self.run_frames(3)?;
             }
-            // Searches the Jellyfin/Emby server open, as typing in its
-            // header does: `jellyfin-search blade`.
-            Some("jellyfin-search") => {
-                let text = line.trim().strip_prefix("jellyfin-search").unwrap_or("");
-                use crate::ui::jellyfin::Body;
+            // Searches the catalog open, as typing in its header does.
+            Some("catalog-search" | "jellyfin-search") => {
+                let text = line.trim().split_once(' ').map_or("", |(_, text)| text);
+                use crate::ui::catalog::Body;
                 if let Some(crate::ui::SourceView {
-                    page: crate::ui::SourcePage::Jellyfin(j),
+                    page: crate::ui::SourcePage::Catalog(j),
                     ..
                 }) = self.app.ui.source.as_mut()
                     && let Some(p) = j.pages.last_mut()
@@ -618,7 +618,7 @@ impl Sim {
                     // Typed long enough ago for the search to go now.
                     *typed = Instant::now().checked_sub(Duration::from_secs(1));
                 } else {
-                    return Err("jellyfin-search needs a Jellyfin page open".into());
+                    return Err("catalog-search needs a catalog page open".into());
                 }
                 self.app.repaint_all();
                 self.run_frames(3)?;
@@ -633,6 +633,50 @@ impl Sim {
                 self.app.ui.source = None;
                 self.app.ui.source_form = Some(crate::ui::SourceForm {
                     kind,
+                    ..Default::default()
+                });
+                self.app.repaint_all();
+                self.run_frames(3)?;
+            }
+            // Code-linking screens from the loopback mock, without a live
+            // Plex account or production polling: `plex-link-preview URL waiting`.
+            Some("plex-link-preview") => {
+                use crate::ui::plex::LinkState;
+                use fp_sources::plex::auth::{PlexAuthClient, PlexCredentials};
+                let endpoint = parts
+                    .get(1)
+                    .ok_or("plex-link-preview needs a loopback API")?;
+                let state = parts.get(2).copied().unwrap_or("waiting");
+                let api = PlexAuthClient::with_test_endpoint(endpoint)?;
+                let mut pin = api.initiate("ui-preview")?;
+                if state == "expired" {
+                    pin.expires_at = 0;
+                }
+                let state = match state {
+                    "waiting" | "expired" => LinkState::Waiting {
+                        pin,
+                        polled: Instant::now(),
+                        polling: true,
+                    },
+                    "servers" => {
+                        let credentials =
+                            PlexCredentials::manual("preview-token".into(), "ui-preview".into());
+                        let servers = api.resources(&credentials)?;
+                        LinkState::Servers {
+                            credentials,
+                            servers,
+                        }
+                    }
+                    _ => return Err("plex-link-preview needs waiting, expired or servers".into()),
+                };
+                self.app.ui.screen = crate::ui::Screen::Sources;
+                self.app.ui.source = None;
+                self.app.ui.source_form = Some(crate::ui::SourceForm {
+                    kind: fp_sources::SourceKind::Plex,
+                    plex: crate::ui::plex::Connect {
+                        state,
+                        ..Default::default()
+                    },
                     ..Default::default()
                 });
                 self.app.repaint_all();
@@ -665,6 +709,11 @@ impl Sim {
                     self.app
                         .apply(crate::ui::Action::Queue { req, next: false });
                 }
+                self.app.repaint_all();
+                self.run_frames(3)?;
+            }
+            Some("shuffle") => {
+                self.app.apply(crate::ui::Action::QueueShuffle);
                 self.app.repaint_all();
                 self.run_frames(3)?;
             }

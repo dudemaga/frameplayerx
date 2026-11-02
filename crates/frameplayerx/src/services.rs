@@ -93,6 +93,17 @@ impl Opener {
         source_id: Option<&str>,
         location: &str,
     ) -> Result<Arc<dyn ByteSource>, String> {
+        if fp_sources::is_source_location(location) {
+            let owner = fp_sources::location_owner(location).ok_or(tr!("open-no-source"))?;
+            if source_id.is_some_and(|s| s != owner) {
+                return Err(tr!("open-no-source").into());
+            }
+            return self
+                .source(&owner)
+                .ok_or(tr!("open-no-source"))?
+                .open(location)
+                .map_err(|e| crate::ui::errors::source(&e));
+        }
         if location.starts_with(volume::SCHEME) {
             let path = volume::resolve(location).ok_or(not_inserted())?;
             return self.open_in(None, &path);
@@ -146,6 +157,11 @@ impl Opener {
         location: &str,
         limit: u64,
     ) -> Result<Vec<u8>, String> {
+        if fp_sources::is_source_location(location) {
+            return self
+                .open_in(source_id, location)
+                .and_then(|f| read_whole(&*f, limit));
+        }
         if let Some(src) = source_id.and_then(|id| self.source(id))
             && !location.starts_with('/')
             && !location.starts_with(volume::SCHEME)
@@ -163,8 +179,21 @@ impl Opener {
         self.fetch(location, limit)
     }
 
+    /// A source's picture as an HTTP request, when it is one (see
+    /// [`Source::picture_request`]).
+    pub fn picture_request(
+        &self,
+        location: &str,
+    ) -> Option<(fp_sources::http::HttpClient, String)> {
+        let owner = fp_sources::location_owner(location)?;
+        self.source(&owner)?.picture_request(location)
+    }
+
     /// Small downloads (thumbnails, scripts) from any http(s) URL.
     pub fn fetch(&self, url: &str, limit: u64) -> Result<Vec<u8>, String> {
+        if fp_sources::is_source_location(url) {
+            return self.open(url).and_then(|f| read_whole(&*f, limit));
+        }
         if url.starts_with(volume::SCHEME) {
             let path = volume::resolve(url).ok_or(not_inserted())?;
             return self.fetch(&path, limit);
@@ -229,6 +258,8 @@ pub const REMOVABLE_SOURCE: &str = "device-removable";
 pub const LOCAL_HUB: &str = "on-device";
 
 pub struct Services {
+    device_identifier: String,
+    source_save_retry: Option<std::time::Instant>,
     pub library: Library,
     pub opener: Arc<Opener>,
     pub images: Arc<ImageCache>,
@@ -297,11 +328,72 @@ fn device_id(path: &Path) -> String {
     id
 }
 
+/// Keep record IDs and their user data while replacing transport addresses.
+/// Canonicalizers inspect configuration or cached metadata; migration does no I/O.
+fn migrate_source_locations(library: &Library, opener: &Opener, configs: &[SourceConfig]) {
+    for config in configs {
+        let Some(source) = opener.source(config.id()) else {
+            continue;
+        };
+        if matches!(
+            source.kind(),
+            fp_sources::SourceKind::Local | fp_sources::SourceKind::Library
+        ) {
+            continue;
+        }
+        match library
+            .rewrite_source_locations(config.id(), |location| source.canonical_location(location))
+        {
+            Ok(changed) if changed > 0 => log::info!(
+                "updated {changed} media locations for source {}",
+                config.id()
+            ),
+            Ok(_) => {}
+            Err(error) => log::warn!(
+                "cannot update saved media locations for source {}: {error}",
+                config.id()
+            ),
+        }
+    }
+}
+
 impl Services {
+    pub fn device_identifier(&self) -> &str {
+        &self.device_identifier
+    }
+
+    /// Persists refreshed source credentials without rebuilding active sources.
+    pub fn poll_source_updates(&mut self) {
+        let mut changed = false;
+        for current in &mut self.source_configs {
+            if let Some(updated) = self
+                .opener
+                .source(current.id())
+                .and_then(|s| s.updated_config())
+                && updated.id() == current.id()
+                && updated.kind() == current.kind()
+            {
+                *current = updated;
+                changed = true;
+            }
+        }
+        let retry = self
+            .source_save_retry
+            .is_some_and(|at| at.elapsed() >= std::time::Duration::from_secs(10));
+        if changed || retry {
+            match fp_sources::save_configs(&Settings::sources_path(), &self.source_configs) {
+                Ok(()) => self.source_save_retry = None,
+                Err(e) => {
+                    log::warn!("saving refreshed source credentials: {e}");
+                    self.source_save_retry = Some(std::time::Instant::now());
+                }
+            }
+        }
+    }
+
     pub fn new(settings: &Settings, library: Library) -> Services {
-        fp_sources::mediabrowser::set_device_id(device_id(
-            &fp_core::dirs::config_dir().join("device-id"),
-        ));
+        let device_identifier = device_id(&fp_core::dirs::config_dir().join("device-id"));
+        fp_sources::mediabrowser::set_device_id(device_identifier.clone());
         let opener = Arc::new(Opener::new());
         let source_configs = match fp_sources::load_configs(&Settings::sources_path()) {
             Ok(c) => c,
@@ -315,13 +407,19 @@ impl Services {
         for e in opener.set_sources(&source_configs) {
             log::warn!("source unavailable: {e}");
         }
+        migrate_source_locations(&library, &opener, &source_configs);
         let mut s = Services {
+            device_identifier,
+            source_save_retry: None,
             library,
-            opener,
-            images: Arc::new(ImageCache::new(
-                fp_core::dirs::cache_dir().join("images"),
-                settings.image_cache_mb,
-            )),
+            opener: opener.clone(),
+            images: Arc::new(
+                ImageCache::new(
+                    fp_core::dirs::cache_dir().join("images"),
+                    settings.image_cache_mb,
+                )
+                .with_opener(opener.clone()),
+            ),
             source_configs,
             worker: None,
             worker_events: None,
@@ -388,11 +486,14 @@ impl Services {
     /// Persists the source list (mode 0600) and rebuilds the sources. The
     /// list is used even when it can't be saved, until FramePlayerX quits.
     pub fn set_sources(&mut self, configs: Vec<SourceConfig>) -> SourcesChange {
+        // Convert legacy references while the old endpoint/root is still known.
+        migrate_source_locations(&self.library, &self.opener, &self.source_configs);
         let save_error = fp_sources::save_configs(&Settings::sources_path(), &configs)
             .inspect_err(|e| log::error!("saving sources: {e}"))
             .err()
             .map(|e| e.to_string());
         let errors = self.opener.set_sources(&configs);
+        migrate_source_locations(&self.library, &self.opener, &configs);
         self.source_configs = configs;
         SourcesChange { errors, save_error }
     }
@@ -643,6 +744,143 @@ fn remote_page_text() -> Vec<(String, String)> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::sync::atomic::{AtomicUsize, Ordering};
+
+    struct CountingSource {
+        id: &'static str,
+        opens: Arc<AtomicUsize>,
+    }
+
+    impl Source for CountingSource {
+        fn id(&self) -> &str {
+            self.id
+        }
+        fn name(&self) -> &str {
+            self.id
+        }
+        fn kind(&self) -> fp_sources::SourceKind {
+            fp_sources::SourceKind::Http
+        }
+        fn describe(&self) -> String {
+            self.id.into()
+        }
+        fn list(&self, _: Option<&str>) -> fp_sources::Result<Vec<fp_core::Entry>> {
+            Ok(Vec::new())
+        }
+        fn open(&self, _: &str) -> fp_sources::Result<Arc<dyn ByteSource>> {
+            self.opens.fetch_add(1, Ordering::SeqCst);
+            Ok(Arc::new(Dribble(4)))
+        }
+    }
+
+    #[test]
+    fn persistent_resources_route_only_to_their_owner_for_media_and_assets() {
+        let opener = Opener::new();
+        let owner_calls = Arc::new(AtomicUsize::new(0));
+        let other_calls = Arc::new(AtomicUsize::new(0));
+        for (id, calls) in [
+            ("owner", owner_calls.clone()),
+            ("other", other_calls.clone()),
+        ] {
+            opener.insert_source(Arc::new(CountingSource { id, opens: calls }));
+        }
+        let location = fp_sources::location::encode("owner", "http", "videos/movie.mp4");
+        assert!(opener.open(&location).is_ok());
+        assert_eq!(opener.fetch(&location, 16).unwrap(), [7; 4]);
+        assert_eq!(
+            opener.fetch_in(Some("owner"), &location, 16).unwrap(),
+            [7; 4]
+        );
+        assert_eq!(owner_calls.load(Ordering::SeqCst), 3);
+        assert!(opener.open_in(Some("other"), &location).is_err());
+        assert!(opener.fetch_in(Some("other"), &location, 16).is_err());
+        assert!(
+            opener
+                .open(&fp_sources::location::encode(
+                    "missing",
+                    "http",
+                    "movie.mp4"
+                ))
+                .is_err()
+        );
+        for invalid in [
+            "source://elsewhere/owner/http/movie.mp4",
+            "source:broken",
+            "SOURCE://source/owner/http/movie.mp4?escape=1",
+        ] {
+            assert!(opener.open(invalid).is_err());
+            assert!(opener.fetch(invalid, 16).is_err());
+        }
+        assert_eq!(owner_calls.load(Ordering::SeqCst), 3);
+        assert_eq!(other_calls.load(Ordering::SeqCst), 0);
+    }
+
+    #[test]
+    fn migrating_a_source_then_changing_its_address_keeps_history_and_playlists() {
+        use std::io::{BufRead, BufReader, Write};
+        let library = Library::open_in_memory().unwrap();
+        let old_location = "http://old.example/old-root/folder/movie%20one.mp4";
+        let id = library
+            .upsert(&fp_library::MediaUpsert::new(old_location, "web"))
+            .unwrap()
+            .id;
+        library.set_favorite(id, true).unwrap();
+        library.set_resume_position(id, 37.0).unwrap();
+        let playlist = library.create_playlist("Tonight").unwrap();
+        library.add_to_playlist(playlist, &[id]).unwrap();
+        let mut config = fp_sources::HttpConfig {
+            id: "web".into(),
+            name: "Server".into(),
+            url: "http://old.example/old-root/".into(),
+            credentials: None,
+            insecure_tls: false,
+        };
+        let opener = Opener::new();
+        let old = [SourceConfig::Http(config.clone())];
+        assert!(opener.set_sources(&old).is_empty());
+        migrate_source_locations(&library, &opener, &old);
+        let stable = fp_sources::location::encode("web", "http", "folder/movie%20one.mp4");
+        let saved = library.get_by_location(&stable).unwrap().unwrap();
+        assert_eq!(saved.id, id);
+        assert!(saved.favorite);
+        assert_eq!(saved.resume_position, 37.0);
+        assert_eq!(library.playlist_items(playlist).unwrap()[0].record.id, id);
+        assert!(library.get_by_location(old_location).unwrap().is_none());
+
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        config.url = format!("http://{}/new-root/", listener.local_addr().unwrap());
+        let server = std::thread::spawn(move || {
+            let (mut stream, _) = listener.accept().unwrap();
+            stream
+                .set_read_timeout(Some(std::time::Duration::from_secs(3)))
+                .unwrap();
+            let mut reader = BufReader::new(stream.try_clone().unwrap());
+            let mut request = String::new();
+            reader.read_line(&mut request).unwrap();
+            loop {
+                let mut header = String::new();
+                reader.read_line(&mut header).unwrap();
+                if header == "\r\n" || header.is_empty() {
+                    break;
+                }
+            }
+            stream
+                .write_all(b"HTTP/1.1 200 OK\r\nContent-Length: 4\r\nConnection: close\r\n\r\ntest")
+                .unwrap();
+            request
+        });
+        let current = [SourceConfig::Http(config)];
+        assert!(opener.set_sources(&current).is_empty());
+        migrate_source_locations(&library, &opener, &current);
+        assert_eq!(opener.fetch_in(Some("web"), &stable, 16).unwrap(), b"test");
+        assert!(
+            server
+                .join()
+                .unwrap()
+                .starts_with("GET /new-root/folder/movie%20one.mp4 ")
+        );
+        assert_eq!(library.get(id).unwrap().unwrap().location, stable);
+    }
 
     #[test]
     fn device_id_is_made_once_and_kept() {

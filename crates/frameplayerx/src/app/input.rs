@@ -27,25 +27,14 @@ impl App {
             },
             &self.settings.controls,
         );
-        self.track_activity(&h, over_ui, !cmds.is_empty(), buzz);
+        self.track_activity(&h, over_ui, !cmds.is_empty());
         for c in cmds {
             self.run_cmd(c, input, buzz);
         }
     }
 
-    /// Feedback for a trigger pulled on a panel, and whether the user is
-    /// doing something (which keeps the controls up).
-    fn track_activity(
-        &mut self,
-        h: &[Hand; 2],
-        over_ui: bool,
-        commanded: bool,
-        buzz: &mut Vec<(usize, f32, i64)>,
-    ) {
-        if over_ui && (0..2).any(|i| h[i].trigger > 0.7 && self.trigger_prev[i] <= 0.7) {
-            buzz.push((self.pointer.active, 0.2, 8));
-        }
-        self.trigger_prev = [h[0].trigger, h[1].trigger];
+    /// Whether the user is doing something (which keeps the controls up).
+    fn track_activity(&mut self, h: &[Hand; 2], over_ui: bool, commanded: bool) {
         // Pointing at a panel only counts as activity while the ray moves
         // or a trigger or grip is pulled: a hand resting with its ray on the
         // control bar must not keep it up forever.

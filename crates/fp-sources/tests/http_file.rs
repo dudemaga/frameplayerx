@@ -3,6 +3,7 @@
 
 mod common;
 
+use base64::Engine;
 use common::{Req, TestServer, pattern, resp, serve_bytes};
 use fp_core::ByteSource;
 use fp_sources::{CacheOptions, Credentials, Error, HttpClient, HttpOptions};
@@ -11,6 +12,359 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 use std::time::{Duration, Instant};
 
 const AUTH: &str = "Basic Ym9iOnMzY3JldA=="; // bob:s3cret
+
+fn fallback_options() -> HttpOptions {
+    HttpOptions {
+        connect_timeout: Duration::from_secs(2),
+        read_timeout: Duration::from_secs(2),
+        max_retries: 0,
+        ..Default::default()
+    }
+}
+
+#[test]
+fn dns_fallback_keeps_the_original_host_credentials_redirects_and_ranges() {
+    let data = Arc::new(pattern(128 * 1024));
+    let bytes = data.clone();
+    let server = TestServer::start(move |req| {
+        if req.path() == "/redirect" {
+            return resp(307, "", &[("Location", "/media")]);
+        }
+        serve_bytes(req, &bytes, true)
+    });
+    let address: std::net::SocketAddr = server
+        .base
+        .strip_prefix("http://")
+        .unwrap()
+        .parse()
+        .unwrap();
+    let origin = format!("http://fallback.invalid:{}", address.port());
+    let client = HttpClient::new_with_headers(
+        HttpOptions {
+            cache: CacheOptions {
+                block_size: 16 * 1024,
+                read_ahead: false,
+                ..Default::default()
+            },
+            ..fallback_options()
+        },
+        vec![("X-Plex-Token".into(), "private-token".into())],
+        &origin,
+    )
+    .with_address_fallback(address);
+    let file = client.open(&format!("{origin}/redirect")).unwrap();
+    let mut buf = [0; 1024];
+    let n = file.read_at(64 * 1024, &mut buf).unwrap();
+    assert_eq!(&buf[..n], &data[64 * 1024..64 * 1024 + n]);
+    assert!(file.describe().contains("fallback.invalid"));
+    let host = format!("fallback.invalid:{}", address.port());
+    let requests = server.requests();
+    assert!(requests.len() >= 4, "probe, redirect and a later range");
+    assert!(
+        requests
+            .iter()
+            .all(|r| r.header("host") == Some(host.as_str()))
+    );
+    assert!(
+        requests
+            .iter()
+            .all(|r| r.header("x-plex-token") == Some("private-token"))
+    );
+
+    let before = requests.len();
+    assert!(
+        client
+            .get_bytes(
+                &format!("http://other.invalid:{}/media", address.port()),
+                1024
+            )
+            .is_err()
+    );
+    let other_port = if address.port() == u16::MAX {
+        address.port() - 1
+    } else {
+        address.port() + 1
+    };
+    assert!(
+        client
+            .get_bytes(&format!("http://fallback.invalid:{other_port}/media"), 1024)
+            .is_err()
+    );
+    assert_eq!(
+        server.requests().len(),
+        before,
+        "fallback is restricted to the original host and port"
+    );
+
+    // A direct request to another origin uses ordinary DNS and receives
+    // none of the scoped credentials.
+    client
+        .get_bytes(&server.url("/public"), 256 * 1024)
+        .unwrap();
+    assert!(
+        server
+            .requests()
+            .last()
+            .unwrap()
+            .header("x-plex-token")
+            .is_none()
+    );
+}
+
+#[test]
+fn address_fallback_recovers_failed_connections_and_keeps_a_working_destination() {
+    let destination = TestServer::start(|_| resp(200, "normal DNS", &[]));
+    let fallback = TestServer::start(|_| resp(200, "advertised address", &[]));
+    let address = fallback
+        .base
+        .strip_prefix("http://")
+        .unwrap()
+        .parse()
+        .unwrap();
+    let client = HttpClient::new(fallback_options(), None)
+        .scoped_to(&destination.base)
+        .with_address_fallback(address);
+    assert_eq!(
+        client.get_bytes(&destination.url("/"), 1024).unwrap(),
+        b"normal DNS"
+    );
+    assert!(fallback.requests().is_empty());
+
+    let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+    let closed = listener.local_addr().unwrap();
+    drop(listener);
+    let origin = format!("http://{closed}");
+    let client = HttpClient::new(fallback_options(), None)
+        .scoped_to(&origin)
+        .with_address_fallback(address);
+    assert_eq!(
+        client.get_bytes(&origin, 1024).unwrap(),
+        b"advertised address",
+        "TCP failure after successful DNS must try the advertised socket"
+    );
+    assert_eq!(fallback.requests().len(), 1);
+
+    let unknown = format!("http://unscoped.invalid:{}/", address.port());
+    let client = HttpClient::new(fallback_options(), None).with_address_fallback(address);
+    assert!(client.get_bytes(&unknown, 1024).is_err());
+    let client = HttpClient::new(fallback_options(), None)
+        .scoped_to("not a URL")
+        .with_address_fallback(address);
+    assert!(client.get_bytes(&unknown, 1024).is_err());
+    assert!(
+        fallback.requests().len() == 1,
+        "invalid or absent scope leaves DNS unchanged"
+    );
+}
+
+#[test]
+fn connection_fallback_preserves_credentials_redirects_and_later_ranges() {
+    let data = Arc::new(pattern(128 * 1024));
+    let bytes = data.clone();
+    let server = TestServer::start(move |request| {
+        if request.path() == "/redirect" {
+            return resp(307, "", &[("Location", "/media")]);
+        }
+        serve_bytes(request, &bytes, true)
+    });
+    let address = server
+        .base
+        .strip_prefix("http://")
+        .unwrap()
+        .parse()
+        .unwrap();
+    let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+    let closed = listener.local_addr().unwrap();
+    drop(listener);
+    // localhost resolves normally, but its socket refuses the connection.
+    let origin = format!("http://localhost:{}", closed.port());
+    let client = HttpClient::new_with_headers(
+        HttpOptions {
+            cache: CacheOptions {
+                block_size: 16 * 1024,
+                read_ahead: false,
+                ..Default::default()
+            },
+            ..fallback_options()
+        },
+        vec![("X-Plex-Token".into(), "private-token".into())],
+        &origin,
+    )
+    .with_address_fallback(address);
+    let file = client.open(&format!("{origin}/redirect")).unwrap();
+    let mut buf = [0; 1024];
+    assert_eq!(file.read_at(64 * 1024, &mut buf).unwrap(), buf.len());
+    assert_eq!(buf, data[64 * 1024..64 * 1024 + buf.len()]);
+    assert!(file.describe().starts_with(&origin));
+    let requests = server.requests();
+    assert!(requests.len() >= 4, "redirect, probe and a later range");
+    let host = format!("localhost:{}", closed.port());
+    for request in &requests {
+        assert_eq!(request.header("host"), Some(host.as_str()));
+        assert_eq!(request.header("x-plex-token"), Some("private-token"));
+    }
+}
+
+#[test]
+fn address_fallback_keeps_tls_sni_and_verification_after_dns_failure_or_tls_timeout() {
+    use rustls::pki_types::{CertificateDer, PrivatePkcs8KeyDer};
+    use std::sync::mpsc;
+
+    // Self-signed test identity for a reserved .invalid name. Embedding
+    // the DER keeps this regression independent of openssl or a live CA.
+    const CERT: &str = "MIIBtjCCAVygAwIBAgIUE/jGo1oiw5MCnX1X/T1vklAQPcgwCgYIKoZIzj0EAwIwHzEdMBsGA1UEAwwUdGxzLWZhbGxiYWNrLmludmFsaWQwIBcNMjYxMDMwMDE1NDE2WhgPMjEyNjEwMDYwMTU0MTZaMB8xHTAbBgNVBAMMFHRscy1mYWxsYmFjay5pbnZhbGlkMFkwEwYHKoZIzj0CAQYIKoZIzj0DAQcDQgAEJ0E8IJZ1K9nTyc1e3FNORoIhlGeH7dHPmDIDcq5cygAWCpwH3kQvyQYbemeK8OkX/U+1UqzlV3mEA4QpefAev6N0MHIwHQYDVR0OBBYEFDO6368fnJpxrIiwRZPlNgxsmaeYMB8GA1UdIwQYMBaAFDO6368fnJpxrIiwRZPlNgxsmaeYMA8GA1UdEwEB/wQFMAMBAf8wHwYDVR0RBBgwFoIUdGxzLWZhbGxiYWNrLmludmFsaWQwCgYIKoZIzj0EAwIDSAAwRQIgaBs/P4a9Vx/ngTLpaddQjnYnhWGKTDwi5XQaXyOw+tICIQCc7tIKu4EatHFMSXnD/KSAvQMQjpTm6mMoltOkCknqvg==";
+    const KEY: &str = "MIGHAgEAMBMGByqGSM49AgEGCCqGSM49AwEHBG0wawIBAQQgtA0h/ljJPG5dxd1BL2rKk+fcYoP0JPNGHzskOlRGWMehRANCAAQnQTwglnUr2dPJzV7cU05GgiGUZ4ft0c+YMgNyrlzKABYKnAfeRC/JBht6Z4rw6Rf9T7VSrOVXeYQDhCl58B6/";
+    let cert = CertificateDer::from(
+        base64::engine::general_purpose::STANDARD
+            .decode(CERT)
+            .unwrap(),
+    );
+    let key = PrivatePkcs8KeyDer::from(
+        base64::engine::general_purpose::STANDARD
+            .decode(KEY)
+            .unwrap(),
+    );
+    let config = Arc::new(
+        rustls::ServerConfig::builder()
+            .with_no_client_auth()
+            .with_single_cert(vec![cert], key.into())
+            .unwrap(),
+    );
+    for stall_primary in [false, true] {
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let address = listener.local_addr().unwrap();
+        let config = config.clone();
+        let (tx, rx) = mpsc::channel();
+        let server = std::thread::spawn(move || {
+            let (mut socket, _) = listener.accept().unwrap();
+            socket
+                .set_read_timeout(Some(Duration::from_secs(3)))
+                .unwrap();
+            socket
+                .set_write_timeout(Some(Duration::from_secs(3)))
+                .unwrap();
+            let mut tls = rustls::ServerConnection::new(config).unwrap();
+            let result = tls.complete_io(&mut socket);
+            tx.send((tls.server_name().map(str::to_string), result.is_err()))
+                .unwrap();
+        });
+        let mut stalled = None;
+        let mut stop = None;
+        let origin = if stall_primary {
+            let primary = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+            let port = primary.local_addr().unwrap().port();
+            let (tx, rx) = mpsc::channel();
+            stop = Some(tx);
+            stalled = Some(std::thread::spawn(move || {
+                let (_socket, _) = primary.accept().unwrap();
+                // Accept TCP but never answer the TLS handshake.
+                rx.recv_timeout(Duration::from_secs(3)).ok();
+            }));
+            format!("https://localhost:{port}")
+        } else {
+            format!("https://tls-fallback.invalid:{}", address.port())
+        };
+        let client = HttpClient::new(
+            HttpOptions {
+                connect_timeout: Duration::from_millis(600),
+                ..fallback_options()
+            },
+            None,
+        )
+        .scoped_to(&origin)
+        .with_address_fallback(address);
+        let started = Instant::now();
+        let error = client
+            .get_bytes(&format!("{origin}/private"), 1024)
+            .unwrap_err();
+        if let Some(stop) = stop {
+            stop.send(()).ok();
+        }
+        if let Some(stalled) = stalled {
+            stalled.join().unwrap();
+        }
+        assert!(
+            error.to_string().contains("certificate"),
+            "expected certificate validation at the fallback after DNS/TLS failure: {error}"
+        );
+        if stall_primary {
+            assert!(
+                started.elapsed() < Duration::from_secs(2),
+                "fallback stays bounded"
+            );
+        }
+        let (name, rejected) = rx.recv_timeout(Duration::from_secs(5)).unwrap();
+        let expected_name = if stall_primary {
+            "localhost"
+        } else {
+            "tls-fallback.invalid"
+        };
+        assert_eq!(name.as_deref(), Some(expected_name));
+        assert!(rejected, "the client must reject this self-signed server");
+        assert!(!client.options().insecure_tls);
+        server.join().unwrap();
+    }
+}
+
+#[test]
+fn named_credentials_survive_ranges_and_same_origin_redirects_only() {
+    let data = Arc::new(pattern(128 * 1024));
+    let bytes = data.clone();
+    let server = TestServer::start(move |req| {
+        if req.header("x-plex-token") != Some("private-token") {
+            return resp(401, "unauthorized", &[]);
+        }
+        if req.path() == "/redirect" {
+            return resp(307, "", &[("Location", "/media")]);
+        }
+        serve_bytes(req, &bytes, true)
+    });
+    let client = HttpClient::new_with_headers(
+        HttpOptions {
+            cache: CacheOptions {
+                block_size: 16 * 1024,
+                read_ahead: false,
+                ..Default::default()
+            },
+            ..Default::default()
+        },
+        vec![("X-Plex-Token".into(), "private-token".into())],
+        &server.base,
+    );
+    assert!(!format!("{client:?}").contains("private-token"));
+    let file = client.open(&server.url("/redirect")).unwrap();
+    let mut buf = [0; 1024];
+    let n = file.read_at(64 * 1024, &mut buf).unwrap();
+    assert_eq!(&buf[..n], &data[64 * 1024..64 * 1024 + n]);
+    assert!(server.requests().len() >= 4);
+    assert!(
+        server
+            .requests()
+            .iter()
+            .all(|r| r.header("x-plex-token") == Some("private-token"))
+    );
+
+    let target = TestServer::start(|_| resp(200, "unexpected", &[]));
+    let destination = target.url("/private");
+    let redirect = TestServer::start(move |_| resp(307, "", &[("Location", &destination)]));
+    let client = HttpClient::new_with_headers(
+        HttpOptions::default(),
+        vec![("X-Plex-Token".into(), "private-token".into())],
+        &redirect.base,
+    );
+    assert!(client.get_bytes(&redirect.url("/start"), 1024).is_err());
+    assert!(
+        target.requests().is_empty(),
+        "no token or body reaches another origin"
+    );
+    client.get_bytes(&target.url("/direct"), 1024).unwrap();
+    assert!(
+        target
+            .requests()
+            .iter()
+            .all(|r| r.header("x-plex-token").is_none())
+    );
+}
 
 fn is_get(r: &Req) -> bool {
     r.method == "GET"

@@ -206,6 +206,21 @@ mod tests {
     }
 
     #[test]
+    fn owned_sidecars_keep_axes_and_subtitle_languages() {
+        let uri =
+            |file: &str| crate::location::encode("folder", "http", &format!("folder/{file}?v=2"));
+        let mut entry = Entry::new("Movie", uri("Movie%20one.mp4"), EntryKind::Video);
+        entry.scripts.push(uri("Movie%20one.roll.funscript"));
+        entry
+            .subtitles
+            .push(subtitle_file(&uri("Movie%20one.en.srt"), "Movie one.mp4"));
+        let sidecars = Sidecars::from_entry(&entry);
+        assert_eq!(sidecars.scripts[0].name, "Movie one.roll.funscript");
+        assert_eq!(sidecars.scripts[0].axis.as_deref(), Some("roll"));
+        assert_eq!(sidecars.subtitles[0].language.as_deref(), Some("en"));
+    }
+
+    #[test]
     fn single_and_multi_axis_scripts() {
         let f = folder(&[
             "Scene_180_LR.mp4",

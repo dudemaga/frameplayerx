@@ -1,6 +1,18 @@
-//! Browsing sources: folders, scene feeds, Jellyfin/Emby, and PIN locks.
+//! Browsing sources: folders, scene feeds, server catalogs, and PIN locks.
 
 use super::*;
+
+fn request_source(library: &Library, req: &OpenRequest) -> Option<String> {
+    fp_sources::location_owner(&req.location)
+        .or_else(|| req.source_id.clone())
+        .or_else(|| {
+            library
+                .get_by_location(&req.location)
+                .ok()
+                .flatten()
+                .map(|r| r.source_id)
+        })
+}
 
 impl App {
     /// Whether source `id` has a PIN and is not unlocked.
@@ -43,14 +55,7 @@ impl App {
         if self.settings.source_pins.is_empty() {
             return None;
         }
-        let source = req.source_id.clone().or_else(|| {
-            self.services
-                .library
-                .get_by_location(&req.location)
-                .ok()
-                .flatten()
-                .map(|r| r.source_id)
-        })?;
+        let source = request_source(&self.services.library, req)?;
         self.source_locked(&source).then_some(source)
     }
 
@@ -112,6 +117,18 @@ impl App {
         let lib = self.services.library.clone();
         self.jobs.spawn("list", move || {
             let result = src.list(location.as_deref()).map(|mut e| {
+                // Browsing can teach feeds and DLNA the stable IDs behind
+                // legacy media URLs. Convert those rows before looking them up.
+                if matches!(
+                    src.kind(),
+                    fp_sources::SourceKind::Dlna
+                        | fp_sources::SourceKind::DeoVr
+                        | fp_sources::SourceKind::HereSphere
+                ) && let Err(error) = lib
+                    .rewrite_source_locations(&source, |location| src.canonical_location(location))
+                {
+                    log::warn!("cannot update saved media locations for source {source}: {error}");
+                }
                 // The library's pictures for these videos: where one was
                 // left off, or a thumbnail made for one the server has none
                 // for.
@@ -183,14 +200,14 @@ impl App {
             page,
         };
         match kind {
-            fp_sources::SourceKind::MediaBrowser => {
+            fp_sources::SourceKind::MediaBrowser | fp_sources::SourceKind::Plex => {
                 let seq = self.ui.next_seq();
-                let j = ui::jellyfin::JellyfinView::new(seq);
-                self.ui.source = Some(view(SourcePage::Jellyfin(j)));
-                self.apply(Action::Jellyfin {
+                let j = ui::catalog::CatalogView::new(seq);
+                self.ui.source = Some(view(SourcePage::Catalog(j)));
+                self.apply(Action::Catalog {
                     source,
                     seq,
-                    load: ui::jellyfin::Load::Home,
+                    load: ui::catalog::Load::Home,
                 });
             }
             fp_sources::SourceKind::DeoVr | fp_sources::SourceKind::HereSphere => {
@@ -251,12 +268,12 @@ impl App {
         }
     }
 
-    /// Brings a Jellyfin page up to date after watching (marks, resume
+    /// Brings a catalog page up to date after watching (marks, resume
     /// points and "next up" changed on the server).
     pub(super) fn refresh_source(&mut self) {
         let Some(SourceView {
             source,
-            page: SourcePage::Jellyfin(j),
+            page: SourcePage::Catalog(j),
             ..
         }) = self.ui.source.as_mut()
         else {
@@ -265,28 +282,36 @@ impl App {
         let source = source.clone();
         if let Some((seq, load)) = j.reload() {
             // After the server has heard that playback stopped.
-            self.jellyfin_job(source, seq, load, Duration::from_millis(800));
+            self.catalog_job(source, seq, load, Duration::from_millis(800));
         }
     }
 
-    /// Asks a Jellyfin/Emby server for a page, after `delay`.
-    pub(super) fn jellyfin_job(
+    /// Asks a media server for a catalog page, after `delay`.
+    pub(super) fn catalog_job(
         &mut self,
         source: String,
         seq: u64,
-        load: ui::jellyfin::Load,
+        load: ui::catalog::Load,
         delay: Duration,
     ) {
         let Some(src) = self.services.opener.source(&source) else {
             return;
         };
-        self.jobs.spawn("jellyfin", move || {
+        let request_seq = self.ui.next_seq();
+        let Some(seq) = self
+            .ui
+            .catalog_page(&source)
+            .and_then(|page| page.begin_request(seq, request_seq, &load))
+        else {
+            return;
+        };
+        self.jobs.spawn("catalog", move || {
             std::thread::sleep(delay);
-            let result = match src.as_media_browser() {
-                Some(mb) => ui::jellyfin::run(mb, &load).map_err(|e| ui::errors::source(&e)),
-                None => Err(tr!("source-not-jellyfin").to_string()),
+            let result = match src.as_catalog() {
+                Some(mb) => ui::catalog::run(mb, &load).map_err(|e| ui::errors::source(&e)),
+                None => Err(tr!("source-not-available").to_string()),
             };
-            Job::Jellyfin {
+            Job::Catalog {
                 source,
                 seq,
                 result: Box::new(result),
@@ -473,27 +498,27 @@ impl App {
         }
     }
 
-    // ---- Jellyfin, feeds, DLNA ----
+    // ---- Catalogs, feeds, DLNA ----
 
-    /// Marks a Jellyfin/Emby item as a favorite, or as watched, on the
+    /// Marks a catalog item as a favorite, or as watched, on the
     /// server.
-    pub(super) fn mark_jellyfin(
+    pub(super) fn mark_catalog(
         &mut self,
         source: &str,
         id: String,
-        mark: ui::jellyfin::Mark,
+        mark: ui::catalog::Mark,
         on: bool,
     ) {
         let Some(src) = self.services.opener.source(source) else {
             return;
         };
-        self.jobs.spawn("jellyfin-mark", move || {
-            let Some(mb) = src.as_media_browser() else {
-                return Job::Toast(tr!("source-not-jellyfin-toast").into());
+        self.jobs.spawn("catalog-mark", move || {
+            let Some(mb) = src.as_catalog() else {
+                return Job::Toast(tr!("source-not-available").into());
             };
             let r = match mark {
-                ui::jellyfin::Mark::Favorite => mb.set_favorite(&id, on),
-                ui::jellyfin::Mark::Played => mb.set_played(&id, on),
+                ui::catalog::Mark::Favorite => mb.set_favorite(&id, on),
+                ui::catalog::Mark::Played => mb.set_played(&id, on),
             };
             match r {
                 Ok(()) => Job::Done,
@@ -641,4 +666,25 @@ fn scene_details(
 ) -> Result<fp_sources::SceneInfo, String> {
     let feed = src.as_scene_feed().ok_or(tr!("source-not-scene-feed"))?;
     feed.scene(url, full).map_err(|e| ui::errors::source(&e))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn an_unindexed_owned_resource_keeps_its_source_pin() {
+        let library = Library::open_in_memory().unwrap();
+        let mut req = OpenRequest {
+            location: fp_sources::location::encode("private", "http", "movie.mp4"),
+            ..Default::default()
+        };
+        let pins = std::collections::BTreeMap::from([("private".into(), "a stored hash".into())]);
+        let unlocked = std::collections::HashSet::new();
+        let source = request_source(&library, &req).unwrap();
+        assert_eq!(source, "private");
+        assert!(crate::pin::locked(&pins, &unlocked, &source));
+        req.source_id = Some("public".into());
+        assert_eq!(request_source(&library, &req).as_deref(), Some("private"));
+    }
 }

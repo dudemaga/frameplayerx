@@ -102,9 +102,44 @@ fn split_url(location: &str) -> (&str, &str, &str) {
 }
 
 /// Decoded last non-empty path segment of a URL or path: the file or folder
-/// name. Empty for a bare host.
+/// name. Empty for a bare host, and for a Plex video, whose location ends in
+/// the server's ID for it: an ID of 180 is no format hint.
 pub fn last_segment(location: &str) -> String {
+    if fp_core::source::location_names_no_file(location) {
+        return String::new();
+    }
+    if let Some(reference) = crate::location::decode(location) {
+        // DLNA resource URLs are opaque. The durable reference carries
+        // the server's filename separately from the object ID so subtitle
+        // decoders and haptic axis detection retain its extension/suffix.
+        match reference.kind.as_str() {
+            "dlna-file" => {
+                if let Ok((_id, name)) = serde_json::from_str::<(String, String)>(&reference.key) {
+                    return name;
+                }
+            }
+            "dlna-asset" => {
+                if let Ok((_id, _role, _index, name)) =
+                    serde_json::from_str::<(String, String, usize, String)>(&reference.key)
+                {
+                    return name;
+                }
+            }
+            _ => {}
+        }
+        let key = match reference.kind.as_str() {
+            "http" | "webdav" | "smb" | "mb-asset" => Some(reference.key.as_str()),
+            _ => None,
+        };
+        if let Some(key) = key {
+            return path_last_segment(key.split(['?', '#']).next().unwrap_or(key));
+        }
+    }
     let (_, path, _) = split_url(location);
+    path_last_segment(path)
+}
+
+fn path_last_segment(path: &str) -> String {
     let seg = path
         .trim_end_matches(['/', '\\'])
         .rsplit(['/', '\\'])
@@ -154,6 +189,13 @@ const SECRET_PARAMS: &[&str] = &[
     "pass",
     "token",
     "access_token",
+    "auth_token",
+    "authtoken",
+    "x-plex-token",
+    "devicejwt",
+    "jwt",
+    "pin",
+    "code",
     "auth",
     "key",
 ];
@@ -185,7 +227,11 @@ pub fn redact(location: &str) -> String {
         let redacted: Vec<String> = query
             .split('&')
             .map(|pair| match pair.split_once('=') {
-                Some((k, _)) if SECRET_PARAMS.iter().any(|s| s.eq_ignore_ascii_case(k)) => {
+                Some((k, _))
+                    if SECRET_PARAMS
+                        .iter()
+                        .any(|s| s.eq_ignore_ascii_case(&percent_decode(k))) =>
+                {
                     format!("{k}=***")
                 }
                 _ => pair.to_string(),
@@ -412,6 +458,36 @@ mod tests {
     }
 
     #[test]
+    fn owned_path_names_keep_escaping_and_exclude_folders_and_queries() {
+        for kind in ["http", "webdav", "smb", "mb-asset"] {
+            let uri = crate::location::encode(
+                "source/id",
+                kind,
+                "folder_180_LR/Movie%20%C3%BC%2520.roll.funscript?name=other.srt",
+            );
+            assert_eq!(last_segment(&uri), "Movie ü%20.roll.funscript", "{kind}");
+        }
+    }
+
+    #[test]
+    fn dlna_filename_hints_are_independent_of_opaque_object_ids() {
+        let file_key =
+            serde_json::to_string(&("object:7/../subtitle.srt", "Movie ü%20.roll.funscript"))
+                .unwrap();
+        let file = crate::location::encode("nas/id", "dlna-file", &file_key);
+        assert_eq!(last_segment(&file), "Movie ü%20.roll.funscript");
+        let asset_key = serde_json::to_string(&(
+            "object:7/../Movie.roll.funscript",
+            "subtitle",
+            0,
+            "Movie ü%20.en.srt",
+        ))
+        .unwrap();
+        let asset = crate::location::encode("nas/id", "dlna-asset", &asset_key);
+        assert_eq!(last_segment(&asset), "Movie ü%20.en.srt");
+    }
+
+    #[test]
     fn strips_credentials() {
         let (u, c) = split_credentials("http://bob:p%40ss@nas:5005/dav/").unwrap();
         assert_eq!(u, "http://nas:5005/dav/");
@@ -431,6 +507,14 @@ mod tests {
         assert_eq!(redact("http://bob@nas/a"), "http://bob@nas/a");
         assert_eq!(redact("smb://u:pw@host/share"), "smb://u:***@host/share");
         assert_eq!(redact("/local/a?b"), "/local/a?b");
+        assert_eq!(
+            redact("https://app.plex.tv/auth#?code=secret&clientID=device"),
+            "https://app.plex.tv/auth#?code=***&clientID=device"
+        );
+        assert_eq!(
+            redact("https://pms/v?X%2DPlex%2DToken=secret&deviceJWT=assertion"),
+            "https://pms/v?X%2DPlex%2DToken=***&deviceJWT=***"
+        );
     }
 
     #[test]
@@ -488,5 +572,23 @@ mod tests {
         let mut v = vec!["ep10.mp4", "Ep2.mp4", "ep1.mp4", "a.mp4", "ep02b.mp4"];
         v.sort_by(|a, b| natural_cmp(a, b));
         assert_eq!(v, ["a.mp4", "ep1.mp4", "Ep2.mp4", "ep02b.mp4", "ep10.mp4"]);
+    }
+
+    #[test]
+    fn a_servers_id_for_a_video_names_no_file() {
+        let of = |kind: &str, key: &str| last_segment(&crate::location::encode("s", kind, key));
+        assert_eq!(of("dlna", "item:64$1$180"), "");
+        assert_eq!(of("deovr-id", "180"), "");
+        assert_eq!(of("heresphere-id", "360"), "");
+        assert_eq!(of("mb", "item=abc180&version=360"), "");
+        assert_eq!(of("http", "VR/Clip_180_LR.mp4"), "Clip_180_LR.mp4");
+    }
+
+    #[test]
+    fn a_plex_video_location_names_no_file() {
+        let item = "plex://source/plex-one/machine-1/item/180?media=10";
+        assert_eq!(last_segment(item), "");
+        let picture = "plex://source/plex-one/machine-1/image/resource?path=%2Fa%2Fb.jpg";
+        assert_eq!(last_segment(picture), "resource");
     }
 }

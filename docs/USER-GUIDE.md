@@ -165,11 +165,12 @@ that pairing, you can also delete `~/.ssh/id_rsa_frame_devkit` and
 | Where | How |
 |---|---|
 | Any folder on the headset, a microSD card or a USB drive | Browse it under Home › On this device, or make it a library: Sources › Add source › Library |
-| Any server with a DeoVR feed or HereSphere API | Sources › Add source › DeoVR feed or HereSphere API |
+| Any server with a DeoVR feed or HereSphere API | Sources › Add source › DeoVR or HereSphere |
 | NAS / Windows share | Sources › Add source › SMB share: a whole server (`smb://nas/`, which lists the shares your login, or a guest without one, may open) or one share or folder (`smb://nas/videos`) |
 | Nextcloud and other WebDAV | Sources › Add source › WebDAV |
 | Jellyfin, Emby | Sources › Add source › Jellyfin / Emby (a password, or Quick Connect on Jellyfin) |
-| Plex, Serviio and other DLNA servers | Sources › Add source › DLNA › Search the network |
+| Plex | Sources › Add source › Plex › Link with code; enter the code at plex.tv/link on your phone or computer, then choose a server |
+| Serviio and other DLNA servers (including Plex with DLNA enabled) | Sources › Add source › DLNA › Search the network |
 | A web server folder listing | Sources › Add source › HTTP |
 
 ### Home, watch history and browsing
@@ -232,6 +233,11 @@ nothing playing, either plays it. On the Up next page, pick a video to play
 it, move videos up or down, take them out, *Clear* everything but the video
 playing, or *Save as playlist*.
 
+**Shuffle** on the Up next page puts the current video first and every
+other entry in a new random order, including entries that came before it.
+The current video keeps playing; press **Shuffle** again for another order.
+To keep this order as a playlist, press **Save as playlist** afterwards.
+
 **Autoplay** (the play sign in a circular arrow, on the control bar) plays
 any list through, one opened from a folder, grid or season too: the next
 video starts when one ends.
@@ -253,8 +259,9 @@ Videos of a source locked with a PIN are left out until it is unlocked.
 |---|---|
 | On this device | The home folder and the inserted microSD card and USB drives, as folders: play any video, or *Play all* in a folder |
 | Library | **Videos**: every video in its folder, with thumbnails, search, format filters and sorting (newest, title, length, rating, shuffle). **Folders**: its folder as folders. **Scan now** looks for new and removed videos |
-| Jellyfin / Emby | Your libraries, *Continue watching*, *Next up* and the latest additions; a search of the whole server by title, as Jellyfin's own search shows it: a row each of movies, shows, collections and other videos, best matches first (episodes are found through their show), a *People* row of the cast and crew whose names match (tap one to see what they are in), and a *Tagged* row of what carries a tag with your words in it; poster grids searched, sorted (title, date added, release date, rating, length, last watched, shuffle) and filtered by the server: unwatched, in progress, favorites, and **Filters** for genres, decades, resolution, studios and tags; series by season and episode; details with the story, cast, genres and tags (tap a tag to see everything that has it), and a *Version* row when the server keeps more than one version of a video (4K and 1080p, a director's cut): *Automatic* plays the tallest that fits the source's maximum height; pick another and the video plays from it wherever you open it (subtitles included) until the app closes. Each version keeps its own format and adjustments, as a separate video in your history. Watched marks, favorites and resume points are the server's (see [Watch sync](#watch-sync-with-jellyfin-emby-and-heresphere)) |
-| DeoVR feed / HereSphere API | The server's scene groups as chips over a grid of scenes; search the chosen group (or *All*) across titles, studios, performers and tags; order by title, date, rating or length, either way, or shuffle; *Favorites* (and *Scripted*, with haptics on), and **Filters** for studio, people, tags, length, format and rating, each with how many scenes have it (a DeoVR feed's studios, tags and performers come with each scene's details, fetched while you search or filter and kept for next time). ⋯ opens a scene's details: description, performers and tags (tap one to see all their scenes), chapters to start from, and ♡ to make it a favourite on a HereSphere API that takes favourites. The page opens with the scenes from last time while the server sends the current list ("updating…" under the title). A HereSphere API can also sync watch state (see [Watch sync](#watch-sync-with-jellyfin-emby-and-heresphere)) |
+| Jellyfin / Emby | Your libraries, *Continue watching*, *Next up* and the latest additions; a search of the whole server by title, as Jellyfin's own search shows it: a row each of movies, shows, collections and other videos, best matches first (episodes are found through their show), a *People* row of the cast and crew whose names match (tap one to see what they are in), and a *Tagged* row of what carries a tag with your words in it; poster grids searched, sorted (title, date added, release date, rating, length, last watched, shuffle) and filtered by the server: unwatched, in progress, favorites, and **Filters** for genres, decades, resolution, studios and tags; series by season and episode; details with the story, cast, genres and tags (tap a tag to see everything that has it), and a *Version* row when the server keeps more than one version of a video (4K and 1080p, a director's cut): *Automatic* plays the tallest that fits the source's maximum height; pick another and the video plays from it wherever you open it (subtitles included) until the app closes. Each version keeps its own format and adjustments, as a separate video in your history. Watched marks, favorites and resume points are the server's (see [Watch sync](#watch-sync-with-jellyfin-emby-plex-and-heresphere)) |
+| DeoVR feed / HereSphere API | The server's scene groups as chips over a grid of scenes; search the chosen group (or *All*) across titles, studios, performers and tags; order by title, date, rating or length, either way, or shuffle; *Favorites* (and *Scripted*, with haptics on), and **Filters** for studio, people, tags, length, format and rating, each with how many scenes have it (a DeoVR feed's studios, tags and performers come with each scene's details, fetched while you search or filter and kept for next time). ⋯ opens a scene's details: description, performers and tags (tap one to see all their scenes), chapters to start from, and ♡ to make it a favourite on a HereSphere API that takes favourites. The page opens with the scenes from last time while the server sends the current list ("updating…" under the title). A HereSphere API can also sync watch state (see [Watch sync](#watch-sync-with-jellyfin-emby-plex-and-heresphere)) |
+| Plex | Movie, TV and personal-video libraries; Continue watching and recent additions; server search, sorted and shuffled grids, unwatched and in-progress filters, and genre, studio and decade filters. Shows open by season and episode; details include artwork, chapters and available versions. Resume points and watched marks belong to the selected Plex account. Plex server favorites, people and tag browsing are not offered. App playlists, Up next, history and format adjustments work as with other video sources |
 | SMB, WebDAV, HTTP folders, DLNA, local folders | Folders and files: search the folder you are in, order by name, date or size, *Play all* |
 
 **Filters** opens a drawer on the right: what you pick there applies at
@@ -264,6 +271,65 @@ and each shows as a chip under the sorts; press a chip to take it off, or
 find one and shows a few, with **Show all** for the rest. **Shuffle** puts a list in a new random order each time you
 pick it or press **Shuffle again**; opening a video's page and coming back
 keeps the order. Grids load more as you scroll to their end.
+
+### Connecting Plex
+
+Under **Sources › Add source › Plex**, **Link with code** is selected by
+default. Press **Get pairing code**, then visit [plex.tv/link](https://plex.tv/link)
+on your phone or computer. Sign in to Plex there if asked and enter the
+code shown in FramePlayerX. The headset waits for approval, then shows
+your servers. Choose an owned or shared server, wait for its connection
+test, then **Save**. If the code expires, get another code and try again;
+**Cancel** stops waiting.
+
+The **Access token** option instead accepts a Plex Media Server address
+and an existing access token; test the connection before saving. A manual
+token cannot be renewed automatically. If a source linked with an earlier
+build fails authentication, link it again. Linking again or replacing a manual
+token creates a separate source, keeping the existing source and its
+history separate from the new account.
+
+**Connection** offers three modes:
+
+- **Local only** (the default for new sources): use Plex's advertised LAN
+  addresses, without remote addresses or Relay.
+- **Direct connections**: try LAN addresses first, then direct remote
+  addresses, without Relay. Remote addresses have to use HTTPS, because your
+  token goes with every request. If Plex only lists plain HTTP for your server,
+  set its **Secure connections** to Preferred or Required.
+- **Direct + Relay**: try direct connections first, then Plex Relay if needed.
+
+Local playback is free. Remote video requires **Plex Pass** for you or
+the server owner, or **Remote Watch Pass** for you. Plex may treat another
+subnet or VLAN as remote even when using a LAN address; choosing Local only
+does not change that classification. Editing a source keeps its saved mode.
+Changing the mode rechecks the selected server before saving. For manual
+Local-only setup with an access token, use a LAN IP address.
+
+Relay must also be enabled on the server. It can work without opening a
+router port, but is limited to 2 Mbit/s and has the same remote-playback
+subscription requirements. With Relay, Automatic requests a lower bitrate
+transcode when the original exceeds the limit; you can also select a quality
+explicitly. Direct remote access needs a reachable server connection; port
+forwarding, a VPN or a reachable reverse proxy are possible ways to provide
+one. See Plex's
+[Relay documentation](https://support.plex.tv/articles/216766168-accessing-a-server-through-relay/)
+and [remote playback requirements](https://support.plex.tv/articles/requirements-for-remote-playback-of-personal-media/).
+
+Plex's `*.plex.direct` hostnames are normal HTTPS server addresses. Some
+routers or DNS providers block their resolution through DNS rebinding
+protection; see [Plex's secure connection guide](https://support.plex.tv/articles/206225077-how-to-use-secure-server-connections/).
+If DNS lookup fails or the connection times out or cannot be opened,
+FramePlayerX tries that connection's advertised IP address and port, when
+available. It keeps the original HTTPS hostname and certificate checks, and verifies
+the server's identity. The log records the IP attempt. This fallback does
+not apply to Relay. Across VLANs, the headset still needs a route and
+firewall permission to the server's port.
+
+`app.plex.tv` provides the web app and account sign-in. FramePlayerX uses
+the selected server's media connection; entering `app.plex.tv` in the
+manual address field starts account linking. Plex Home profile switching,
+live TV, music, photos, cloud Watchlist and casting are not supported.
 
 ### Locking a source with a PIN
 
@@ -288,7 +354,23 @@ change its address, user name and password, or its PIN. Its type stays; a
 Jellyfin server signed in with Quick Connect keeps that sign-in
 unless you clear it.
 
-### Watch sync with Jellyfin, Emby and HereSphere
+When a network server's URL, IP address or root folder changes, edit the
+existing source. History, resume points, playlists and adjustments follow
+the same relative paths or server item IDs. Removing and adding the source
+again creates a different identity.
+
+HTTP(S), WebDAV and SMB use paths relative to the configured root.
+Jellyfin and Emby use item and version IDs; DLNA uses object IDs, and Plex
+keeps its server and item IDs. Feeds keep scene, media and artwork URLs
+exactly as published, unless a stable scene ID allows a fresh lookup.
+Changing a feed's address alone cannot identify changed video URLs.
+
+Older saved URLs are converted in place when their identity is known.
+Browsing the source can identify more old links. Unknown external or
+signed URLs, and unidentified old DLNA links, cannot be recovered just
+from a new server address.
+
+### Watch sync with Jellyfin, Emby, Plex and HereSphere
 
 These servers keep track of what you watch, and FramePlayerX keeps them in
 step with the headset:
@@ -305,6 +387,11 @@ step with the headset:
   itself sends (open, play, pause and close, with the position), from which
   the server counts plays and keeps resume points. ♡ on a scene's page
   makes it a favourite on a server that takes favourites.
+- **Plex** receives playing, paused and stopped timeline reports, with the
+  current position and duration. Its resume point takes precedence over
+  local history, including a zero position after a reset on another device.
+  ✓ **Watched** changes the server's played state. Explicitly marking a
+  video watched does not create a playback-history entry on the server.
 
 Reports go out in the background and in order. Quitting waits a few
 seconds for the last ones; one the server doesn't take (it is offline, or
@@ -385,6 +472,13 @@ upright, and anamorphic video (DVDs, anamorphic lenses) is widened to its
 real shape. A portrait video's screen is as tall as **Screen width**.
 When a 3D file's metadata says the right eye comes first, the eyes are
 swapped to match.
+
+Around a flat screen, and behind the menus, is a near-black grey.
+Settings › Video position › **Background** picks the colour videos start
+with: black, grey, navy, or any colour with the red/green/blue sliders.
+The same at the bottom of the adjust panel's Position tab changes it for
+the video that is playing, and **Save for this video** keeps it with the
+rest of its adjustments. Your room replaces it while it shows.
 
 3D Blu-rays play as full 3D, each eye at full 1080p, on the Frame's
 hardware decoder: disc images (`.iso`), MKV rips (MakeMKV), and from a
@@ -534,7 +628,7 @@ as it plays, without converting anything: see below.
 
 ### Server transcoding
 
-Jellyfin and Emby can transcode a video live, while it plays, and DeoVR
+Jellyfin, Emby and Plex can transcode a video live, while it plays, and DeoVR
 feeds and HereSphere APIs may offer heights their server transcodes to on
 request. Nothing is made ahead of time: the server starts encoding from
 the file when FramePlayerX asks, and stops when it stops asking. For those
@@ -556,9 +650,14 @@ height (edit the source) also caps the heights offered.
 
 Skipping while the server transcodes asks it to start again from there,
 which takes a few seconds. A feed's height marked "can't skip" is
-transcoded only from the start. Transcoding keeps the server's default
-audio track and none of the file's own subtitles; subtitle files still
-show.
+transcoded only from the start. Jellyfin, Emby and feeds keep the server's
+default audio track and none of the file's own subtitles; subtitle files
+still show. While Plex transcodes, the audio and subtitle lists select
+the original server tracks and restart from the current position, keeping
+the pause state. Selected Plex subtitles are burned into the picture.
+Plex uses progressive H.264/AAC video; multipart originals require a
+server transcode. Its server must permit transcoding. HLS-only delivery
+is not supported.
 
 The server does the work, so how far it can go depends on it: a server
 without a graphics card may not keep up with an 8K file, whatever the
@@ -583,7 +682,7 @@ picture. Play/pause and seeking are under either thumb.
 | Y / D-pad up | Next video | Show or hide the controls |
 | Menu / View | Browse | Recenter |
 | Bumper | Forward 1 minute | Back 1 minute |
-| Grip + thumbstick | Up / down raises or lowers you | Left / right turns the picture, up / down zooms in / out |
+| Grip + thumbstick | Up / down raises or lowers you | Left / right turns the picture, down zooms in, up zooms out |
 | Grip + X / Y | Previous / next chapter or bookmark (back within 3 s of one's start goes to the one before) | As without the grip |
 | Grip + A | Bookmark where you are | As without the grip |
 | Grip + thumbstick press | Subtitles off, or back on: the ones you had, else those in your language | As without the grip |

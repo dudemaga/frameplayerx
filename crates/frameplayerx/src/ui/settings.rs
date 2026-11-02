@@ -3,7 +3,7 @@
 //! saves them and applies them to the subsystems.
 
 use super::theme::{self, Weight};
-use super::widgets::{self, Kind, Tip};
+use super::widgets::{self, Kind, ListArea, Tip};
 use super::{Action, SettingsTab, View, icons};
 use crate::settings::HapticDeviceConfig;
 use egui::{Align2, Color32, RichText, Sense, Vec2};
@@ -73,7 +73,7 @@ pub fn settings(ui: &mut egui::Ui, v: &mut View) {
             // At a large interface size the tabs outgrow the panel.
             egui::ScrollArea::vertical()
                 .id_salt("settings-tabs")
-                .show(ui, |ui| {
+                .show_list(ui, |ui| {
                     ui.spacing_mut().item_spacing.y = 4.0;
                     for (t, icon, label) in tabs() {
                         if t == SettingsTab::Haptics && !haptics_on {
@@ -86,7 +86,7 @@ pub fn settings(ui: &mut egui::Ui, v: &mut View) {
                 });
         });
         ui.vertical(|ui| {
-            egui::ScrollArea::vertical().show(ui, |ui| {
+            egui::ScrollArea::vertical().show_list(ui, |ui| {
                 ui.set_width(ui.available_width() - 8.0);
                 ui.spacing_mut().item_spacing.y = 10.0;
                 let title = tabs()
@@ -451,6 +451,8 @@ fn video_position(ui: &mut egui::Ui, v: &mut View) {
             2,
         );
     });
+    heading(ui, tr!("settings-background"));
+    super::player::background_controls(ui, &mut d.background);
 }
 
 fn sound(ui: &mut egui::Ui, v: &mut View) {
@@ -1025,7 +1027,7 @@ fn about(ui: &mut egui::Ui, v: &mut View) {
                             .color(theme::ACCENT_HOVER),
                     );
                     if ui.add(link).clicked() {
-                        v.actions.push(Action::OpenWebPage(address));
+                        v.actions.push(Action::OpenWebPage(address.into()));
                     }
                 },
                 |_| {},

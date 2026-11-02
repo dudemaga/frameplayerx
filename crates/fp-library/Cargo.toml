@@ -12,6 +12,7 @@ workspace = true
 
 [dependencies]
 fp-core.workspace = true
+percent-encoding = "2.3"
 rusqlite = { version = "0.40", features = ["bundled"] }
 serde.workspace = true
 serde_json.workspace = true

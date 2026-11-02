@@ -85,6 +85,19 @@ FACETS = {
     "Tags": ["beach", "city", "drone", "night", "sunset"],
 }
 
+PLEX_ITEMS = [{
+    "ratingKey": str(100 + i), "type": "movie", "title": item["Name"],
+    "year": item["ProductionYear"], "duration": 10000, "viewOffset": 0,
+    "summary": "A preview of a personal video from Plex.",
+    "thumb": f"/plex-images/{item['Id']}", "art": f"/plex-images/{item['Id']}",
+    "Genre": [{"tag": "Travel"}], "Chapter": [{"startTimeOffset": 1000, "tag": "Arrival"}],
+    "Media": [{"id": 10, "height": 1080, "width": 1920, "videoCodec": "h264",
+               "Part": [{"key": "/plex-media/preview.mp4", "file": item["Path"],
+                         "Stream": [{"id": 201, "streamType": 2, "codec": "aac", "displayTitle": "English", "selected": True}]}]},
+              {"id": 11, "height": 720, "width": 1280, "videoCodec": "h264",
+               "Part": [{"key": "/plex-media/preview.mp4", "file": item["Path"]}]}],
+} for i, item in enumerate(LATEST_VR)]
+
 # The people a search finds (one without a picture); each is in a few videos.
 PEOPLE = [
     {"Id": "p_riley", "Name": "Riley Brooks", "Type": "Person", "ImageTags": {"Primary": "r"}},
@@ -118,7 +131,26 @@ class Handler(http.server.BaseHTTPRequestHandler):
         pass
     def do_GET(self):
         path = self.path.split("?", 1)[0]
-        if path.startswith("/Items/") and "/Images/" in path:
+        if path.startswith("/plex-media/"):
+            with open(os.path.join(home, "Videos/Garden Party.mp4"), "rb") as f:
+                data = f.read()
+            start, end = 0, len(data) - 1
+            ranges = self.headers.get("Range", "")
+            if ranges.startswith("bytes="):
+                a, b = ranges[6:].split("-", 1)
+                start, end = int(a), min(int(b), end) if b else end
+            self.send_response(206 if ranges else 200)
+            self.send_header("Content-Type", "video/mp4")
+            self.send_header("Accept-Ranges", "bytes")
+            if ranges:
+                self.send_header("Content-Range", f"bytes {start}-{end}/{len(data)}")
+            self.send_header("Content-Length", str(end - start + 1))
+            self.end_headers()
+            self.wfile.write(data[start:end + 1])
+            return
+        if path == "/photo/:/transcode":
+            path = urllib.parse.parse_qs(urllib.parse.urlsplit(self.path).query)["url"][0]
+        if (path.startswith("/Items/") and "/Images/" in path) or path.startswith("/plex-images/"):
             item_id = path.split("/")[2]
             jpg = thumb_for(THUMBS.get(item_id, "Sunset"))
             if jpg and os.path.exists(jpg):
@@ -131,7 +163,36 @@ class Handler(http.server.BaseHTTPRequestHandler):
                 self.wfile.write(data)
                 return
         query = self.path.split("?", 1)[1] if "?" in self.path else ""
-        if path.endswith("/Views"):
+        q = urllib.parse.parse_qs(query)
+        if path == "/identity":
+            body = {"MediaContainer": {"machineIdentifier": "preview-machine"}}
+        elif path == "/resources":
+            connection = {"uri": f"http://127.0.0.1:{self.server.server_port}", "local": True, "relay": False}
+            body = [{"name": name, "provides": "server", "clientIdentifier": machine,
+                     "owned": owned, "accessToken": "preview-token", "connections": [connection]}
+                    for name, machine, owned in [("Plex", "preview-machine", True), ("Shared Plex", "shared-machine", False)]]
+        elif path == "/":
+            body = {"MediaContainer": {"friendlyName": "Plex"}}
+        elif path == "/library/sections":
+            body = {"MediaContainer": {"Directory": [{"key": "1", "type": "movie", "title": "Personal videos", "thumb": "/plex-images/v_sunset"}]}}
+        elif path == "/library/sections/1/all":
+            start = int(q.get("X-Plex-Container-Start", [0])[0])
+            size = int(q.get("X-Plex-Container-Size", [60])[0])
+            body = {"MediaContainer": {"Metadata": PLEX_ITEMS[start:start + size], "offset": start, "totalSize": len(PLEX_ITEMS)}}
+        elif path.startswith("/library/sections/1/"):
+            facet = {"genre": "Genres", "studio": "Studios", "year": "Years"}.get(path.rsplit("/", 1)[1], "Genres")
+            body = {"MediaContainer": {"Directory": [{"title": n, "key": n} for n in FACETS[facet]]}}
+        elif path.startswith("/library/metadata/"):
+            ids = path.rsplit("/", 1)[1].split(",")
+            body = {"MediaContainer": {"Metadata": [i for i in PLEX_ITEMS if i["ratingKey"] in ids]}}
+        elif path == "/hubs/continueWatching/items":
+            body = {"MediaContainer": {"Metadata": []}}
+        elif path == "/hubs/search":
+            term = q.get("query", [""])[0].lower()
+            body = {"MediaContainer": {"Hub": [{"type": "movie", "Metadata": [i for i in PLEX_ITEMS if term in i["title"].lower()]}]}}
+        elif path == "/video/:/transcode/universal/decision":
+            body = {"MediaContainer": {"transcodeDecisionCode": 1000}}
+        elif path.endswith("/Views"):
             body = VIEWS
         elif path == "/Users/u1/Items":
             items = grid_items(query)
@@ -155,6 +216,19 @@ class Handler(http.server.BaseHTTPRequestHandler):
         self.send_header("Content-Length", str(len(raw)))
         self.end_headers()
         self.wfile.write(raw)
+
+    def do_POST(self):
+        if self.path == "/pins":
+            raw = json.dumps({"id": 1, "code": "32GR", "expiresIn": 600}).encode()
+            self.send_response(200)
+            self.send_header("Content-Type", "application/json")
+            self.send_header("Content-Length", str(len(raw)))
+            self.end_headers()
+            self.wfile.write(raw)
+            return
+        self.send_response(200)
+        self.send_header("Content-Length", "0")
+        self.end_headers()
 
 srv = http.server.ThreadingHTTPServer(("127.0.0.1", 0), Handler)
 with open(port_file, "w") as f:
@@ -187,7 +261,8 @@ fi
 (umask 077 && cat >"$home/.config/frameplayerx/sources.json" <<EOF
 [{"type": "library", "id": "videos", "name": "Videos", "folder": "$home/Videos"},
  {"type": "mediabrowser", "id": "jellyfin", "name": "Jellyfin", "url": "http://127.0.0.1:$jf_port", "access_token": "tok", "user_id": "u1"},
- {"type": "library", "id": "private", "name": "Private videos", "folder": "$home/Private"}]
+ {"type": "library", "id": "private", "name": "Private videos", "folder": "$home/Private"},
+ {"type": "plex", "id": "plex", "name": "Plex", "url": "http://127.0.0.1:$jf_port", "machine_identifier": "preview-machine", "access_token": "preview-token"}]
 EOF
 )
 # A video with Arabic (joined letters, right to left) and English subtitles.
@@ -206,6 +281,7 @@ Hello, these are English subtitles
 EOF
 
 script="$home/ui.fps"
+if [ "${UI_PREVIEW_PLEX_ONLY:-0}" != 1 ]; then
 cat >"$script" <<EOF
 # Library scan and thumbnails. Nothing watched yet: Home offers sources.
 wait 6
@@ -426,6 +502,57 @@ panel bar player-bar-next
 up-next
 frames 8
 panel main up-next
+shuffle
+frames 8
+panel main up-next-shuffled
+EOF
+else
+  : >"$script"
+fi
+cat >>"$script" <<EOF
+close
+wait 3
+add-source plex
+panel main source-add-plex
+point main 0.6 0.6
+stick 0 -1 25
+frames 8
+panel main source-add-plex-actions
+plex-link-preview http://127.0.0.1:$jf_port waiting
+panel main plex-link-code
+plex-link-preview http://127.0.0.1:$jf_port expired
+panel main plex-link-expired
+plex-link-preview http://127.0.0.1:$jf_port servers
+panel main plex-link-servers
+edit-source plex
+panel main source-edit-plex
+point main 0.6 0.6
+stick 0 -1 35
+frames 8
+panel main source-edit-plex-actions
+open-source plex
+wait 2
+panel main plex-home
+point main 0.133 0.37
+click
+wait 1
+panel main plex-grid
+filters
+wait 1
+panel main plex-filters
+open-source plex
+wait 1
+catalog-search sunset
+wait 1
+panel main plex-search
+open-in plex plex://source/plex/preview-machine/item/100?media=10
+wait-playing
+pause
+frames 8
+tracks
+frames 8
+panel tracks plex-tracks
+panel bar plex-player-bar
 EOF
 
 cargo build -p frameplayerx
