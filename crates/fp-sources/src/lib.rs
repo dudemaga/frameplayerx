@@ -37,6 +37,9 @@ pub mod mediabrowser;
 pub mod plex;
 pub mod sidecar;
 pub mod smb;
+#[cfg(test)]
+#[path = "../tests/common/mod.rs"]
+mod test_server;
 pub mod timeutil;
 pub mod transcode;
 pub mod urlutil;
@@ -114,6 +117,14 @@ pub trait Source: Send + Sync {
 
     /// A refreshed configuration to persist; taking it performs no network I/O.
     fn updated_config(&self) -> Option<SourceConfig> {
+        None
+    }
+
+    /// A picture of this source as an HTTP request: the client allowed to ask
+    /// for it, and its address. The image cache uses it to ask whether the
+    /// picture changed, where opening it could only download it again. `None`
+    /// for one that isn't over HTTP.
+    fn picture_request(&self, _location: &str) -> Option<(HttpClient, String)> {
         None
     }
 

@@ -179,6 +179,16 @@ impl Opener {
         self.fetch(location, limit)
     }
 
+    /// A source's picture as an HTTP request, when it is one (see
+    /// [`Source::picture_request`]).
+    pub fn picture_request(
+        &self,
+        location: &str,
+    ) -> Option<(fp_sources::http::HttpClient, String)> {
+        let owner = fp_sources::location_owner(location)?;
+        self.source(&owner)?.picture_request(location)
+    }
+
     /// Small downloads (thumbnails, scripts) from any http(s) URL.
     pub fn fetch(&self, url: &str, limit: u64) -> Result<Vec<u8>, String> {
         if fp_sources::is_source_location(url) {

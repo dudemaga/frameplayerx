@@ -7,9 +7,7 @@ use ring::rand::SystemRandom;
 use ring::signature::Ed25519KeyPair;
 use serde_json::json;
 
-#[path = "../../tests/common/mod.rs"]
-mod common;
-use common::{TestServer, resp};
+use crate::test_server::{TestServer, resp};
 
 #[test]
 fn rejected_saved_credentials_renew_at_handshake_or_on_a_later_request() {
@@ -92,4 +90,114 @@ fn rejected_saved_credentials_renew_at_handshake_or_on_a_later_request() {
                 .all(|r| r.header("X-Plex-Token") != Some("account-new"))
         );
     }
+}
+
+#[test]
+fn a_listed_remote_address_has_to_be_encrypted() {
+    let listed = |uri: &str| PlexConnection {
+        uri: uri.into(),
+        address: None,
+        port: None,
+        local: false,
+        relay: false,
+        protocol: uri.split(':').next().unwrap().into(),
+    };
+    let config = |url: &str, connections: Vec<PlexConnection>| PlexConfig {
+        id: "source".into(),
+        name: "Plex".into(),
+        url: url.into(),
+        machine_identifier: "machine".into(),
+        access_token: "secret".into(),
+        connections,
+        auth: None,
+        insecure_tls: false,
+        max_height: None,
+        local_only: false,
+        allow_relay: false,
+    };
+    let tried =
+        |c: &PlexConfig| -> Vec<String> { connections(c).into_iter().map(|c| c.uri).collect() };
+    let https = "https://1-2-3-4.abc.plex.direct:32400";
+    for (plain, kept) in [
+        ("http://203.0.113.5:32400", false),
+        ("http://[2001:db8::5]:32400", false),
+        ("http://plex.example.com:32400", false),
+        ("http://192.168.1.5:32400", true),
+        ("http://[fd00::5]:32400", true),
+        ("http://nas.local:32400", true),
+        ("http://nas:32400", true),
+    ] {
+        let c = config(https, vec![listed(https), listed(plain)]);
+        assert_eq!(tried(&c).contains(&plain.to_string()), kept, "{plain}");
+        assert!(tried(&c).contains(&https.to_string()));
+    }
+    // A saved address is held to the same rule on a linked source.
+    let plain = "http://203.0.113.5:32400";
+    let c = config(plain, vec![listed(https), listed(plain)]);
+    assert_eq!(tried(&c), [https]);
+    let c = config(plain, vec![listed(https)]);
+    assert_eq!(tried(&c), [https]);
+    // An address typed for an access token is the one they chose.
+    let c = config(plain, Vec::new());
+    assert_eq!(tried(&c), [plain]);
+    // A linked source's list can come back empty: that doesn't make it typed.
+    let mut c = config(plain, Vec::new());
+    c.auth = Some(auth::PlexCredentials::manual(
+        "account".into(),
+        "client".into(),
+    ));
+    assert!(tried(&c).is_empty());
+}
+
+#[test]
+fn a_server_that_stays_down_is_only_asked_once_in_a_while() {
+    let down = Arc::new(AtomicBool::new(true));
+    let is_down = down.clone();
+    let server = TestServer::start(move |r| {
+        if is_down.load(Ordering::Acquire) {
+            return resp(503, Vec::new(), &[]);
+        }
+        let body = match r.path() {
+            "/identity" => json!({"MediaContainer":{"machineIdentifier":"machine"}}),
+            "/" | "/library/sections" => json!({"MediaContainer":{"Directory":[]}}),
+            _ => return resp(404, Vec::new(), &[]),
+        };
+        resp(
+            200,
+            serde_json::to_vec(&body).unwrap(),
+            &[("Content-Type", "application/json")],
+        )
+    });
+    let source = PlexSource::new(&PlexConfig {
+        id: "source".into(),
+        name: "Plex".into(),
+        url: server.base.clone(),
+        machine_identifier: "machine".into(),
+        access_token: "token".into(),
+        connections: Vec::new(),
+        auth: None,
+        insecure_tls: false,
+        max_height: None,
+        local_only: false,
+        allow_relay: false,
+    })
+    .unwrap();
+    let picture = "plex://source/source/machine/image/resource?path=%2Fa.jpg";
+    assert!(source.picture_request(picture).is_none());
+    let asked = server.requests().len();
+    assert!(asked > 0);
+    for _ in 0..20 {
+        assert!(source.picture_request(picture).is_none());
+        let error = source.open(picture).err().unwrap();
+        assert!(
+            !matches!(error, Error::NotFound(_)),
+            "a server that is down hasn't deleted anything: {error}"
+        );
+    }
+    assert_eq!(server.requests().len(), asked, "not asked again so soon");
+
+    // Once that has passed, and the server is back, it connects.
+    down.store(false, Ordering::Release);
+    *lock(&source.unreachable) = None;
+    assert!(source.probe().is_ok());
 }

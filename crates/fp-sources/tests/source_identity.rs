@@ -250,7 +250,11 @@ fn deovr_published_scene_id_refreshes_signed_external_media_after_restart() {
             .iter()
             .all(|req| req.url.contains("token=fresh"))
     );
-    assert_eq!(current_feed.requests().len(), 2);
+    assert_eq!(
+        current_feed.requests().len(),
+        1,
+        "resolved afresh once, then reused while that address is fresh"
+    );
     let before = current_feed.requests().len();
     assert!(
         current
@@ -262,6 +266,50 @@ fn deovr_published_scene_id_refreshes_signed_external_media_after_restart() {
             .is_err()
     );
     assert_eq!(current_feed.requests().len(), before);
+}
+
+#[test]
+fn looking_up_every_scene_of_a_feed_reads_it_once() {
+    let media = TestServer::start(|req| serve_bytes(req, b"a video", true));
+    let scenes: Vec<String> = (0..40)
+        .map(|i| {
+            format!(
+                r#"{{"id":"{i}","title":"Scene {i}","video_url":"{}"}}"#,
+                media.url(&format!("/{i}.mp4?token=fresh"))
+            )
+        })
+        .collect();
+    let body = format!(
+        r#"{{"scenes":[{{"name":"All","list":[{}]}}]}}"#,
+        scenes.join(",")
+    );
+    let server = TestServer::start(move |_| {
+        resp(200, body.clone(), &[("Content-Type", "application/json")])
+    });
+    let feed = Arc::new(FeedSource::deovr(&feed_config("deo", &server.url("/feed"))).unwrap());
+    let locations: Vec<String> = (0..40)
+        .map(|i| location::encode("deo", "deovr-id", &i.to_string()))
+        .collect();
+    // As a group's details fill in: several workers, none of them first.
+    std::thread::scope(|scope| {
+        for part in locations.chunks(7) {
+            let feed = feed.clone();
+            scope.spawn(move || {
+                for scene in part {
+                    assert!(feed.as_scene_feed().unwrap().scene(scene, false).is_ok());
+                }
+            });
+        }
+    });
+    assert_eq!(server.requests().len(), 1);
+
+    // As one scene opens.
+    let video = Entry::new("Scene 3", &locations[3], EntryKind::Video);
+    let details = feed.details(&video).unwrap();
+    feed.sidecars(&details).unwrap();
+    feed.transcode_targets(&details);
+    assert_eq!(feed.open(&locations[3]).unwrap().size(), Some(7));
+    assert_eq!(server.requests().len(), 1);
 }
 
 fn dlna_config(base: &str) -> DlnaConfig {

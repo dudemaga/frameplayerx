@@ -777,10 +777,23 @@ impl App {
         audio: Option<String>,
         subtitle: Option<Option<String>>,
     ) {
-        let Some(p) = &self.playback else { return };
+        let Some(p) = &mut self.playback else { return };
         if p.transcoding.is_none() || p.source_tracks.is_empty() {
             return;
         }
+        // Kept for when this video next opens, as a pick in the player is.
+        if let Some(id) = &audio {
+            p.picked.audio = p
+                .source_tracks
+                .iter()
+                .find(|t| !t.subtitle && t.id == *id)
+                .and_then(|t| t.index);
+        }
+        if let Some(subtitle) = &subtitle {
+            p.picked.subtitles =
+                playback::picked_source_subtitles(subtitle.as_deref(), &p.source_tracks);
+        }
+        p.save_tracks(&self.services.library);
         let mut req = p.request.clone();
         req.start_at = Some(p.player.position());
         req.paused = p.player.is_paused();

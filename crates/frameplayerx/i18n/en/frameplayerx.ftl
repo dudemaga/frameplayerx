@@ -1013,8 +1013,6 @@ local-no-drives = None inserted
 source-not-available = That source is not available
 source-not-inserted = The microSD card or USB drive this is on is not inserted.
 source-no-drives = No microSD card or USB drive is inserted.
-source-not-jellyfin = not a Jellyfin or Emby server
-source-not-jellyfin-toast = Not a Jellyfin or Emby server
 source-not-feed = Not a DeoVR feed or HereSphere API
 source-not-scene-feed = not a scene feed
 # Short: a button.

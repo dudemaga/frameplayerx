@@ -1,7 +1,7 @@
 //! Maps Plex library and metadata responses to the shared catalog, keeping
 //! Plex's item types, query keys and pagination inside this adapter.
 
-use super::{PAGE_LIMIT, PlexSource, container};
+use super::{BACKDROP, LANDSCAPE, LISTING_LIMIT, PAGE_LIMIT, POSTER, PlexSource, container};
 use crate::catalog::{
     Catalog, CatalogCapabilities, CatalogFacets, CatalogFilter, CatalogHome, CatalogItem,
     CatalogKind, CatalogPage, CatalogQuery, CatalogSort, CatalogVersion,
@@ -13,6 +13,10 @@ use fp_core::format::detect_from_name;
 use fp_core::sync::lock;
 use serde_json::Value;
 use std::collections::HashSet;
+
+/// The videos in progress and next up, directly: `/hubs/continueWatching`
+/// without `/items` wraps them in a hub.
+const CONTINUE_WATCHING: &str = "/hubs/continueWatching/items";
 
 impl PlexSource {
     pub(super) fn libraries(&self) -> Result<Vec<CatalogItem>> {
@@ -45,8 +49,8 @@ impl PlexSource {
                         .into(),
                     ),
                     location: self.location("section", &id, None),
-                    poster: text(section, "thumb").and_then(|p| self.asset("image", &p)),
-                    backdrop: text(section, "art").and_then(|p| self.asset("image", &p)),
+                    poster: text(section, "thumb").and_then(|p| self.image(&p, POSTER)),
+                    backdrop: text(section, "art").and_then(|p| self.image(&p, BACKDROP)),
                     ..Default::default()
                 };
                 Some(item)
@@ -118,17 +122,30 @@ impl PlexSource {
             .as_deref()
             .and_then(detect_from_name)
             .or_else(|| text(v, "title").as_deref().and_then(detect_from_name));
-        let poster = text(v, "thumb")
+        let thumb = text(v, "thumb")
             .or_else(|| text(v, "parentThumb"))
-            .or_else(|| text(v, "grandparentThumb"))
-            .and_then(|p| self.asset("image", &p));
-        let backdrop = text(v, "art")
-            .or_else(|| text(v, "grandparentArt"))
-            .and_then(|p| self.asset("image", &p));
-        let viewed = num(v, "viewCount").unwrap_or(0.0) > 0.0;
+            .or_else(|| text(v, "grandparentThumb"));
+        let art = text(v, "art").or_else(|| text(v, "grandparentArt"));
+        // An episode's thumb is its still, wider than anything's poster.
+        let wide = if kind == CatalogKind::Episode {
+            thumb.as_ref().or(art.as_ref())
+        } else {
+            art.as_ref().or(thumb.as_ref())
+        };
+        let landscape = wide.and_then(|p| self.image(p, LANDSCAPE));
+        let poster = thumb.and_then(|p| self.image(&p, POSTER));
+        let backdrop = art.and_then(|p| self.image(&p, BACKDROP));
         let unplayed = num(v, "leafCount")
             .zip(num(v, "viewedLeafCount"))
             .map(|(n, v)| (n - v).max(0.0) as u32);
+        // A show's or season's viewCount counts plays and stays up when
+        // episodes are marked unwatched: only its episodes say it is finished.
+        let viewed = match kind {
+            CatalogKind::Series | CatalogKind::Season => {
+                unplayed == Some(0) && num(v, "leafCount").is_some_and(|n| n > 0.0)
+            }
+            _ => num(v, "viewCount").unwrap_or(0.0) > 0.0,
+        };
         Some(CatalogItem {
             id: id.clone(),
             name: text(v, "title").unwrap_or_default(),
@@ -169,11 +186,7 @@ impl PlexSource {
             position: num(v, "viewOffset").map_or(0.0, |n| n / 1000.0),
             unplayed,
             added: num(v, "addedAt").map(|n| n as i64),
-            landscape: if kind == CatalogKind::Episode {
-                poster.clone().or_else(|| backdrop.clone())
-            } else {
-                backdrop.clone().or_else(|| poster.clone())
-            },
+            landscape,
             poster,
             backdrop,
             location: self.location("item", &id, None),
@@ -191,12 +204,11 @@ impl PlexSource {
     ) -> Result<&'a Value> {
         let media = array(item, "Media");
         if let Some(id) = selected {
-            return media
-                .iter()
-                .find(|m| text(m, "id").as_deref() == Some(id))
-                .ok_or_else(|| {
-                    Error::NotFound("selected Plex version is no longer available".into())
-                });
+            if let Some(chosen) = media.iter().find(|m| text(m, "id").as_deref() == Some(id)) {
+                return Ok(chosen);
+            }
+            // Its file was replaced on the server. The video is still there.
+            log::info!("Plex version {id} is gone; choosing another");
         }
         let max = lock(&self.config).max_height;
         media
@@ -211,7 +223,9 @@ impl PlexSource {
             .ok_or_else(|| Error::Unsupported("Plex item has no playable media version".into()))
     }
 
-    fn page(&self, path: &str, query: &CatalogQuery) -> Result<CatalogPage> {
+    /// One request's page, and how many items the server sent: more than
+    /// the page has when some aren't kept.
+    fn page(&self, path: &str, query: &CatalogQuery) -> Result<(CatalogPage, usize)> {
         let v = self.json(path)?;
         let c = container(&v);
         let raw = array(c, "Metadata");
@@ -236,7 +250,51 @@ impl PlexSource {
         let total = num(c, "totalSize")
             .map(|n| n.max(0.0) as usize)
             .unwrap_or_else(|| offset.saturating_add(raw.len()));
-        Ok(CatalogPage { items, total })
+        Ok((CatalogPage { items, total }, raw.len()))
+    }
+
+    /// Up to `query.limit` items from `query.start`, over as many requests as
+    /// Plex's page limit takes. A grid reloading all it shows can ask for more
+    /// than one page holds.
+    fn listing(&self, query: &CatalogQuery) -> Result<CatalogPage> {
+        let wanted = query.limit.max(1);
+        let mut q = query.clone();
+        let mut sent = 0;
+        let mut items = Vec::new();
+        let mut last_first = None;
+        loop {
+            q.limit = (wanted - sent).min(PAGE_LIMIT);
+            let (page, raw) = self.page(&self.query_path(&q)?, &q)?;
+            if wanted >= LISTING_LIMIT && page.total > LISTING_LIMIT {
+                return Err(Error::Unsupported("Plex listing is too large".into()));
+            }
+            let first = page.items.first().map(|i| i.id.clone());
+            if first.is_some() && first == last_first {
+                return Err(Error::parse(
+                    "Plex listing",
+                    "server listing did not advance",
+                ));
+            }
+            last_first = first;
+            items.extend(page.items);
+            sent += raw;
+            q.start += raw;
+            if raw == 0 || sent >= wanted || q.start >= page.total {
+                return Ok(CatalogPage {
+                    items,
+                    total: page.total,
+                });
+            }
+        }
+    }
+
+    pub(super) fn whole_listing(&self, query: CatalogQuery) -> Result<Vec<CatalogItem>> {
+        let page = self.items(&CatalogQuery {
+            start: 0,
+            limit: LISTING_LIMIT,
+            ..query
+        })?;
+        Ok(page.items)
     }
 
     fn query_path(&self, query: &CatalogQuery) -> Result<String> {
@@ -310,8 +368,10 @@ impl PlexSource {
                         .map(|name| {
                             if key == "studio" {
                                 // Studios are strings, not genre IDs. PMS's
-                                // choice key may already be URL-encoded.
-                                name.clone()
+                                // choice key may already be URL-encoded. It
+                                // splits values at commas, then decodes each,
+                                // so a comma in a name is escaped once more.
+                                name.replace('%', "%25").replace(',', "%2C")
                             } else {
                                 lock(&self.facets)
                                     .get(&format!("{section}/{key}/{name}"))
@@ -376,7 +436,7 @@ impl Catalog for PlexSource {
     fn home(&self) -> Result<CatalogHome> {
         let libraries = self.libraries()?;
         let resume = self
-            .json("/hubs/continueWatching?X-Plex-Container-Size=20")
+            .json(&format!("{CONTINUE_WATCHING}?X-Plex-Container-Size=20"))
             .map(|v| {
                 array(container(&v), "Metadata")
                     .iter()
@@ -392,8 +452,12 @@ impl Catalog for PlexSource {
                 descending: true,
                 limit: 12,
                 ..Default::default()
-            })?;
-            latest.push((library.clone(), page.items));
+            });
+            match page {
+                Ok(page) if !page.items.is_empty() => latest.push((library.clone(), page.items)),
+                Ok(_) => {}
+                Err(e) => log::debug!("latest in {} on {}: {e}", library.name, self.name),
+            }
         }
         Ok(CatalogHome {
             libraries,
@@ -413,10 +477,10 @@ impl Catalog for PlexSource {
         for hub in array(container(&v), "Hub") {
             let typ = text(hub, "type").unwrap_or_default();
             let title = match typ.as_str() {
-                "movie" => "Movie",
-                "show" => "Series",
-                "collection" => "BoxSet",
-                "episode" | "clip" => "Video",
+                "movie" => "Movies",
+                "show" => "Shows",
+                "collection" => "Collections",
+                "episode" | "clip" => "Videos",
                 _ => continue,
             };
             let found: Vec<_> = array(hub, "Metadata")
@@ -470,38 +534,20 @@ impl Catalog for PlexSource {
                 items,
             });
         }
-        self.page(&self.query_path(query)?, query)
+        self.listing(query)
     }
 
     fn shuffled(&self, query: &CatalogQuery) -> Result<Vec<String>> {
-        let mut q = CatalogQuery {
-            start: 0,
-            limit: PAGE_LIMIT,
+        let listed = self.whole_listing(CatalogQuery {
             sort: CatalogSort::Name,
             ..query.clone()
-        };
-        let mut ids = Vec::new();
+        })?;
         let mut seen = HashSet::new();
-        loop {
-            let page = self.items(&q)?;
-            let count = page.items.len();
-            let before = ids.len();
-            for item in page.items {
-                if seen.insert(item.id.clone()) {
-                    ids.push(item.id);
-                }
-            }
-            q.start += count;
-            if count == 0 || q.start >= page.total {
-                break;
-            }
-            if ids.len() == before || ids.len() > 100_000 {
-                return Err(Error::parse(
-                    "Plex shuffle",
-                    "server listing did not advance",
-                ));
-            }
-        }
+        let mut ids: Vec<String> = listed
+            .into_iter()
+            .map(|item| item.id)
+            .filter(|id| seen.insert(id.clone()))
+            .collect();
         // PMS random pagination is not stable. Snapshot by a stable sort,
         // then assign each id a local seeded key exactly once.
         let seed = fp_core::playback::now_ms() as u64;
@@ -561,7 +607,7 @@ impl Catalog for PlexSource {
         }
     }
     fn next_up(&self, series: Option<&str>, limit: usize) -> Result<Vec<CatalogItem>> {
-        let v = self.json("/hubs/continueWatching?X-Plex-Container-Size=100")?;
+        let v = self.json(&format!("{CONTINUE_WATCHING}?X-Plex-Container-Size=100"))?;
         Ok(array(container(&v), "Metadata")
             .iter()
             .filter_map(|v| self.catalog_item(v))
@@ -582,6 +628,8 @@ impl Catalog for PlexSource {
             ),
             &[],
         )?;
+        // Marking a show marks its episodes too.
+        lock(&self.metadata).clear();
         Ok(())
     }
     fn set_version(&self, location: &str, version: Option<&str>) {
@@ -606,25 +654,11 @@ impl Catalog for PlexSource {
 
 impl PlexSource {
     fn all_children(&self, id: &str, kind: Option<CatalogKind>) -> Result<Vec<CatalogItem>> {
-        let mut q = CatalogQuery {
+        let mut items = self.whole_listing(CatalogQuery {
             parent: Some(id.into()),
             types: kind.into_iter().collect(),
-            limit: PAGE_LIMIT,
             ..Default::default()
-        };
-        let mut items = Vec::new();
-        loop {
-            let p = self.items(&q)?;
-            let count = p.items.len();
-            items.extend(p.items);
-            q.start += count;
-            if count == 0 || q.start >= p.total {
-                break;
-            }
-            if items.len() > 100_000 {
-                return Err(Error::Unsupported("Plex listing is too large".into()));
-            }
-        }
+        })?;
         if matches!(kind, Some(CatalogKind::Season | CatalogKind::Episode)) {
             items.sort_by_key(|i| (i.parent_index, i.index));
         }

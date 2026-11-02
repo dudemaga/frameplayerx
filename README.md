@@ -84,6 +84,7 @@ To update later, open **Settings › Updates** and press **Download and install*
 |---|---|
 | [User guide](docs/USER-GUIDE.md) | Installing, updating and uninstalling, sources, browsing, PIN locks, video formats, controls, passthrough, haptics, remote control and troubleshooting |
 | [Development](docs/DEVELOPMENT.md) | Building and testing, how the code is organised, running without a headset (Monado and the preview harness), and releasing |
+| [Contributing](CONTRIBUTING.md) | What to do before opening a pull request, what it has to say and how to test it |
 
 ---
 

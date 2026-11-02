@@ -294,7 +294,9 @@ history separate from the new account.
 - **Local only** (the default for new sources): use Plex's advertised LAN
   addresses, without remote addresses or Relay.
 - **Direct connections**: try LAN addresses first, then direct remote
-  addresses, without Relay.
+  addresses, without Relay. Remote addresses have to use HTTPS, because your
+  token goes with every request. If Plex only lists plain HTTP for your server,
+  set its **Secure connections** to Preferred or Required.
 - **Direct + Relay**: try direct connections first, then Plex Relay if needed.
 
 Local playback is free. Remote video requires **Plex Pass** for you or
@@ -680,7 +682,7 @@ picture. Play/pause and seeking are under either thumb.
 | Y / D-pad up | Next video | Show or hide the controls |
 | Menu / View | Browse | Recenter |
 | Bumper | Forward 1 minute | Back 1 minute |
-| Grip + thumbstick | Up / down raises or lowers you | Left / right turns the picture, up / down zooms in / out |
+| Grip + thumbstick | Up / down raises or lowers you | Left / right turns the picture, down zooms in, up zooms out |
 | Grip + X / Y | Previous / next chapter or bookmark (back within 3 s of one's start goes to the one before) | As without the grip |
 | Grip + A | Bookmark where you are | As without the grip |
 | Grip + thumbstick press | Subtitles off, or back on: the ones you had, else those in your language | As without the grip |

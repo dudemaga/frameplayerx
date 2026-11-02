@@ -266,6 +266,9 @@ impl MediaRecord {
 
 /// Last segment of a path or URL, without a query string.
 pub(crate) fn file_name_of(location: &str) -> Cow<'_, str> {
+    if fp_core::source::location_names_no_file(location) {
+        return Cow::Borrowed("");
+    }
     if let Some(rest) = location.strip_prefix("source://source/") {
         let mut parts = rest.splitn(3, '/');
         if let (Some(source), Some(kind), Some(key)) = (parts.next(), parts.next(), parts.next())
@@ -480,6 +483,17 @@ mod tests {
     #[test]
     fn names() {
         assert_eq!(file_name_of("/a/b/c.mp4"), "c.mp4");
+        assert_eq!(file_name_of("plex://source/s/m/item/180?media=1"), "");
+        assert_eq!(file_name_of("source://source/s/deovr-id/180"), "");
+        assert_eq!(
+            file_name_of("plex://source/s/m/image/resource?path=%2Fa.jpg"),
+            "resource",
+            "as last_segment says"
+        );
+        assert_eq!(
+            file_name_of("source://source/s/dlna/item%3A64%241%24180"),
+            ""
+        );
         assert_eq!(file_name_of("http://h/x/y.mp4?token=1"), "y.mp4");
         assert_eq!(file_name_of("smb://h/share/dir/"), "dir");
         assert_eq!(stem_of("a.b.mp4"), "a.b");
