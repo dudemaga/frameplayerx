@@ -2,7 +2,7 @@
 //! goes, the report itself on request, and the choice to send it.
 
 use super::theme::{self, Weight};
-use super::widgets::{self, Kind};
+use super::widgets::{self, Kind, ListArea};
 use super::{Action, View, icons};
 use egui::RichText;
 
@@ -45,7 +45,7 @@ pub fn prompt(ui: &mut egui::Ui, v: &mut View) {
     };
     egui::ScrollArea::vertical()
         .auto_shrink([false, false])
-        .show(ui, |ui| {
+        .show_list(ui, |ui| {
             ui.add_space(18.0);
             ui.horizontal(|ui| {
                 ui.label(

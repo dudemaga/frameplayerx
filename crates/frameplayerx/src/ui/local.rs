@@ -4,7 +4,7 @@
 
 use super::page;
 use super::theme::{self, Weight};
-use super::widgets::{self, Kind, Tip};
+use super::widgets::{self, Kind, ListArea, Tip};
 use super::{Action, Browse, LibraryGrid, View, icons};
 use egui::{Align, Layout, RichText};
 use fp_library::Sort;
@@ -159,7 +159,7 @@ fn roots(ui: &mut egui::Ui, v: &mut View, l: &mut LocalView) {
     let builtin = crate::services::builtin_sources();
     egui::ScrollArea::vertical()
         .auto_shrink(false)
-        .show(ui, |ui| {
+        .show_list(ui, |ui| {
             widgets::card(ui, |ui| {
                 for (i, c) in builtin.iter().enumerate() {
                     if i > 0 {

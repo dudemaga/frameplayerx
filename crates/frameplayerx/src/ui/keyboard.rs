@@ -247,7 +247,7 @@ mod tests {
         assert_eq!(r.text, "f");
 
         // Whip across the keyboard to 'a' while the trigger is still bottomed
-        // out (far past CLICK_SLOP, turning the hold into a drag), then
+        // out (far past the click distance, turning the hold into a drag), then
         // feather the trigger halfway up and press 'a'.
         r.aim_at("a");
         r.step();

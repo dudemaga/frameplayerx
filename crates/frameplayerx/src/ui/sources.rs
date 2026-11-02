@@ -2,7 +2,7 @@
 
 use super::page::{self, Card};
 use super::theme::{self, Weight};
-use super::widgets::{self, Kind, Tip};
+use super::widgets::{self, Kind, ListArea, Tip};
 use super::{Action, Back, PinForm, QuickConnect, Screen, SourceForm, SourcePage, View, icons};
 use egui::{Align, Align2, Color32, Layout, RichText, Sense, Vec2};
 use fp_sources::{Credentials, SourceConfig, SourceKind, urlutil};
@@ -174,7 +174,7 @@ pub fn sources(ui: &mut egui::Ui, v: &mut View) {
         // Editing adds the PIN rows: taller than the panel.
         egui::ScrollArea::vertical()
             .auto_shrink(false)
-            .show(ui, |ui| add_form(ui, v));
+            .show_list(ui, |ui| add_form(ui, v));
         return;
     }
     if v.state.source.is_some() {
@@ -186,7 +186,7 @@ pub fn sources(ui: &mut egui::Ui, v: &mut View) {
             v.state.source_form = Some(SourceForm::default());
         }
     });
-    egui::ScrollArea::vertical().show(ui, |ui| {
+    egui::ScrollArea::vertical().show_list(ui, |ui| {
         widgets::section_label(ui, tr!("sources-heading"));
         ui.add_space(4.0);
         widgets::card(ui, |ui| {

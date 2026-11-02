@@ -3,7 +3,7 @@
 
 use super::page::{self, Card};
 use super::theme::{self, Weight};
-use super::widgets::{self, Kind, Tip};
+use super::widgets::{self, Kind, ListArea, Tip};
 use super::{Action, FormatFilter, HomeRows, LibraryGrid, Screen, View, fmt_size, fmt_time, icons};
 use crate::playback::OpenRequest;
 use egui::{Align, Align2, Color32, Layout, RichText, Sense, Vec2};
@@ -751,7 +751,7 @@ fn details(ui: &mut egui::Ui, v: &mut View, id: fp_library::MediaId) {
     };
     egui::ScrollArea::vertical()
         .auto_shrink(false)
-        .show(ui, |ui| {
+        .show_list(ui, |ui| {
             ui.add_space(12.0);
             if widgets::button(ui, Some(icons::ARROW_LEFT), tr!("common-back"), Kind::Ghost)
                 .clicked()

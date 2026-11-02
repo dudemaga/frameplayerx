@@ -4,7 +4,7 @@
 use super::icons;
 use super::theme::{self, Weight};
 use super::thumbs::{Thumbs, paint_cover_rounded};
-use super::widgets::{self, Tip};
+use super::widgets::{self, ListArea, Tip};
 use egui::{Align, Align2, Color32, Layout, RichText, Sense, Vec2};
 
 /// Picture of a landscape card.
@@ -40,7 +40,7 @@ pub fn scroll_from<R>(ui: &mut egui::Ui, top: bool, add: impl FnOnce(&mut egui::
             if top {
                 area = area.vertical_scroll_offset(0.0);
             }
-            area.show(ui, |ui| {
+            area.show_list(ui, |ui| {
                 egui::Frame::new()
                     .inner_margin(egui::Margin::symmetric(LIFT_ROOM, 0))
                     .show(ui, add)
@@ -359,7 +359,7 @@ pub fn filter_drawer(
                 .id_salt("filters")
                 .max_height(sections.height())
                 .auto_shrink([false, false])
-                .show(&mut part(sections), |ui| {
+                .show_list(&mut part(sections), |ui| {
                     ui.set_width(ui.available_width());
                     add(ui);
                     ui.add_space(12.0);
@@ -929,7 +929,7 @@ pub fn carousel(
             egui::ScrollArea::horizontal()
                 .id_salt(title)
                 .scroll_bar_visibility(egui::scroll_area::ScrollBarVisibility::AlwaysHidden)
-                .show(ui, |ui| {
+                .show_rail(ui, |ui| {
                     egui::Frame::new()
                         .inner_margin(egui::Margin {
                             left: LIFT_ROOM,

@@ -11,7 +11,7 @@
 
 use super::page::{self, Card};
 use super::theme::{self, Weight};
-use super::widgets::{self, Kind, Tip};
+use super::widgets::{self, Kind, ListArea, Tip};
 use super::{Action, FormatFilter, View, fmt_date, fmt_time, icons};
 use crate::playback::OpenRequest;
 use crate::shuffle::{key as shuffle_key, new_seed};
@@ -911,7 +911,7 @@ fn filters(ui: &mut egui::Ui, f: &mut FeedView, haptics: bool) -> bool {
         egui::ScrollArea::horizontal()
             .id_salt("feed-groups")
             .scroll_bar_visibility(egui::scroll_area::ScrollBarVisibility::AlwaysHidden)
-            .show(ui, |ui| {
+            .show_rail(ui, |ui| {
                 ui.horizontal(|ui| {
                     ui.spacing_mut().item_spacing.x = 8.0;
                     if widgets::chip(ui, tr!("filter-all"), f.group.is_none()).clicked() {
@@ -1073,7 +1073,7 @@ fn details(ui: &mut egui::Ui, v: &mut View, source: &str, name: &str, f: &mut Fe
     let queued = scene_request(source, &scene, info.as_deref(), None);
     egui::ScrollArea::vertical()
         .auto_shrink(false)
-        .show(ui, |ui| {
+        .show_list(ui, |ui| {
             ui.add_space(8.0);
             ui.horizontal_top(|ui| {
                 ui.spacing_mut().item_spacing.x = 28.0;

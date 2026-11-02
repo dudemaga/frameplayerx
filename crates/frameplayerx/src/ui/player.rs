@@ -1,7 +1,7 @@
 //! Playback UI: the control bar, the adjustments panel and subtitles.
 
 use super::theme::Weight;
-use super::widgets::{Kind, Tip};
+use super::widgets::{Kind, ListArea, Tip};
 use super::{Action, View, depth, fmt_time, icons, premium, theme, widgets};
 use crate::playback::Quality;
 use crate::subtitles::Pick;
@@ -874,12 +874,22 @@ fn seek_bar(
     {
         state.scrub = Some(to_time(p.x));
     }
+    // A click seeks to where it was pressed: by the let-go the ray has moved
+    // on a little, which along this bar could be minutes.
+    let pressed_at = resp.id.with("pressed-at");
+    if resp.is_pointer_button_down_on()
+        && let Some(origin) = ui.input(|i| i.pointer.press_origin())
+    {
+        ui.data_mut(|d| d.insert_temp(pressed_at, origin));
+    }
     if resp.drag_stopped() {
         if let Some(t) = state.scrub.take() {
             actions.push(Action::Seek(t));
         }
     } else if resp.clicked()
-        && let Some(p) = resp.interact_pointer_pos()
+        && let Some(p) = ui
+            .data(|d| d.get_temp::<egui::Pos2>(pressed_at))
+            .or(resp.interact_pointer_pos())
     {
         // Snap to a marker when clicking right on it.
         let t = to_time(p.x);
@@ -937,7 +947,7 @@ pub fn adjust_panel(ctx: &egui::Context, v: &mut View) {
         egui::ScrollArea::vertical()
             .max_height(page)
             .auto_shrink([false, false])
-            .show(ui, |ui| {
+            .show_list(ui, |ui| {
                 ui.spacing_mut().item_spacing.y = 10.0;
                 let before = pb.settings;
                 match v.state.adjust_tab {
@@ -1827,7 +1837,7 @@ fn track_list(
         egui::ScrollArea::vertical()
             .id_salt(salt)
             .auto_shrink([false, true])
-            .show(ui, |ui| add(ui, fresh));
+            .show_list(ui, |ui| add(ui, fresh));
     });
 }
 
