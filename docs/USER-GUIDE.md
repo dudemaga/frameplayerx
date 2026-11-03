@@ -184,6 +184,9 @@ Its title is always the source's name, with where you are in it underneath.
 Sources locked with a PIN stay off Home until unlocked; the padlock on a
 tile locks it (or, without a PIN yet, asks for one).
 
+Point at a title that is cut short, here or on the control bar, to read it
+whole.
+
 On a video's card the picture plays it and the title under it opens its
 details: your rating and favorite, its format, *Play next*, *Add to queue*
 and *Add to playlist*, and what its server says about it (Jellyfin's story,
@@ -572,17 +575,42 @@ the characters it had no font for.
 The Frame's hardware decoder plays 4:2:0 HEVC (H.265, 8- and 10-bit) and
 H.264 (8-bit), up to 8K. AV1, 4:2:2 or 4:4:4 colour and 10-bit H.264 have
 no hardware path on the Frame, so they decode on the CPU, which can't keep
-up with VR resolutions: they stutter or stop to buffer, and the control bar
-says why ("No hardware decoding for AV1", "… for 4:2:2 HEVC"). Convert them
-to 4:2:0 HEVC once on a PC and they play smoothly.
+up with VR resolutions: they stutter or stop to buffer, and a warning pill
+appears on the control bar. Point at it to read why ("No hardware decoding
+for AV1", "… for 4:2:2 HEVC"). Convert them to 4:2:0 HEVC once on a PC and
+they play smoothly.
 
-"Hardware decoder busy" means the file is fine but the decoder had no room
-for it: Steam's own streaming holds a session too, and beside it the
-decoder takes at most about 8192×4080 pixels a frame. 8K UHD (7680×4320),
-5760×5760 and 8-bit 8192×4096 HEVC play in hardware; 10-bit 8192×4096
-HEVC, 8192×4096 H.264, 6144×6144 and larger only fit when nothing else is
-decoding. The pill's tip says how much room was left. "The hardware
-decoder can't play this HEVC" means it tried and refused the file;
+"Too big for hardware" means the file can't fit even with nothing else
+open: the decoder takes at most 8192×4320 pixels a frame. 8192×4320 and
+5760×5760 fit; 6144×6144, 7200×7200, 8192×8192 and larger always decode on
+the CPU, so convert them to a smaller size.
+
+"Decoder busy" means the file fits, but other video sessions leave it too
+little room. Every session counts, idle or not, recording as well as
+playing:
+
+| Other sessions open | Tallest video 8192 wide |
+|---|---|
+| None | 4320 |
+| 1 | 4064 |
+| 2 | 2720 |
+| 3 | 2016 |
+
+Beside one other session, 8K UHD (7680×4320), 5760×5760 and 8-bit 8192×4096
+HEVC still play in hardware; 10-bit 8192×4096 HEVC, 8192×4096 H.264 and
+8192×4320 need nothing else open. The warning pill's tip names who holds the
+decoder, and the decoder pill's tip also says how much room was left.
+
+Recording in the background in Steam holds a session while an app is
+running. When turning it off would make room, the warning pill's tip says so:
+choose **Recording Off** in Steam Settings › Game Recording and open the video
+again, which works at once.
+
+Steam's browser holds a session after Steam starts, and normally lets go of it
+once you start using the headset. If a video stays busy, restart the headset
+and open the video again.
+
+"Decoder refused it" means the decoder tried and refused the file;
 frameplayerx.log says why.
 
 The pill next to the format on the control bar says which decoder plays
@@ -690,7 +718,9 @@ picture. Play/pause and seeking are under either thumb.
 | Trigger | Click; on empty space, show or hide the controls | The same |
 
 On the control bar, point at the speaker for the volume slider above it;
-press the speaker to mute.
+press the speaker to mute. What a controller shortcut changes, such as the
+volume or a minute's skip, shows for a moment in a small message above where
+the control bar sits.
 
 To recenter, hold the Steam button, as in any game (both grips together, or
 the left Menu button, do it too). The picture and the panels come to where

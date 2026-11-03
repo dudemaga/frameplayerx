@@ -507,6 +507,15 @@ mod tests {
         hex_lower(&Sha256::digest(data))
     }
 
+    #[test]
+    fn downloads_are_hashed_as_the_manifest_says() {
+        // FIPS 180-4's own example, so a new sha2 can't change it unnoticed.
+        assert_eq!(
+            sha_hex(b"abc"),
+            "ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad"
+        );
+    }
+
     fn update_for(url: String, data: &[u8]) -> Update {
         Update {
             version: Version::new(1, 0, 0),

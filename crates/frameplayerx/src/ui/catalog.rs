@@ -1418,13 +1418,13 @@ fn series_page(
         .or_else(|| series.poster.clone());
     page::banner(ui, v.thumbs, key.as_deref(), BANNER, |inner| {
         inner.add_space(14.0);
-        inner.add(
-            egui::Label::new(
-                RichText::new(&series.name)
-                    .font(theme::font(Weight::Bold, 40.0))
-                    .color(Color32::WHITE),
-            )
-            .truncate(),
+        let room = inner.available_width();
+        widgets::title_line(
+            inner,
+            &series.name,
+            theme::font(Weight::Bold, 40.0),
+            Color32::WHITE,
+            room,
         );
         let mut f = item_facts(series);
         if !seasons.is_empty() {
@@ -1641,13 +1641,13 @@ fn details(
         if let (Some(series), Some(ep)) = (&item.series_name, item.episode_label()) {
             widgets::section_label(inner, &format!("{series} · {ep}"));
         }
-        inner.add(
-            egui::Label::new(
-                RichText::new(&item.name)
-                    .font(theme::font(Weight::Bold, 40.0))
-                    .color(Color32::WHITE),
-            )
-            .truncate(),
+        let room = inner.available_width();
+        widgets::title_line(
+            inner,
+            &item.name,
+            theme::font(Weight::Bold, 40.0),
+            Color32::WHITE,
+            room,
         );
         page::facts(inner, &item_facts(item));
         inner.add_space(16.0);

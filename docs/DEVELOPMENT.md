@@ -441,9 +441,11 @@ What the code relies on about the platform:
   OpenXR, which is why the launcher sets the refresh rate and resolution
   there.
 - The hardware decoder is a V4L2 stateful decoder for 4:2:0 H.264 (8-bit)
-  and HEVC (8- and 10-bit). It's shared with Steam's own streaming, so it
-  can be busy. It writes 10-bit pictures correctly only as Q10C: asked for
-  NV12, it clamps the samples to 8 bits.
+  and HEVC (8- and 10-bit). One session takes at most 8192×4320. Every
+  session open on the driver lowers that, idle ones and encoders too, so
+  Steam's recording and browser can leave it busy. `/proc` shows who holds
+  it. It writes 10-bit pictures correctly only as Q10C: asked for NV12, it
+  clamps the samples to 8 bits.
 - Turnip has no TP10 images, though the GPU reads TP10. A TP10 texture
   reads wrongly past 2^24 samples, so 10-bit planes are read in bands.
 - SteamOS only mounts ext4 microSD cards itself, and no USB drives;

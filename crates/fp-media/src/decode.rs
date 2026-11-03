@@ -298,6 +298,8 @@ pub struct Decoder {
     /// Why a hardware decoder that was tried is not the one decoding: its
     /// open failed, or it failed once running.
     pub hardware_error: Option<String>,
+    /// Who held the driver when it found no room for this stream.
+    pub hardware_holders: crate::SessionHolders,
     pub time_base: ff::AVRational,
     /// The input's [`Input::origin`], taken off every time.
     pub(crate) origin: f64,
@@ -415,6 +417,7 @@ impl Decoder {
             name: String::new(),
             hardware: false,
             hardware_error: None,
+            hardware_holders: Default::default(),
             time_base,
             origin: 0.0,
             nal: None,
@@ -439,6 +442,7 @@ impl Decoder {
             self.name = format!("{} ({what})", m.inner.name);
             self.hardware = m.inner.hardware;
             self.hardware_error = m.inner.hardware_error.clone();
+            self.hardware_holders = m.inner.hardware_holders.clone();
         }
     }
 
@@ -453,6 +457,7 @@ impl Decoder {
             unsafe { ((*par).codec_id, (*par).codec_type, (*par).format) };
         let mut last_err = Error::Unsupported(format!("no decoder for codec id {codec_id}"));
         let mut hardware_error = None;
+        let mut hardware_holders = crate::SessionHolders::default();
         let video = kind == ff::AVMEDIA_TYPE_VIDEO;
         for cand in candidates(video, codec_id, format, hw, native, hevc_10bit_hardware()) {
             let hardware = matches!(cand, Candidate::NativeV4l2 | Candidate::Named(_, true));
@@ -479,6 +484,7 @@ impl Decoder {
                 Ok(mut d) => {
                     if !d.hardware {
                         d.hardware_error = hardware_error;
+                        d.hardware_holders = hardware_holders;
                     }
                     return Ok(d);
                 }
@@ -488,6 +494,9 @@ impl Decoder {
                     // tried next fails the same way, less clearly).
                     if hardware && hardware_error.is_none() {
                         hardware_error = Some(e.to_string());
+                        if let Error::HardwareBusy(_, holders) = &e {
+                            hardware_holders = holders.clone();
+                        }
                     }
                     last_err = e;
                 }
@@ -525,6 +534,7 @@ impl Decoder {
             name,
             hardware: true,
             hardware_error: None,
+            hardware_holders: Default::default(),
             time_base,
             origin: 0.0,
             nal: None,
@@ -565,6 +575,7 @@ impl Decoder {
                 name,
                 hardware,
                 hardware_error: None,
+                hardware_holders: Default::default(),
                 time_base,
                 origin: 0.0,
                 nal: None,

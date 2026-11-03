@@ -95,6 +95,11 @@ const ADJUST: usize = 2;
 const KEYBOARD: usize = 3;
 /// The audio and subtitles picker, above the control bar.
 const TRACKS: usize = 4;
+/// A toast over the video, above where the control bar sits. Nothing to point
+/// at, so the rays pass through it and don't show for it.
+const TOAST: usize = 5;
+/// How long a toast stays over the video.
+const VIDEO_TOAST_SECS: f32 = 3.0;
 /// The control bar's body in pixels.
 const BAR_PX: [u32; 2] = [1400, 268];
 /// Metres per pixel of the control bar and of the picker on it.
@@ -128,7 +133,7 @@ pub struct App {
     services: Services,
     pub ui: UiState,
     thumbs: ui::thumbs::Thumbs,
-    panels: [Panel; 5],
+    panels: [Panel; 6],
     subs: Panel,
     /// The performance overlay, its sampler while it shows, the last
     /// second of frame times, and the video's counters at its last paint.
@@ -243,10 +248,12 @@ impl App {
             growing_panel([1200, 456], 1.0, 1.25),
             // As fine as the bar it sits on, and growing with it.
             growing_panel([850, 560], 850.0 * BAR_M_PER_PX, 1.25),
+            growing_panel([1100, 90], 1100.0 * BAR_M_PER_PX, 1.25),
         ];
         panels[BAR].refresh = Some(Duration::from_millis(250));
         panels[ADJUST].refresh = Some(Duration::from_millis(1000));
         panels[TRACKS].refresh = Some(Duration::from_millis(1000));
+        panels[TOAST].refresh = Some(Duration::from_millis(100));
         panels[MAIN].refresh = Some(Duration::from_millis(1000));
         let subs = panel([1600, 320], 1.6, 1.0);
         let mut perf = panel([640, 300], 0.4, 1.0);
@@ -378,6 +385,7 @@ impl App {
             "adjust" => ADJUST,
             "keyboard" => KEYBOARD,
             "tracks" => TRACKS,
+            "toast" => TOAST,
             _ => return None,
         })
     }

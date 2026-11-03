@@ -59,9 +59,13 @@ pub enum Error {
     #[error("disc image: {0}")]
     Disc(String),
     /// The hardware decoder has no room for the stream beside the other
-    /// video sessions open (Steam's streaming holds one).
+    /// video sessions open, encoders' too (Steam's recording holds one).
     #[error("hardware decoder busy: {0}")]
-    HardwareBusy(String),
+    HardwareBusy(String, SessionHolders),
+    /// The stream is more than the hardware decoder takes for one session,
+    /// even with nothing else open.
+    #[error("too big for the hardware decoder: {0}")]
+    HardwareTooBig(String),
     #[error("audio output: {0}")]
     Audio(String),
     #[error("I/O: {0}")]
@@ -77,7 +81,10 @@ impl Error {
     /// transcoding it may play where it didn't; a read that failed may not.
     pub fn cannot_play_here(&self) -> bool {
         match self {
-            Error::NoStream(_) | Error::Unsupported(_) | Error::HardwareBusy(_) => true,
+            Error::NoStream(_)
+            | Error::Unsupported(_)
+            | Error::HardwareBusy(..)
+            | Error::HardwareTooBig(_) => true,
             Error::Ffmpeg { code, .. } => {
                 *code == ff::AVERROR_INVALIDDATA_
                     || *code == ff::AVERROR_DECODER_NOT_FOUND_
@@ -89,6 +96,17 @@ impl Error {
 }
 
 pub type Result<T> = std::result::Result<T, Error>;
+
+/// Who else had sessions on the hardware decoder's driver when it found no
+/// room for a stream.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct SessionHolders {
+    /// The other programs with sessions open, as far as `/proc` shows.
+    pub programs: Vec<String>,
+    /// Steam holds the encoder to record or stream, and the stream would fit
+    /// without it.
+    pub recording_blocks: bool,
+}
 
 /// Turns a negative FFmpeg return code into an [`Error`].
 pub(crate) fn check(code: i32, context: &'static str) -> Result<i32> {

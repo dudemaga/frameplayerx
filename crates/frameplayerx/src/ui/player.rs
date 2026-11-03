@@ -161,48 +161,68 @@ fn title_row(
             {
                 state.tracks_open = !state.tracks_open;
             }
+            match (pb.player.error(), &pb.notice) {
+                (Some(e), _) => {
+                    warning_pill(ui, tr!("player-error-pill"), theme::ERROR).tip(&e);
+                }
+                (None, Some(n)) => {
+                    warning_pill(ui, &n.label, theme::WARN).tip(&n.detail);
+                }
+                (None, None) => {}
+            }
             ui.with_layout(Layout::left_to_right(Align::Center), |ui| {
-                let message = match pb.player.error() {
-                    Some(e) => Some((e, theme::ERROR)),
-                    None => pb.notice.clone().map(|n| (n, theme::WARN)),
-                };
-                // With a message, the title leaves it most of the row;
-                // both truncate rather than run under the format pill.
-                let title_width = if message.is_some() {
-                    ui.available_width() * 0.35
-                } else {
-                    ui.available_width()
-                };
-                ui.scope(|ui| {
-                    ui.set_max_width(title_width);
-                    ui.add(
-                        egui::Label::new(
-                            RichText::new(widgets::display_title(&pb.title))
-                                .font(theme::font(Weight::SemiBold, 21.0))
-                                .color(theme::TEXT),
-                        )
-                        .truncate(),
-                    );
-                });
+                let buffering = pb.player.state() == PlayerState::Buffering;
+                let room = ui.available_width() - if buffering { 28.0 } else { 0.0 };
+                widgets::title_line(
+                    ui,
+                    &widgets::display_title(&pb.title),
+                    theme::font(Weight::SemiBold, 21.0),
+                    theme::TEXT,
+                    room,
+                );
                 // Sized to fit the 30-point row: the default spinner
                 // (44) grew the row, so every stutter bounced the seek
                 // bar and buttons up and down.
-                if pb.player.state() == PlayerState::Buffering {
+                if buffering {
                     ui.add(egui::Spinner::new().size(20.0));
-                }
-                if let Some((text, color)) = message {
-                    ui.add(
-                        egui::Label::new(
-                            RichText::new(text)
-                                .font(theme::font(Weight::Regular, 15.0))
-                                .color(color),
-                        )
-                        .truncate(),
-                    );
                 }
             });
         });
     });
+}
+
+/// The latest toast, on its own panel over the video.
+pub fn toast_panel(ctx: &egui::Context, v: &mut View) {
+    if let Some((text, _)) = &v.state.toast {
+        widgets::status_pill(ctx, egui::Align2::CENTER_CENTER, Vec2::ZERO, |ui| {
+            widgets::toast_line(ui, text);
+        });
+    }
+}
+
+/// A warning on the title row: a symbol and a few words, the rest in its tip.
+fn warning_pill(ui: &mut egui::Ui, label: &str, color: Color32) -> egui::Response {
+    let painter = ui.painter();
+    let icon = painter.layout_no_wrap(icons::WARNING.to_string(), theme::icon(16.0), color);
+    let text = painter.layout_no_wrap(
+        label.to_string(),
+        theme::font(Weight::SemiBold, 14.0),
+        color,
+    );
+    const GAP: f32 = 6.0;
+    let width = icon.size().x + GAP + text.size().x;
+    let (rect, resp) = ui.allocate_exact_size(
+        Vec2::new(width, text.size().y) + Vec2::new(20.0, 10.0),
+        Sense::hover(),
+    );
+    pill_face(ui, &resp, false);
+    let left = rect.center().x - width / 2.0;
+    let top = |height: f32| rect.center().y - height / 2.0;
+    let text_at = egui::pos2(left + icon.size().x + GAP, top(text.size().y));
+    let icon_at = egui::pos2(left, top(icon.size().y));
+    ui.painter().galley(icon_at, icon, color);
+    ui.painter().galley(text_at, text, color);
+    resp
 }
 
 /// Times either side of the seek bar.

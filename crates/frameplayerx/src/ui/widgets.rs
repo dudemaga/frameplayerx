@@ -112,6 +112,65 @@ pub fn one_line(
     painter.layout_job(job)
 }
 
+/// A title on one line, cut short past `max_width` and then whole in a tip.
+pub fn title_line(
+    ui: &mut Ui,
+    title: &str,
+    font: egui::FontId,
+    color: Color32,
+    max_width: f32,
+) -> Response {
+    let g = one_line(ui.painter(), title.to_string(), font, color, max_width);
+    let cut = g.elided;
+    let (rect, resp) = ui.allocate_exact_size(g.size(), Sense::hover());
+    ui.painter().galley(rect.min, g, color);
+    if cut { resp.tip(title) } else { resp }
+}
+
+/// A floating pill for a status message, at `anchor` of its panel.
+pub fn status_pill(ctx: &egui::Context, anchor: Align2, offset: Vec2, add: impl FnOnce(&mut Ui)) {
+    egui::Area::new(egui::Id::new("status"))
+        .anchor(anchor, offset)
+        .order(egui::Order::Foreground)
+        .show(ctx, |ui| {
+            egui::Frame::new()
+                .fill(theme::SURFACE_3)
+                .corner_radius(26)
+                .inner_margin(egui::Margin::symmetric(20, 10))
+                .shadow(egui::Shadow {
+                    offset: [0, 8],
+                    blur: 24,
+                    spread: 0,
+                    color: Color32::from_black_alpha(150),
+                })
+                .show(ui, |ui| {
+                    ui.horizontal(|ui| {
+                        ui.set_min_height(32.0);
+                        add(ui);
+                    });
+                });
+        });
+}
+
+/// Where a toast's text wraps, in points.
+const TOAST_WIDTH: f32 = 760.0;
+
+/// A toast's symbol and text, in a [`status_pill`].
+pub fn toast_line(ui: &mut Ui, text: &str) {
+    ui.label(
+        egui::RichText::new(super::icons::INFO)
+            .font(theme::icon(22.0))
+            .color(theme::ACCENT_HOVER),
+    );
+    // A floating pill has no width of its own to wrap at.
+    let font = egui::TextStyle::Body.resolve(ui.style());
+    let color = ui.visuals().text_color();
+    ui.label(
+        ui.painter()
+            .layout(text.to_string(), font, color, TOAST_WIDTH),
+    );
+}
+
 pub const SHADOW_ROOM: egui::Margin = egui::Margin {
     left: 20,
     right: 20,
