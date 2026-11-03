@@ -5,6 +5,7 @@ use crate::info::{MediaInfo, read_info};
 use crate::input::Input;
 use crate::{Error, Result};
 use fp_core::ByteSource;
+use fp_core::format::StereoLayout;
 use fp_ffmpeg_sys as ff;
 use std::sync::Arc;
 use std::sync::atomic::AtomicBool;
@@ -21,6 +22,19 @@ pub enum Crop {
     TopHalf,
     /// Top half stretched vertically by 2x (half top/bottom stereo).
     TopHalfStretched,
+}
+
+impl Crop {
+    /// The stereo layout whose eye this keeps.
+    fn layout(self) -> StereoLayout {
+        match self {
+            Crop::Full => StereoLayout::Mono,
+            Crop::LeftHalf => StereoLayout::SideBySide,
+            Crop::LeftHalfStretched => StereoLayout::HalfSideBySide,
+            Crop::TopHalf => StereoLayout::TopBottom,
+            Crop::TopHalfStretched => StereoLayout::HalfTopBottom,
+        }
+    }
 }
 
 #[derive(Clone, Debug, PartialEq)]
@@ -222,7 +236,8 @@ impl Grabber {
 }
 
 /// Crops and scales `frame` as shown: unsqueezed and turned upright by
-/// `(rotation, pixel_aspect)`.
+/// `(rotation, pixel_aspect)`, the eye's pixel aspect as the player has it
+/// ([`StereoLayout::eye_pixel_aspect`]).
 fn scale(
     frame: &Frame,
     max_w: u32,
@@ -249,7 +264,7 @@ fn scale(
         if sw <= 0 || sh <= 0 {
             return Err(Error::Unsupported("empty frame".into()));
         }
-        let aspect_w = aspect_w * pixel_aspect;
+        let aspect_w = aspect_w * crop.layout().eye_pixel_aspect(pixel_aspect);
         let s = (max_w as f64 / aspect_w)
             .min(max_h as f64 / aspect_h)
             .min(1.0);
@@ -448,6 +463,25 @@ mod tests {
         assert_eq!((portrait.width, portrait.height), (80, 160));
         let wide = grab_full(crate::info::tests::anamorphic_clip(), 640).unwrap();
         assert_eq!((wide.width, wide.height), (640, 240));
+    }
+
+    #[test]
+    fn a_full_side_by_side_eye_marked_1_2_is_square() {
+        let marked = crate::info::tests::side_by_side_marked_1_2_clip;
+        let left = grab(
+            marked(),
+            "x.mp4",
+            1.0,
+            160,
+            160,
+            Crop::LeftHalf,
+            no_interrupt(),
+        )
+        .unwrap();
+        assert_eq!((left.width, left.height), (160, 160));
+        // The whole frame shows at one eye's shape, as in a 2D player.
+        let full = grab(marked(), "x.mp4", 1.0, 160, 160, Crop::Full, no_interrupt()).unwrap();
+        assert_eq!((full.width, full.height), (160, 160));
     }
 
     #[test]

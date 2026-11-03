@@ -170,8 +170,12 @@ pub(crate) fn build(
     };
     // The picture as shown: unsqueezed, then turned upright. Stereo halves
     // are halves of that.
+    let pixel_aspect = video
+        .format
+        .stereo
+        .eye_pixel_aspect(video.pixel_aspect as f64) as f32;
     let turns = video.rotation / 90 % 4;
-    let (pw, ph) = (tex.0 as f32 * video.pixel_aspect.max(0.01), tex.1 as f32);
+    let (pw, ph) = (tex.0 as f32 * pixel_aspect.max(0.01), tex.1 as f32);
     let (pw, ph) = if turns % 2 == 1 { (ph, pw) } else { (pw, ph) };
     // Per-eye aspect for flat screens.
     let (ew, eh) = match video.format.stereo {
@@ -399,5 +403,43 @@ mod tests {
         assert!(near(screen(180, 1.0), (6.0, 3.375, 2)));
         // 4:3 pixels widen a 16:9 frame to 2.37:1.
         assert!(near(screen(0, 4.0 / 3.0), (6.0, 6.0 * 1080.0 / 2560.0, 0)));
+    }
+
+    #[test]
+    fn full_side_by_side_marked_1_2_shows_eyes_at_their_shape() {
+        let eye = |width, height, stereo, pixel_aspect| {
+            let video = VideoParams {
+                format: VideoFormat::new(Projection::Flat, stereo),
+                pixel_aspect,
+                ..Default::default()
+            };
+            let frame = FrameDesc {
+                width,
+                height,
+                layout: PixelLayout::Nv12,
+                color: ColorInfo {
+                    matrix: Matrix::Bt709,
+                    full_range: false,
+                    transfer: Transfer::Sdr,
+                    wide_gamut: false,
+                },
+            };
+            let p = build(&video, Some(&frame), [Mat4::IDENTITY; 2]);
+            p.screen.x / p.screen.y
+        };
+        let near = |a: f32, want: f32| (a - want).abs() < 1e-3;
+        // A 2.40:1 film as full side by side, marked 1:2 so the frame shows
+        // at 2.40:1 in 2D: each eye is 2.40:1, whether picked full or half.
+        assert!(near(eye(3840, 800, StereoLayout::SideBySide, 0.5), 2.4));
+        assert!(near(eye(3840, 800, StereoLayout::HalfSideBySide, 0.5), 2.4));
+        // 2x anamorphic top/bottom is unsqueezed: a 1920x3200 clip of
+        // 2.40:1 eyes.
+        assert!(near(eye(1920, 3200, StereoLayout::TopBottom, 2.0), 2.4));
+        // Other pixel aspects still widen each eye; mono keeps 1:2.
+        assert!(near(
+            eye(1920, 480, StereoLayout::SideBySide, 32.0 / 27.0),
+            960.0 * 32.0 / 27.0 / 480.0
+        ));
+        assert!(near(eye(1920, 800, StereoLayout::Mono, 0.5), 1.2));
     }
 }

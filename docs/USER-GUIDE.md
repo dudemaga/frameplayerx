@@ -472,7 +472,9 @@ side; Settings › Playback › **Default format** picks another.
 
 Videos are shown as their file says: a phone clip stored sideways stands
 upright, and anamorphic video (DVDs, anamorphic lenses) is widened to its
-real shape. A portrait video's screen is as tall as **Screen width**.
+real shape. A full side-by-side file marked to show at one eye's shape in
+2D players (a 1:2 pixel aspect) still shows each eye at its own shape. A
+portrait video's screen is as tall as **Screen width**.
 When a 3D file's metadata says the right eye comes first, the eyes are
 swapped to match.
 
