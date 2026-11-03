@@ -1,6 +1,6 @@
 <!--
 Please read CONTRIBUTING.md first. Anything new needs an issue with a yes before a pull request.
-One change per pull request, targeting the current release/x.y branch.
+One change per pull request, targeting the beta branch.
 -->
 
 Issue: #
