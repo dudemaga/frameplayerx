@@ -53,7 +53,7 @@ tiny_http = "0.12"
 # webpki roots), so there is no OpenSSL anywhere in the tree.
 ureq = { version = "3.5", default-features = false }
 # Pure-Rust inflate (zlib-rs backend); no C zlib, bzip2, zstd or lzma.
-zip = { version = "7", default-features = false, features = ["deflate-flate2-zlib-rs"] }
+zip = { version = "9.2", default-features = false, features = ["deflate-flate2-zlib-rs"] }
 
 [profile.release]
 lto = "thin"

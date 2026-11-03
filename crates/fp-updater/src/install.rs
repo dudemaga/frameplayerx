@@ -95,7 +95,7 @@ struct Entry {
 }
 
 fn classify(file: &zip::read::ZipFile<'_, File>) -> Result<Entry> {
-    let name = file.name().to_string();
+    let name = file.name()?.into_owned();
     let comps = safe_entry_components(&name)?;
     let mode = file.unix_mode();
     if file.is_symlink() {
