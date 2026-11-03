@@ -825,6 +825,7 @@ pub fn card(ui: &mut egui::Ui, thumbs: &mut Thumbs, c: &Card) -> CardResponse {
         ui.fonts(|f| f.layout_job(job))
     };
     let title = line(title, theme::font(Weight::SemiBold, 16.0), title_color);
+    let cut = title.elided.then_some(c.title);
     let facts = line(
         c.facts.to_string(),
         theme::font(Weight::Regular, 14.0),
@@ -856,7 +857,14 @@ pub fn card(ui: &mut egui::Ui, thumbs: &mut Thumbs, c: &Card) -> CardResponse {
             theme::icon(24.0),
             theme::TEXT_2.lerp_to_gamma(Color32::WHITE, m.max(t * 0.6)),
         );
-        more_clicked = more_resp.tip(tr!("jf-details")).clicked();
+        more_clicked = match cut {
+            Some(title) => more_resp.tip(&format!("{title}\n{}", tr!("jf-details"))),
+            None => more_resp.tip(tr!("jf-details")),
+        }
+        .clicked();
+    } else if let Some(title) = cut {
+        ui.interact(text_area, resp.id.with("title"), Sense::hover())
+            .tip(title);
     }
     let mut action_clicked = false;
     if let Some((icon, tip)) = action {

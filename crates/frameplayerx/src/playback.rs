@@ -115,7 +115,7 @@ pub struct Playback {
     pub picked: fp_library::PickedTracks,
     pub script_count: usize,
     last_save: Instant,
-    pub notice: Option<String>,
+    pub notice: Option<Notice>,
     /// Last decoding check: when, and the player's stall and frame counts.
     decode_check: (Instant, u64, u64, u64),
     /// Tells the server the video came from how watching it goes.
@@ -445,7 +445,10 @@ pub fn open(
                     let t = targets[0].clone();
                     log::warn!("{label}: {e}; the server transcodes it to {}", t.label);
                     let (p, pick) = transcoded(&t).map_err(failed)?;
-                    notice = Some(tr!("transcode-cannot-play", quality = t.label.as_str()));
+                    notice = Some(Notice::new(
+                        tr!("notice-pill-transcoding"),
+                        tr!("transcode-cannot-play", quality = t.label.as_str()),
+                    ));
                     (p, pick, Some(t))
                 }
                 Some(Err(e)) => {
@@ -454,7 +457,10 @@ pub fn open(
                 None => {
                     let t = targets[0].clone();
                     let (p, pick) = transcoded(&t).map_err(failed)?;
-                    notice = Some(tr!("transcode-cannot-play", quality = t.label.as_str()));
+                    notice = Some(Notice::new(
+                        tr!("notice-pill-transcoding"),
+                        tr!("transcode-cannot-play", quality = t.label.as_str()),
+                    ));
                     (p, pick, Some(t))
                 }
             }
@@ -911,7 +917,12 @@ impl Playback {
         let Some(v) = self.player.info().video_stream() else {
             return;
         };
-        let notice = slow_decode_notice(v, hardware_on, st.hardware_error.as_deref());
+        let notice = slow_decode_notice(
+            v,
+            hardware_on,
+            st.hardware_error.as_deref(),
+            &st.hardware_holders,
+        );
         log::info!(
             "software decoding ({}, {} {}x{} {}) behind: {} stalls, {} of {} frames dropped; \
              hardware: {}; {}",
@@ -979,7 +990,10 @@ impl Playback {
     /// unsaved, to save again.
     pub fn save_settings(&mut self, library: &Library) -> fp_library::Result<bool> {
         let Some(id) = self.record_id else {
-            self.notice = Some(tr!("notice-not-in-library").into());
+            self.notice = Some(Notice::new(
+                tr!("notice-pill-not-saved"),
+                tr!("notice-not-in-library"),
+            ));
             return Ok(false);
         };
         library
@@ -1169,32 +1183,93 @@ pub(crate) fn software_reason(
     }
 }
 
+/// A warning pill on the control bar: a few words, and all of it in the tip.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Notice {
+    pub label: String,
+    pub detail: String,
+}
+
+impl Notice {
+    fn new(label: impl Into<String>, detail: impl Into<String>) -> Notice {
+        Notice {
+            label: label.into(),
+            detail: detail.into(),
+        }
+    }
+}
+
+/// A program holding the hardware decoder, as the person in the headset knows
+/// it.
+fn holder_name(program: &str) -> String {
+    match program {
+        "steam" => "Steam".into(),
+        "steamwebhelper" => tr!("decoder-holder-steam-browser").to_string(),
+        other => other.into(),
+    }
+}
+
 /// Why a software-decoded video stutters, and what plays smoothly instead.
 /// `hardware_on` is the hardware decoding setting; `hardware_error` why the
-/// hardware decoder, when tried, is not decoding.
+/// hardware decoder, when tried, is not decoding, and `holders` who held it.
 pub(crate) fn slow_decode_notice(
     v: &StreamInfo,
     hardware_on: bool,
     hardware_error: Option<&str>,
-) -> String {
+    holders: &fp_media::SessionHolders,
+) -> Notice {
     let desc = stream_desc(v);
     if !has_hardware_decoder(v) {
-        return tr!("decoder-notice-none", stream = desc);
+        return Notice::new(
+            tr!("decoder-pill-none"),
+            tr!("decoder-notice-none", stream = desc),
+        );
     }
     if !hardware_on {
-        return tr!("decoder-notice-off", stream = desc);
+        return Notice::new(
+            tr!("decoder-pill-off"),
+            tr!("decoder-notice-off", stream = desc),
+        );
     }
-    // Out of decoder memory or sessions: other apps (Steam's streaming
-    // among them) hold the hardware decoder.
+    let size = format!("{}x{}", v.width, v.height);
+    if hardware_error.is_some_and(|e| e.contains("too big")) {
+        return Notice::new(
+            tr!("decoder-pill-too-big"),
+            tr!("decoder-notice-too-big", stream = desc, size = size),
+        );
+    }
+    if holders.recording_blocks {
+        return Notice::new(
+            tr!("decoder-pill-busy"),
+            tr!("decoder-notice-recording", stream = desc),
+        );
+    }
+    // Out of decoder memory or sessions: other apps hold the hardware decoder.
     let busy = hardware_error.is_none_or(|e| {
         let e = e.to_ascii_lowercase();
         e.contains("memory") || e.contains("busy") || e.contains("no free")
     });
-    if busy {
-        tr!("decoder-notice-busy", stream = desc)
+    if !busy {
+        Notice::new(
+            tr!("decoder-pill-refused"),
+            tr!("decoder-notice-refused", stream = desc, size = size),
+        )
+    } else if holders.programs.is_empty() {
+        Notice::new(
+            tr!("decoder-pill-busy"),
+            tr!("decoder-notice-busy", stream = desc),
+        )
     } else {
-        let size = format!("{}x{}", v.width, v.height);
-        tr!("decoder-notice-refused", stream = desc, size = size)
+        let names = holders
+            .programs
+            .iter()
+            .map(|p| holder_name(p))
+            .collect::<Vec<_>>()
+            .join(", ");
+        Notice::new(
+            tr!("decoder-pill-busy"),
+            tr!("decoder-notice-held", stream = desc, holders = names),
+        )
     }
 }
 
@@ -1540,7 +1615,11 @@ mod tests {
             .playback;
         assert_eq!(pb.transcoding.as_ref().map(|t| t.id.as_str()), Some("1080"));
         assert_eq!(pb.request.transcode.as_deref(), Some("1080"));
-        assert!(pb.notice.as_deref().is_some_and(|n| n.contains("1080p")));
+        assert!(
+            pb.notice
+                .as_ref()
+                .is_some_and(|n| n.detail.contains("1080p"))
+        );
         // From where it was asked, as long as the video, and it seeks.
         assert_eq!(*lock(&server.asked), [("1080".to_string(), 30.0)]);
         assert_eq!(pb.player.duration(), 300.0);
@@ -1715,29 +1794,64 @@ mod tests {
             channels: 0,
             ambisonic: false,
         };
-        let n = slow_decode_notice(&stream("hevc", 10), true, None);
+        let nobody = fp_media::SessionHolders::default();
+        let n = slow_decode_notice(&stream("hevc", 10), true, None, &nobody).detail;
         assert!(
             n.contains("10-bit HEVC") && n.contains("8-bit 4:2:0 H.265"),
             "{n}"
         );
-        let n = slow_decode_notice(&stream("av1", 8), true, None);
+        let n = slow_decode_notice(&stream("av1", 8), true, None, &nobody).detail;
         assert!(n.contains("for AV1,"), "{n}");
         let busy = "hardware decoder busy: other video sessions leave room for 8192x4064, \
                     not 8192x4096 10-bit";
-        let n = slow_decode_notice(&stream("hevc", 8), true, Some(busy));
+        let n = slow_decode_notice(&stream("hevc", 8), true, Some(busy), &nobody).detail;
         assert!(n.contains("busy"), "{n}");
         let wrapper = "V4L2 REQBUFS: Cannot allocate memory (os error 12)";
-        let n = slow_decode_notice(&stream("hevc", 8), true, Some(wrapper));
+        let n = slow_decode_notice(&stream("hevc", 8), true, Some(wrapper), &nobody).detail;
         assert!(n.contains("busy"), "{n}");
+        // Named when they are known, by the names people know.
+        let held = fp_media::SessionHolders {
+            programs: vec!["steam".into(), "steamwebhelper".into(), "mpv".into()],
+            recording_blocks: false,
+        };
+        let n = slow_decode_notice(&stream("hevc", 8), true, Some(busy), &held).detail;
+        assert!(
+            n.contains("held by Steam, Steam's browser, mpv") && n.contains("HEVC"),
+            "{n}"
+        );
+        assert!(n.contains("restart the headset"), "{n}");
+        // Asked to turn recording off only when that frees enough room.
+        assert!(!n.contains("Recording Off"), "{n}");
+        let recording = fp_media::SessionHolders {
+            programs: vec!["steam".into()],
+            recording_blocks: true,
+        };
+        let n = slow_decode_notice(&stream("hevc", 8), true, Some(busy), &recording).detail;
+        assert!(n.contains("Choose Recording Off"), "{n}");
+        assert_eq!(
+            slow_decode_notice(&stream("hevc", 8), true, Some(busy), &recording).label,
+            "Decoder busy"
+        );
+        // Too big says so, whoever else is open.
+        let too_big = "too big for the hardware decoder: 8192x8192, even with nothing else open";
+        let mut square = stream("hevc", 8);
+        square.height = 8192;
+        let n = slow_decode_notice(&square, true, Some(too_big), &recording).detail;
+        assert!(n.contains("HEVC (8192x8192) is too big"), "{n}");
+        assert_eq!(
+            slow_decode_notice(&square, true, Some(too_big), &recording).label,
+            "Too big for hardware"
+        );
+        assert!(!n.contains("busy") && !n.contains("Recording Off"), "{n}");
         // 8-bit, but 4:2:2: the hardware can't, whatever Windows says.
         let mut s422 = stream("hevc", 8);
         s422.pixel_format = "yuv422p".into();
-        let n = slow_decode_notice(&s422, true, None);
+        let n = slow_decode_notice(&s422, true, None, &nobody).detail;
         assert!(n.contains("for 4:2:2 HEVC"), "{n}");
-        let n = slow_decode_notice(&stream("hevc", 8), false, None);
+        let n = slow_decode_notice(&stream("hevc", 8), false, None, &nobody).detail;
         assert!(n.contains("turn on hardware decoding"), "{n}");
         let refused = "unsupported: V4L2: stream size unknown";
-        let n = slow_decode_notice(&stream("hevc", 8), true, Some(refused));
+        let n = slow_decode_notice(&stream("hevc", 8), true, Some(refused), &nobody).detail;
         assert!(n.contains("can't play this HEVC (8192x4096)"), "{n}");
 
         // The stream info's reason: the error when tried, else why not.

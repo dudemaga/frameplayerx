@@ -302,56 +302,26 @@ fn status_toast(ctx: &egui::Context, v: &mut View) {
     if toast.is_none() && err.is_none() && opening.is_none() {
         return;
     }
-    egui::Area::new(egui::Id::new("status"))
-        .anchor(Align2::CENTER_BOTTOM, Vec2::new(0.0, -24.0))
-        .order(egui::Order::Foreground)
-        .show(ctx, |ui| {
-            egui::Frame::new()
-                .fill(theme::SURFACE_3)
-                .corner_radius(26)
-                .inner_margin(egui::Margin::symmetric(20, 10))
-                .shadow(egui::Shadow {
-                    offset: [0, 8],
-                    blur: 24,
-                    spread: 0,
-                    color: Color32::from_black_alpha(150),
-                })
-                .show(ui, |ui| {
-                    ui.horizontal(|ui| {
-                        ui.set_min_height(32.0);
-                        if let Some(o) = opening {
-                            ui.spinner();
-                            let title = widgets::display_title(&o);
-                            ui.label(tr!("library-opening", title = title));
-                        } else if let Some(e) = err {
-                            ui.label(
-                                RichText::new(icons::WARNING_CIRCLE)
-                                    .font(theme::icon(22.0))
-                                    .color(theme::ERROR),
-                            );
-                            ui.label(tr!("library-could-not-open", error = e.as_str()));
-                            if widgets::button_sized(
-                                ui,
-                                None,
-                                tr!("library-dismiss"),
-                                Kind::Ghost,
-                                36.0,
-                            )
-                            .clicked()
-                            {
-                                v.state.open_error = None;
-                            }
-                        } else if let Some(t) = toast {
-                            ui.label(
-                                RichText::new(icons::INFO)
-                                    .font(theme::icon(22.0))
-                                    .color(theme::ACCENT_HOVER),
-                            );
-                            ui.label(t);
-                        }
-                    });
-                });
-        });
+    widgets::status_pill(ctx, Align2::CENTER_BOTTOM, Vec2::new(0.0, -24.0), |ui| {
+        if let Some(o) = opening {
+            ui.spinner();
+            let title = widgets::display_title(&o);
+            ui.label(tr!("library-opening", title = title));
+        } else if let Some(e) = err {
+            ui.label(
+                RichText::new(icons::WARNING_CIRCLE)
+                    .font(theme::icon(22.0))
+                    .color(theme::ERROR),
+            );
+            ui.label(tr!("library-could-not-open", error = e.as_str()));
+            if widgets::button_sized(ui, None, tr!("library-dismiss"), Kind::Ghost, 36.0).clicked()
+            {
+                v.state.open_error = None;
+            }
+        } else if let Some(t) = toast {
+            widgets::toast_line(ui, &t);
+        }
+    });
 }
 
 pub(crate) fn request(r: &MediaRecord) -> OpenRequest {
@@ -460,13 +430,13 @@ fn hero(ui: &mut egui::Ui, v: &mut View, rows: &HomeRows) {
     let resp = page::banner(ui, v.thumbs, key.as_deref(), 300.0, |inner| {
         inner.add_space(22.0);
         widgets::section_label(inner, caption);
-        inner.add(
-            egui::Label::new(
-                RichText::new(widgets::display_title(&r.title))
-                    .font(theme::font(Weight::Bold, 42.0))
-                    .color(Color32::WHITE),
-            )
-            .truncate(),
+        let room = inner.available_width();
+        widgets::title_line(
+            inner,
+            &widgets::display_title(&r.title),
+            theme::font(Weight::Bold, 42.0),
+            Color32::WHITE,
+            room,
         );
         let mut line = facts(r, v.settings.default_format);
         if resume && r.resume_position > 1.0 {

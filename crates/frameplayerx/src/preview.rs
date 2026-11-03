@@ -402,7 +402,12 @@ impl Sim {
                         v.codec = "av1".into();
                         v.bit_depth = 10;
                         v.pixel_format = "yuv420p10le".into();
-                        p.notice = Some(crate::playback::slow_decode_notice(&v, true, None));
+                        p.notice = Some(crate::playback::slow_decode_notice(
+                            &v,
+                            true,
+                            None,
+                            &Default::default(),
+                        ));
                     }
                 }
                 self.app.repaint_all();

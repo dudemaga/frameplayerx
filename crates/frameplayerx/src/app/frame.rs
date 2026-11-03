@@ -362,13 +362,24 @@ impl App {
         }
         let browser = !playing || (self.ui_visible && self.show_browser);
         self.panels[MAIN].visible = browser;
-        // Said where it is seen: the toast shows on the library panel.
+        // Said where it can be acted on, on the library panel.
         if browser && let Some(notice) = self.update_notice.take() {
             self.ui.toast(notice);
         }
         self.panels[BAR].visible = playing && self.ui_visible && !self.show_browser;
         self.panels[ADJUST].visible = self.panels[BAR].visible && self.ui.adjust_open;
         self.panels[TRACKS].visible = self.panels[BAR].visible && self.ui.tracks_open;
+        let over_video = playing && !browser;
+        let live = self
+            .ui
+            .toast
+            .as_ref()
+            .is_some_and(|(_, t)| t.elapsed().as_secs_f32() < VIDEO_TOAST_SECS);
+        self.panels[TOAST].visible = over_video && live;
+        // Said and gone: it doesn't come back when the library opens.
+        if over_video && !live {
+            self.ui.toast = None;
+        }
     }
 
     /// Where each panel goes: the control bar from the player (see
@@ -398,6 +409,13 @@ impl App {
         self.panels[MAIN].pose = place_below(anchor, my, mp, 1.5, BELOW_DEG);
         self.panels[BAR].pose = place(bar_anchor, 0.0, 1.05, -0.32, 22.0);
         self.panels[TRACKS].pose = above_bar(&self.panels[BAR], &self.panels[TRACKS]);
+        self.panels[TOAST].pose = toast_pose(
+            &self.panels[BAR],
+            self.panels[TRACKS]
+                .visible
+                .then(|| self.panels[TRACKS].size.y),
+            &self.panels[TOAST],
+        );
         self.panels[ADJUST].pose = place_around(adjust_anchor, beside + ay, ap, 1.15, 0.0);
         // The keyboard sits below the panel it types into, turned with it, so
         // it is where that panel was moved to.
@@ -414,7 +432,7 @@ impl App {
     /// commands; returns the haptic pulses to play.
     fn route_input(&mut self, input: &FrameInput, anchor: Mat4) -> Vec<(usize, f32, i64)> {
         let routed = {
-            let [a, b, c, d, e] = &mut self.panels;
+            let [a, b, c, d, e, _toast] = &mut self.panels;
             self.pointer
                 .route(&mut [a, b, c, d, e], &input.hands, input.dt)
         };
@@ -471,7 +489,7 @@ impl App {
         }
         let devices = self.services.haptic_statuses();
         let passthrough_available = input.passthrough_available;
-        for idx in [MAIN, BAR, ADJUST, TRACKS] {
+        for idx in [MAIN, BAR, ADJUST, TRACKS, TOAST] {
             if !self.panels[idx].needs_paint() {
                 continue;
             }
@@ -500,6 +518,7 @@ impl App {
                 MAIN => ui::library::browser(ctx, &mut view),
                 BAR => ui::player::control_bar(ctx, &mut view),
                 TRACKS => ui::player::tracks_panel(ctx, &mut view),
+                TOAST => ui::player::toast_panel(ctx, &mut view),
                 _ => ui::player::adjust_panel(ctx, &mut view),
             });
             if let Err(e) = r {
@@ -643,7 +662,11 @@ impl App {
                 _ => quads.extend(self.perf.quad()),
             }
         }
-        let any_ui = self.panels.iter().any(|p| p.visible);
+        let any_ui = self
+            .panels
+            .iter()
+            .enumerate()
+            .any(|(i, p)| i != TOAST && p.visible);
         if input.layers {
             layers.extend(self.pointer.ray_layers(eye, any_ui));
         } else {
@@ -737,9 +760,34 @@ fn above_bar(bar: &Panel, picker: &Panel) -> Mat4 {
     bar.pose * Mat4::from_translation(Vec3::new(x, y, 0.0))
 }
 
+/// Centred above the control bar's body, and above the picker, `above` metres
+/// tall, when it is open.
+fn toast_pose(bar: &Panel, above: Option<f32>, toast: &Panel) -> Mat4 {
+    let room = ui::widgets::SHADOW_ROOM.top as f32 * bar.size.x / bar.points().x;
+    let y = bar.size.y / 2.0 - room + above.unwrap_or(0.0) + toast.size.y / 2.0;
+    bar.pose * Mat4::from_translation(Vec3::new(0.0, y, 0.0))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_toast_sits_above_the_bar_and_any_picker() {
+        let mut bar = growing_panel(BAR_PX, BAR_PX[0] as f32 * BAR_M_PER_PX, 1.25);
+        let mut toast = growing_panel([1100, 90], 1100.0 * BAR_M_PER_PX, 1.25);
+        bar.pose = place(Mat4::IDENTITY, 0.0, 1.05, -0.32, 22.0);
+        let height = |pose: Mat4| bar.pose.inverse().transform_point3(pose.w_axis.truncate());
+        toast.pose = toast_pose(&bar, None, &toast);
+        let alone = height(toast.pose);
+        assert!(alone.x.abs() < 1e-5, "centred: {alone}");
+        assert!(
+            alone.y - toast.size.y / 2.0 > 0.0,
+            "clear of the bar's middle"
+        );
+        let with_picker = height(toast_pose(&bar, Some(0.5), &toast));
+        assert!((with_picker.y - alone.y - 0.5).abs() < 1e-5);
+    }
 
     #[test]
     fn the_picker_sits_on_the_bar_without_covering_it() {

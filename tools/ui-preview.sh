@@ -455,6 +455,10 @@ panel adjust adjust-passthrough
 slow-decode
 frames 8
 panel bar player-bar-slow-decode
+# A shortcut's toast over the video, with the ray off the panels.
+aim 70 40
+stick 0 1 12
+panel toast player-toast
 # What was watched: the history, and Home's banner, over the paused video
 # (Back closes the adjustments, then shows the browser).
 button secondary

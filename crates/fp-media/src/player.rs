@@ -107,6 +107,8 @@ pub struct Stats {
     pub hardware: bool,
     /// Why hardware decoding was tried and is not decoding this video.
     pub hardware_error: Option<String>,
+    /// Who held the driver when it found no room for this video.
+    pub hardware_holders: crate::SessionHolders,
     pub audio_decoder: String,
     pub audio_sink: String,
     pub frames_shown: u64,
@@ -325,6 +327,7 @@ impl Player {
             st.video_decoder = d.name.clone();
             st.hardware = d.hardware;
             st.hardware_error = d.hardware_error.clone();
+            st.hardware_holders = d.hardware_holders.clone();
         }
         let mut audio_decoders = Vec::new();
         for i in info.audio_streams().map(|s| s.index) {
@@ -940,6 +943,7 @@ fn video_thread(sh: Arc<Shared>, mut dec: Decoder, cap: usize) {
             st.video_decoder = dec.name.clone();
             st.hardware = dec.hardware;
             st.hardware_error = dec.hardware_error.clone();
+            st.hardware_holders = dec.hardware_holders.clone();
         }
         loop {
             let accepted = match dec.send(pkt_ptr) {
