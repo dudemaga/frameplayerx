@@ -293,6 +293,9 @@ pub struct Decoder {
     native: Option<Box<Native>>,
     /// Packets to feed the FFmpeg decoder before new ones (after a fallback).
     replay: std::collections::VecDeque<Packet>,
+    /// End of stream goes in after `replay`, from `receive`: the fallback
+    /// came after it was sent, so nothing more will be.
+    replay_end: bool,
     pub name: String,
     pub hardware: bool,
     /// Why a hardware decoder that was tried is not the one decoding: its
@@ -414,6 +417,7 @@ impl Decoder {
             #[cfg(target_os = "linux")]
             native: None,
             replay: Default::default(),
+            replay_end: false,
             name: String::new(),
             hardware: false,
             hardware_error: None,
@@ -531,6 +535,7 @@ impl Decoder {
                 startup: Some(Vec::new()),
             })),
             replay: Default::default(),
+            replay_end: false,
             name,
             hardware: true,
             hardware_error: None,
@@ -572,6 +577,7 @@ impl Decoder {
                 #[cfg(target_os = "linux")]
                 native: None,
                 replay: Default::default(),
+                replay_end: false,
                 name,
                 hardware,
                 hardware_error: None,
@@ -655,7 +661,13 @@ impl Decoder {
             }
         );
         let startup = native.startup.take().unwrap_or_default();
-        let hw = native.hw;
+        // FFmpeg's V4L2 wrapper feeds the device the same way, so a stream
+        // the hardware flags as broken goes straight to software.
+        let hw = if native.dec.pictures_broken() {
+            HwDecode::Off
+        } else {
+            native.hw
+        };
         // Close the failed device session before opening the next decoder:
         // FFmpeg's V4L2 wrapper needs a session of its own, and the driver
         // refuses one more while Steam holds others, so it went to software.
@@ -765,8 +777,12 @@ impl Decoder {
                     return Ok(r);
                 }
                 Err(e) => {
+                    let ended = n.dec.ended();
                     self.fall_back(&e)?;
-                    return Ok(None);
+                    if !ended {
+                        return Ok(None);
+                    }
+                    self.replay_end = true;
                 }
             }
         }
@@ -777,6 +793,12 @@ impl Decoder {
             // SAFETY: ctx is open; frame valid.
             let r = unsafe { ff::avcodec_receive_frame(self.ctx, frame.0) };
             if r == ff::AVERROR_EAGAIN {
+                if self.replay_end {
+                    if self.send(std::ptr::null())? {
+                        self.replay_end = false;
+                    }
+                    continue;
+                }
                 return Ok(None);
             }
             if r == ff::AVERROR_EOF_ {
@@ -868,6 +890,7 @@ impl Decoder {
             return;
         }
         self.replay.clear();
+        self.replay_end = false;
         if !self.ctx.is_null() {
             // SAFETY: ctx is open.
             unsafe { ff::avcodec_flush_buffers(self.ctx) };

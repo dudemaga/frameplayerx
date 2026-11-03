@@ -613,7 +613,8 @@ once you start using the headset. If a video stays busy, restart the headset
 and open the video again.
 
 "Decoder refused it" means the decoder tried and refused the file;
-frameplayerx.log says why.
+frameplayerx.log says why. A video whose pictures the hardware decoder
+reads as broken, picture after picture, plays in software instead.
 
 The pill next to the format on the control bar says which decoder plays
 the video: HW, or SW in amber, with the codec and bit depth. Hover it, or

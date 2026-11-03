@@ -150,7 +150,7 @@ pub(crate) fn units(data: &[u8], length_size: usize) -> impl Iterator<Item = &[u
     })
 }
 
-fn start_code(data: &[u8]) -> Option<usize> {
+pub(crate) fn start_code(data: &[u8]) -> Option<usize> {
     data.windows(3).position(|w| w == [0, 0, 1])
 }
 
