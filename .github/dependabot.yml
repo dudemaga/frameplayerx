@@ -18,8 +18,8 @@ updates:
     patterns: ['*']
     multi-ecosystem-group: monthly
     # Cargo.lock only, within what Cargo.toml allows: its pins stay, and a
-    # breaking upgrade (a new egui, zip 9) needs code changes, so it is
-    # made by hand.
+    # breaking upgrade (a new egui, say) needs code changes, so it is made
+    # by hand.
     versioning-strategy: lockfile-only
   - package-ecosystem: rust-toolchain
     directory: /
