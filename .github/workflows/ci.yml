@@ -36,12 +36,22 @@ jobs:
   # X.Y.Z-alpha.N with N the run number, as its draft has no tag to count;
   # a re-run keeps it and replaces its own draft. A pushed v* tag is used
   # as it is.
+  #
+  # What a change touches decides how far it goes. Markdown, docs/ and site/
+  # aren't built, tested or packaged, so they run nothing. CI's own settings
+  # are worth trying but change nothing people get, so they build and don't
+  # release. The later jobs are skipped by their `if`, not by path filters on
+  # the workflow, which would leave a required check pending for good. A
+  # pull request counts its own changes, main everything since the last
+  # stable release. A tag or a run from the Actions tab always goes all the
+  # way.
   version:
     runs-on: ubuntu-24.04
     outputs:
       version: ${{ steps.calc.outputs.version }}
       tag: ${{ steps.calc.outputs.tag }}
       prerelease: ${{ steps.calc.outputs.prerelease }}
+      checks: ${{ steps.calc.outputs.checks }}
       is_release: ${{ steps.calc.outputs.is_release }}
       draft: ${{ steps.calc.outputs.draft }}
     steps:
@@ -60,6 +70,25 @@ jobs:
         run: |
           is_release=false
           draft=false
+          latest=$(git tag -l 'v*' | grep -E '^v[0-9]+\.[0-9]+\.[0-9]+$' | sort -V | tail -1)
+          docs=(':!*.md' ':!docs' ':!site')
+          settings=(':!.github' ':!cliff.toml' ':!.gitignore' ':!.gitattributes')
+          base=
+          if [ "$GITHUB_EVENT_NAME" = pull_request ]; then
+            base=HEAD^1
+          elif [ "$GITHUB_EVENT_NAME" = push ] && [ "$GITHUB_REF" = refs/heads/main ]; then
+            base=$latest
+          fi
+          checks=true
+          ships=true
+          if [ -n "$base" ]; then
+            if git diff --quiet "$base" HEAD -- . "${docs[@]}"; then
+              checks=false
+            fi
+            if git diff --quiet "$base" HEAD -- . "${docs[@]}" "${settings[@]}"; then
+              ships=false
+            fi
+          fi
           if [[ "$GITHUB_REF" == refs/tags/v* ]]; then
             ver="${GITHUB_REF_NAME#v}"
             is_release=true
@@ -68,7 +97,9 @@ jobs:
             ver="${ver#v}"
             if [ "$GITHUB_REF" = refs/heads/main ] && [ "$ALPHA" != true ]; then
               # git-cliff repeats the last version when nothing came since.
-              if git rev-parse -q --verify "refs/tags/v$ver" > /dev/null; then
+              if [ "$ships" = false ]; then
+                echo "::notice::Nothing that ships changed since $latest: no release"
+              elif git rev-parse -q --verify "refs/tags/v$ver" > /dev/null; then
                 echo "::warning::v$ver already exists and nothing was committed since: no release"
               else
                 is_release=true
@@ -76,7 +107,6 @@ jobs:
             else
               # A beta or alpha must sort above every stable release, also
               # when the branch has nothing new or was cut before the latest.
-              latest=$(git tag -l 'v*' | grep -E '^v[0-9]+\.[0-9]+\.[0-9]+$' | sort -V | tail -1)
               latest="${latest#v}"
               if [ -n "$latest" ] && [ "$(printf '%s\n' "$latest" "$ver" | sort -V | head -1)" = "$ver" ]; then
                 IFS=. read -r major minor patch <<< "$latest"
@@ -98,16 +128,18 @@ jobs:
             *-*) prerelease=true ;;
             *) prerelease=false ;;
           esac
-          echo "Version $ver, pre-release: $prerelease, release: $is_release, draft: $draft"
+          echo "Version $ver, pre-release: $prerelease, checks: $checks, release: $is_release, draft: $draft"
           {
             echo "version=$ver"
             echo "tag=v$ver"
             echo "prerelease=$prerelease"
+            echo "checks=$checks"
             echo "is_release=$is_release"
             echo "draft=$draft"
           } >> "$GITHUB_OUTPUT"
 
   check:
+    if: needs.version.outputs.checks == 'true'
     needs: [version]
     runs-on: ubuntu-24.04
     steps:
@@ -197,6 +229,8 @@ jobs:
 
   # The PC-side installer, for each desktop OS.
   installer:
+    if: needs.version.outputs.checks == 'true'
+    needs: [version]
     strategy:
       matrix:
         include:

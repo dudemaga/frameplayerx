@@ -17,7 +17,7 @@ You don't need to write code to help:
 ## Pull requests
 
 - **One change per pull request, one at a time.** Wait for a review before opening the next.
-- **Start from the current `release/x.y` branch,** and target it. If there isn't one, use `main`. Keep your branch free of conflicts.
+- **Start from the `beta` branch,** and target it. Keep your branch free of conflicts.
 - **Link the issue** it addresses.
 - **Check every claim in the description.** If it says something doesn't get worse, you measured that.
 

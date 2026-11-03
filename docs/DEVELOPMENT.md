@@ -466,8 +466,8 @@ headset and copies the text and JSON reports into `probe-reports/`.
    `crates/fp-updater/src/lib.rs` (`RELEASE_PUBLIC_KEY`), and store the
    whole `.key` file as the `FP_RELEASE_KEY` repository secret. Keep the key
    offline otherwise.
-2. Stable: push (or merge) to `main`. Beta: run the `ci` workflow on any
-   other branch from the Actions tab (Run workflow). CI calculates the
+2. Stable: push (or merge) to `main`. Beta: run the `ci` workflow on the
+   `beta` branch from the Actions tab (Run workflow). CI calculates the
    version, stamps it into `crates/frameplayerx/Cargo.toml`, builds,
    packages, signs `manifest.json` and publishes the GitHub release with
    the zip, `manifest.json(.sig)`, `framedrop.json`, `frameplayerx-install`
@@ -478,6 +478,11 @@ headset and copies the text and JSON reports into `probe-reports/`.
      change (`feat!:`, `BREAKING CHANGE:`) bumps X, a `feat` bumps Y,
      anything else bumps Z. Beta tags don't count. With no stable tag yet
      it's `initial_tag` in `cliff.toml`.
+   - A push to `main` only releases if something that ships changed since
+     the last stable tag. Markdown, `docs/` and `site/` alone run nothing, on
+     pull requests too. `.github/`, `cliff.toml` and git's own files also
+     build, but don't release. A tag or a run from the Actions tab always
+     goes all the way.
    - Other branches get that version as `X.Y.Z-beta.N` (N one above the
      highest existing beta of it, and always above the latest stable),
      published as a GitHub pre-release. FramePlayerX offers it on the Beta
