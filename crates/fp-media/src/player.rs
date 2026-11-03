@@ -935,27 +935,37 @@ fn video_thread(sh: Arc<Shared>, mut dec: Decoder, cap: usize) {
             .as_ref()
             .map(|p| p.as_ptr() as *const ff::AVPacket)
             .unwrap_or(std::ptr::null());
-        // The hardware decoder can fail once running and hand over to
-        // software (Decoder::fall_back): the stats follow.
-        if dec.hardware != hardware {
-            hardware = dec.hardware;
-            let mut st = sh.stats();
-            st.video_decoder = dec.name.clone();
-            st.hardware = dec.hardware;
-            st.hardware_error = dec.hardware_error.clone();
-            st.hardware_holders = dec.hardware_holders.clone();
-        }
+        // Nothing follows end of stream, so after an error there nothing
+        // would call the decoder again and the player would wait forever.
+        let end_after_error = || {
+            if pkt_ptr.is_null() && sh.serial() == serial {
+                sh.video_done.store(true, Ordering::Release);
+            }
+        };
         loop {
             let accepted = match dec.send(pkt_ptr) {
                 Ok(a) => a,
                 Err(e) => {
                     log::warn!("video decode: {e}");
+                    end_after_error();
                     true
                 }
             };
             // Drain everything ready.
             loop {
-                match dec.receive(&mut frame) {
+                let received = dec.receive(&mut frame);
+                // The hardware decoder can fail once running and hand over to
+                // software (Decoder::fall_back), after end of stream too: the
+                // stats follow.
+                if dec.hardware != hardware {
+                    hardware = dec.hardware;
+                    let mut st = sh.stats();
+                    st.video_decoder = dec.name.clone();
+                    st.hardware = dec.hardware;
+                    st.hardware_error = dec.hardware_error.clone();
+                    st.hardware_holders = dec.hardware_holders.clone();
+                }
+                match received {
                     Ok(Some(true)) => {
                         let pts = dec.frame_time(&frame).unwrap_or(0.0);
                         let dur = Some(dec.frame_duration(&frame))
@@ -993,6 +1003,7 @@ fn video_thread(sh: Arc<Shared>, mut dec: Decoder, cap: usize) {
                     Ok(None) => break,
                     Err(e) => {
                         log::warn!("video decode: {e}");
+                        end_after_error();
                         break;
                     }
                 }

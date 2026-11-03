@@ -879,10 +879,11 @@ mod linux {
         /// The primer trick is active (declared OUTPUT size was lowered).
         primed: bool,
         bsf: *mut ff::AVBSFContext,
-        /// The parameter sets the filter inserts at keyframes when it
+        /// The parameter sets the filter inserts before IRAP pictures when it
         /// converts an hvcC (Annex B), else empty.
         hvcc_parameter_sets: Vec<u8>,
-        /// Keyframes with parameter sets unlike the hvcC's were seen (logged).
+        /// IRAP pictures with parameter sets unlike the hvcC's were seen
+        /// (logged).
         in_band_parameter_sets: bool,
         /// CAPTURE buffers flagged as broken since the last good picture.
         broken_in_a_row: u32,
@@ -1448,7 +1449,7 @@ mod linux {
                         if !self.in_band_parameter_sets {
                             self.in_band_parameter_sets = true;
                             log::info!(
-                                "V4L2: keyframes carry parameter sets unlike the hvcC's; theirs go last"
+                                "V4L2: IRAP pictures carry parameter sets unlike the hvcC's; theirs go last"
                             );
                         }
                     }
