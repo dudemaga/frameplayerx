@@ -77,7 +77,7 @@ settings-diagnostics = Diagnostics
 settings-hardware-decoding = Hardware video decoding
 settings-hardware-decoding-desc = Recommended: smooth 8K. Turn off only to rule out a decoder problem.
 settings-perf-overlay = Performance overlay
-settings-perf-overlay-desc = Frame time, the video's frame rate and decoder, CPU, GPU and memory, low in your view.
+settings-perf-panel-desc = Why a video might stutter: frames drawn and shown, the decoder, the buffer and network, CPU, GPU and memory. Squeeze a grip on it to move it.
 
 ## Settings: the other tabs
 
@@ -375,7 +375,7 @@ adjust-decoder = Decoder
 adjust-resolution = Resolution
 adjust-pixel-format = Pixel format
 adjust-placement = Screen and panels
-adjust-placement-desc = Where a flat screen, the control bar, this panel and the browse panel start.
+adjust-placement-desc = Where a flat screen, the control bar, this panel, the browse panel and the performance overlay start.
 adjust-put-back = Put back
 # Turning left or right.
 adjust-yaw = Yaw
@@ -1171,16 +1171,36 @@ library-error-name = The folder's name can't be read
 
 location-card-out = On a card that is not inserted
 location-on-card-out = { $path }, on a card that is not inserted
-# The performance overlay: keep ms, Hz, fps, CPU, GPU and GB.
-perf-frame = Frame
-# $hz is empty, or " · 90 Hz".
-perf-frame-value = { $typical } ms, longest { $longest }{ $hz }
+# The performance overlay: keep Hz, fps, CPU, GPU and GB. Short: these sit in one row.
+perf-display = Display
+# Frames drawn per second, of the display's rate.
+perf-display-value = { $drawn } of { $hz } Hz
 perf-video = Video
-perf-video-value = { $fps } fps · { $dropped } dropped/s
-perf-cpu-value = { $all }% · app { $app }%
+# Frames shown per second, of the film's own rate.
+perf-video-value = { $fps } of { $film } fps
+perf-video-paused = Paused
+perf-video-buffering = Buffering
+perf-video-ended = Ended
+perf-stutter = { $dropped } dropped · { $stalls ->
+    [one] { $stalls } stall
+   *[other] { $stalls } stalls
+}
+perf-buffer = Buffer
+# Seconds of video read ahead, of how many it's aiming for.
+perf-buffer-value = { $ahead } of { $target } s
+perf-network = Network
+# Nothing arriving because the buffer is full.
+perf-network-idle = Idle
+perf-retries = { $count ->
+    [one] { $count } retry
+   *[other] { $count } retries
+}
+perf-last-skip = Last skip
+perf-opened = Opened
+# Follows how long a skip took: how long its first read of the file took.
+perf-first-read = first read { $secs } s
 perf-memory = Memory
 perf-memory-value = { $used } of { $total } GB
-perf-memory-app = { $used } of { $total } GB · app { $app } GB
 notice-not-in-library = Adjustments apply until you close this video (it is not in the library).
 # $quality is like 1440p.
 transcode-cannot-play = This file can't play here: the server is transcoding it to { $quality }

@@ -14,13 +14,15 @@
 //! arrives, and its socket is left unread while the cache is full, which slows
 //! the server through TCP and keeps memory at the size of the cache.
 
-use fp_core::ByteSource;
 use fp_core::sync::lock;
+use fp_core::{ByteSource, NetCounters};
 use std::collections::hash_map::Entry;
 use std::collections::{HashMap, HashSet};
 use std::io::{self, Read};
+use std::sync::atomic::Ordering;
 use std::sync::mpsc::{self, Receiver, Sender};
 use std::sync::{Arc, Condvar, Mutex, PoisonError, Weak};
+use std::time::Instant;
 
 /// Blocks read in order before requests start to grow. Opening a video jumps
 /// around, and a probe or thumbnail stops early, so those stay one block at a
@@ -173,6 +175,7 @@ struct Inner<F: RangeFetch> {
     ahead: Mutex<Option<Sender<Job>>>,
     parallel: usize,
     pool: Mutex<Option<Sender<Job>>>,
+    net: Arc<NetCounters>,
 }
 
 /// Work for a read-ahead thread.
@@ -209,6 +212,11 @@ pub(crate) struct CachedSource<F: RangeFetch> {
 
 impl<F: RangeFetch> CachedSource<F> {
     pub(crate) fn new(fetcher: F, opts: &CacheOptions) -> Self {
+        Self::counted(fetcher, opts, Arc::default())
+    }
+
+    /// With counters the fetcher shares, to count what only it sees.
+    pub(crate) fn counted(fetcher: F, opts: &CacheOptions, net: Arc<NetCounters>) -> Self {
         let parallel = opts.parallel_requests.max(1);
         let room_for_parallel = if parallel > 1 {
             parallel * PARALLEL_BLOCKS as usize + KEEP_BEHIND
@@ -245,6 +253,7 @@ impl<F: RangeFetch> CachedSource<F> {
                 ahead: Mutex::new(None),
                 parallel,
                 pool: Mutex::new(None),
+                net,
             }),
         }
     }
@@ -418,11 +427,15 @@ impl<F: RangeFetch> Inner<F> {
         }
         let out = match result {
             Ok(data) => {
+                self.net
+                    .bytes
+                    .fetch_add(data.len() as u64, Ordering::Relaxed);
                 let data = Arc::new(data);
                 self.insert_ready(&mut st, index, data.clone());
                 Ok(data)
             }
             Err(e) => {
+                self.net.retries.fetch_add(1, Ordering::Relaxed);
                 st.blocks.remove(&index);
                 Err(e)
             }
@@ -541,13 +554,15 @@ impl<F: RangeFetch> Inner<F> {
             let body = self
                 .fetcher
                 .open_range(job.start * self.block_size, job.blocks * self.block_size);
-            match body {
+            let end = match body {
                 Ok(body) => self.read_long(&job, body),
                 Err(e) => {
                     self.log_failed(&job, &e);
                     LongEnd::Failed
                 }
-            }
+            };
+            self.count_failure(&end);
+            end
         };
         // The next request starts now rather than when the reader moves: it may
         // be waiting on an earlier block while later ones finish. After a
@@ -582,6 +597,12 @@ impl<F: RangeFetch> Inner<F> {
         };
         for job in refused {
             self.finish_parallel(&job, LongEnd::Stopped);
+        }
+    }
+
+    fn count_failure(&self, end: &LongEnd) {
+        if matches!(end, LongEnd::Failed) {
+            self.net.retries.fetch_add(1, Ordering::Relaxed);
         }
     }
 
@@ -677,6 +698,7 @@ impl<F: RangeFetch> Inner<F> {
                 LongEnd::Failed
             }
         };
+        self.count_failure(&end);
         if matches!(end, LongEnd::Finished) {
             return;
         }
@@ -726,6 +748,7 @@ impl<F: RangeFetch> Inner<F> {
                 match reader.read(&mut data[got..]) {
                     Ok(0) => return Self::broke_off(paused),
                     Ok(n) => {
+                        self.net.bytes.fetch_add(n as u64, Ordering::Relaxed);
                         got += n;
                         left -= n as u64;
                     }
@@ -860,13 +883,15 @@ fn parallel_worker<F: RangeFetch>(weak: Weak<Inner<F>>, rx: Arc<Mutex<Receiver<J
 impl<F: RangeFetch> CachedSource<F> {
     /// Records where the reader is going. With parallel downloads on, requests
     /// for what follows start now, so a skip doesn't wait for its first block.
-    fn note_position(&self, index: u64) {
-        let jobs = {
+    /// Returns whether this read jumped.
+    fn note_position(&self, index: u64) -> bool {
+        let (jobs, jumped) = {
             let mut st = lock(&self.inner.state);
             self.inner.note_position(&mut st, index);
-            self.inner.parallel_jobs(&mut st, index)
+            (self.inner.parallel_jobs(&mut st, index), !st.in_order)
         };
         self.send_parallel(jobs);
+        jumped
     }
 
     fn send_parallel(&self, jobs: Vec<Job>) {
@@ -940,6 +965,10 @@ impl<F: RangeFetch> ByteSource for CachedSource<F> {
         true
     }
 
+    fn net(&self) -> Option<Arc<NetCounters>> {
+        Some(self.inner.net.clone())
+    }
+
     fn size(&self) -> Option<u64> {
         self.inner.fetcher.size()
     }
@@ -957,13 +986,17 @@ impl<F: RangeFetch> ByteSource for CachedSource<F> {
                 break;
             }
             let index = pos / bs;
-            self.note_position(index);
+            let jumped = self.note_position(index);
+            let first_read = (jumped && self.inner.net.take_first_read()).then(Instant::now);
             let block = match self.inner.block(index) {
                 Ok(b) => b,
                 // Return what we have; the caller will ask again.
                 Err(_) if done > 0 => break,
                 Err(e) => return Err(e),
             };
+            if let Some(at) = first_read {
+                self.inner.net.set_first_read(at.elapsed());
+            }
             self.note_access(index);
             let within = (pos - index * bs) as usize;
             if within >= block.len() {
@@ -1893,6 +1926,28 @@ mod tests {
             "{:?}",
             &requests[before..]
         );
+    }
+
+    #[test]
+    fn the_counters_say_what_arrived_what_failed_and_what_a_skip_waited_for() {
+        let (s, wire, _) = long_with(100 * BLOCK, None, true, false);
+        let net = s.net().unwrap();
+        read_range(&s, 0, 20 * BLOCK);
+        assert!(net.bytes.load(Ordering::Relaxed) >= 20 * BLOCK);
+        assert_eq!(net.retries.load(Ordering::Relaxed), 0);
+        assert_eq!(net.first_read(), None, "only a skip is timed");
+
+        net.expect_first_read();
+        read_range(&s, 20 * BLOCK, 21 * BLOCK);
+        assert_eq!(net.first_read(), None, "reading on isn't the skip's read");
+        read_range(&s, 50 * BLOCK, 51 * BLOCK);
+        assert!(net.first_read().is_some());
+
+        *lock(&wire.break_at) = Some((60 * BLOCK + 100, true));
+        read_range(&s, 51 * BLOCK, 90 * BLOCK);
+        wait_until("the broken request is counted", || {
+            net.retries.load(Ordering::Relaxed) > 0
+        });
     }
 
     #[test]

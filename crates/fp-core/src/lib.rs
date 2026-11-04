@@ -24,5 +24,5 @@ pub mod volume;
 
 pub use format::{DetectedFormat, Projection, StereoLayout, VideoFormat};
 pub use playback::{PlaybackStatus, PlayerCommand, SubtitleTrack};
-pub use source::{ByteSource, Entry, EntryKind};
+pub use source::{ByteSource, Entry, EntryKind, NetCounters};
 pub use view::ViewSettings;

@@ -544,6 +544,9 @@ impl App {
                     h.load(o.scripts);
                 }
                 self.playback = Some(o.playback);
+                if let Some(r) = &mut self.perf_readings {
+                    r.new_video();
+                }
                 if let Some(p) = &mut self.playback {
                     p.place_flat(self.offsets.main[0]);
                 }

@@ -24,8 +24,8 @@ impl App {
         }
     }
 
-    /// A flat screen, the control bar, the adjust panel and the browse panel
-    /// back where they start, wherever they were moved. A 180°/360°
+    /// A flat screen, and the panels that move, back where they start,
+    /// wherever they were moved. A 180°/360°
     /// picture's turn is the video's own adjustment and stays (its Reset
     /// puts that back).
     pub(super) fn reset_placement(&mut self) {
@@ -51,11 +51,11 @@ impl App {
             .find(|&i| self.panels[i].visible && self.panels[i].wants_keyboard())
     }
 
-    /// Squeezing a grip on the library panel, the control bar or the
-    /// adjust panel moves it round the viewer with that hand; where it is
-    /// let go is saved: the bar's relative to a flat screen, the adjust
-    /// panel's relative to the bar, so each goes along when what it is
-    /// placed from moves. Squeezing one on the keyboard moves the panel it
+    /// Squeezing a grip on the library panel, the control bar, the adjust
+    /// panel or the performance overlay moves it round the viewer with that
+    /// hand; where it is let go is saved: the bar's relative to a flat screen,
+    /// the adjust panel's relative to the bar, so each goes along when what it
+    /// is placed from moves. Squeezing one on the keyboard moves the panel it
     /// types into, and the keyboard with it; on the audio and subtitles
     /// picker, the bar it sits on. The picture itself is dragged with grip
     /// and trigger (see `controls`).
@@ -68,7 +68,7 @@ impl App {
     ) {
         use crate::controls::{GRIP, angles, wrap};
         // The adjust panel sits beside the control bar, turned with the
-        // picture; the library panel is placed in the room.
+        // picture; the library panel and the overlay are placed in the room.
         let room = anchor.to_scale_rotation_translation().1;
         let rotation = |m: Mat4| m.to_scale_rotation_translation().1;
         // Each is moved about what it is placed from: the adjust panel
@@ -90,7 +90,7 @@ impl App {
         };
         let grab = grab.and_then(|(panel, hand)| match panel {
             KEYBOARD => self.keyboard_target().map(|t| (t, hand)),
-            MAIN | ADJUST => Some((panel, hand)),
+            MAIN | ADJUST | PERF => Some((panel, hand)),
             BAR | TRACKS if self.playback.is_some() => Some((BAR, hand)),
             _ => None,
         });
@@ -100,6 +100,7 @@ impl App {
             let start = match panel {
                 MAIN => self.offsets.main,
                 ADJUST => self.offsets.adjust,
+                PERF => self.offsets.perf,
                 _ => self.offsets.bar,
             };
             self.panel_drag = Some(PanelDrag {
@@ -128,6 +129,7 @@ impl App {
                 match panel {
                     MAIN => self.offsets.main = to,
                     ADJUST => self.offsets.adjust = to,
+                    PERF => self.offsets.perf = to,
                     _ => self.offsets.bar = to,
                 }
                 self.last_activity = Instant::now();
@@ -272,74 +274,67 @@ impl App {
         }
     }
 
-    /// The performance overlay while Settings › General turns it on: low and
-    /// to the left in the view, repainted twice a second.
+    /// The performance overlay while Settings › General turns it on, with new
+    /// readings once a second. It paints what it last read, so painting for
+    /// any other reason can't change a number.
     fn perf_overlay(&mut self, renderer: &mut Renderer, input: &FrameInput) {
         if !self.settings.perf_overlay {
             self.perf.visible = false;
             self.perf_monitor = None;
-            self.frame_times.clear();
-            self.perf_video = None;
+            self.perf_readings = None;
             return;
         }
         let sample = self
             .perf_monitor
             .get_or_insert_with(crate::perf::Monitor::start)
             .latest();
-        if let Some(ms) = input.frame_ms {
-            self.frame_times.push_back(ms);
-            let second = input
-                .display_hz
-                .map_or(90, |hz| hz.round().max(1.0) as usize);
-            while self.frame_times.len() > second {
-                self.frame_times.pop_front();
+        let readings = self.perf_readings.get_or_insert_with(Default::default);
+        readings.frame(input.frame_ms, input.display_hz);
+        let now = Instant::now();
+        if readings.note_due(now) {
+            let open = self
+                .playback
+                .as_ref()
+                .map(|p| (p, p.player.stats(), p.player.net()));
+            let note = open.as_ref().map(|(p, st, net)| crate::perf::VideoNote {
+                serial: st.serial,
+                playing: p.player.state() == PlayerState::Playing,
+                shown: st.frames_shown,
+                stutter: st.frames_dropped + st.stalls,
+                net: net.as_ref().map(|n| {
+                    (
+                        n.bytes.load(std::sync::atomic::Ordering::Relaxed),
+                        n.retries.load(std::sync::atomic::Ordering::Relaxed),
+                    )
+                }),
+            });
+            if readings.note(now, note) {
+                let hardware = self.settings.hardware_decoding;
+                self.perf_shown = ui::perf::Overlay {
+                    drawn: readings.drawn(),
+                    display_hz: input.display_hz,
+                    frame_ms: readings.frame_ms(),
+                    video: open.as_ref().and_then(|(p, st, net)| {
+                        perf_video(p, st, net.is_some(), readings, hardware)
+                    }),
+                    sample,
+                };
+                self.perf.request_repaint();
             }
-        }
-        if let Some((pos, rot)) = input.head {
-            self.perf.pose =
-                Mat4::from_rotation_translation(rot, pos) * Mat4::from_translation(PERF_OFFSET);
         }
         self.perf.visible = true;
         if !self.perf.needs_paint() {
             return;
         }
-        let frame_ms = (!self.frame_times.is_empty()).then(|| {
-            let mut t: Vec<f32> = self.frame_times.iter().copied().collect();
-            t.sort_by(f32::total_cmp);
-            (t[t.len() / 2], t[t.len() - 1])
+        let shown = &self.perf_shown;
+        let mut card = None;
+        let painted = self.perf.paint(renderer, input.time, |ctx| {
+            card = Some(ui::perf::overlay(ctx, shown));
         });
-        let video = self.playback.as_ref().and_then(|p| {
-            let st = p.player.stats();
-            let now = Instant::now();
-            let last = self
-                .perf_video
-                .replace((now, st.frames_shown, st.frames_dropped));
-            let (at, shown, dropped) = last?;
-            let s = now.duration_since(at).as_secs_f32().max(1e-3);
-            let v = p.player.info().video_stream()?;
-            let (badge, _) =
-                ui::player::stream_info_labels(v, &st, self.settings.hardware_decoding);
-            Some((
-                st.frames_shown.saturating_sub(shown) as f32 / s,
-                st.frames_dropped.saturating_sub(dropped) as f32 / s,
-                badge,
-            ))
-        });
-        if self.playback.is_none() {
-            self.perf_video = None;
-        }
-        let overlay = ui::perf::Overlay {
-            frame_ms,
-            display_hz: input.display_hz,
-            video,
-            sample,
-        };
-        if let Err(e) = self
-            .perf
-            .paint(renderer, input.time, |ctx| ui::perf::overlay(ctx, &overlay))
-        {
+        if let Err(e) = painted {
             log::error!("performance overlay: {e}");
         }
+        self.perf.solid = card;
     }
 
     /// Which panels show: the controls hide on their own while a video
@@ -426,15 +421,25 @@ impl App {
         };
         let kb_anchor = place_around(kb_from, ky, kp, 0.0, 0.0);
         self.panels[KEYBOARD].pose = place(kb_anchor, 0.0, 0.95, -0.55, 35.0);
+        // From the same point as the library panel, so it stays in the room or
+        // follows along with the menus.
+        let start = perf_start_yaw(
+            self.panels[MAIN].size.x,
+            self.panels[BAR].size.x,
+            self.perf.size.x,
+        );
+        let [py, pp] = self.offsets.perf;
+        self.perf.pose = place_around(anchor, start + py, pp, PERF_DISTANCE, 0.0);
     }
 
     /// Pointer rays to panel events, grips moving panels, and controller
     /// commands; returns the haptic pulses to play.
     fn route_input(&mut self, input: &FrameInput, anchor: Mat4) -> Vec<(usize, f32, i64)> {
+        self.pointer.rays_shown = self.any_ui();
         let routed = {
             let [a, b, c, d, e, _toast] = &mut self.panels;
             self.pointer
-                .route(&mut [a, b, c, d, e], &input.hands, input.dt)
+                .route(&mut [a, b, c, d, e, &mut self.perf], &input.hands, input.dt)
         };
         let mut buzz = Vec::new();
         self.move_panels(routed.grab, &input.hands, anchor, &mut buzz);
@@ -443,7 +448,7 @@ impl App {
         }
         self.controller(
             input,
-            routed.over_ui,
+            routed.over_ui || self.panel_drag.is_some(),
             routed.click_outside,
             anchor,
             &mut buzz,
@@ -619,25 +624,26 @@ impl App {
                 quads.push(q);
             }
         }
-        for p in self.panels.iter_mut() {
+        for p in self.panels.iter_mut().chain([&mut self.perf]) {
             p.update_fade(input.dt);
         }
-        let mut order: Vec<usize> = (0..self.panels.len())
-            .filter(|&i| self.panels[i].shown())
+        let mut order: Vec<(u64, &Panel)> = self
+            .panels
+            .iter()
+            .enumerate()
+            .map(|(i, p)| (i as u64, p))
+            .chain([(PERF_LAYER, &self.perf)])
+            .filter(|(_, p)| p.shown())
             .collect();
-        order.sort_by(|&a, &b| {
-            let da = (self.panels[a].pose.w_axis.truncate() - eye).length();
-            let db = (self.panels[b].pose.w_axis.truncate() - eye).length();
-            db.total_cmp(&da)
-        });
+        let distance = |p: &Panel| (p.pose.w_axis.truncate() - eye).length();
+        order.sort_by(|(_, a), (_, b)| distance(b).total_cmp(&distance(a)));
         let mut layers = Vec::new();
-        for i in order {
-            let p = &self.panels[i];
+        for (key, p) in order {
             match p.id {
                 // Fully shown: the compositor draws it. Fading: drawn into
                 // the eyes, where opacity works.
                 Some(panel) if input.layers && p.fully_shown() => layers.push(LayerDraw::Panel {
-                    key: i as u64,
+                    key,
                     panel,
                     px: p.px,
                     pose: p.pose,
@@ -646,33 +652,22 @@ impl App {
                 _ => quads.extend(p.quad()),
             }
         }
-        // The performance overlay rides with the head, nearest of all.
-        self.perf.update_fade(input.dt);
-        if self.perf.shown() {
-            match self.perf.id {
-                Some(panel) if input.layers && self.perf.fully_shown() => {
-                    layers.push(LayerDraw::Panel {
-                        key: PERF_LAYER,
-                        panel,
-                        px: self.perf.px,
-                        pose: self.perf.pose,
-                        size: self.perf.size,
-                    });
-                }
-                _ => quads.extend(self.perf.quad()),
-            }
-        }
-        let any_ui = self
-            .panels
-            .iter()
-            .enumerate()
-            .any(|(i, p)| i != TOAST && p.visible);
+        let any_ui = self.any_ui();
         if input.layers {
             layers.extend(self.pointer.ray_layers(eye, any_ui));
         } else {
             quads.extend(self.pointer.quads(eye, any_ui));
         }
         (quads, layers)
+    }
+
+    /// A panel that the rays are drawn for is up. The toast and the
+    /// performance overlay don't count: they stay up while you watch.
+    fn any_ui(&self) -> bool {
+        self.panels
+            .iter()
+            .enumerate()
+            .any(|(i, p)| i != TOAST && p.visible)
     }
 
     pub(super) fn subtitles(
@@ -768,6 +763,54 @@ fn toast_pose(bar: &Panel, above: Option<f32>, toast: &Panel) -> Mat4 {
     bar.pose * Mat4::from_translation(Vec3::new(0.0, y, 0.0))
 }
 
+/// Degrees left of forward where the performance overlay starts: just clear of
+/// the library panel and the control bar, given their widths and its own.
+fn perf_start_yaw(library: f32, bar: f32, perf: f32) -> f32 {
+    let half = |width: f32, distance: f32| (width / 2.0 / distance).atan().to_degrees();
+    half(library, 1.5).max(half(bar, 1.05)) + 2.0 + half(perf, PERF_DISTANCE)
+}
+
+/// The overlay's rows for the open video; none without a picture.
+fn perf_video(
+    p: &Playback,
+    st: &fp_media::Stats,
+    on_network: bool,
+    readings: &crate::perf::Readings,
+    hardware_decoding: bool,
+) -> Option<ui::perf::Video> {
+    use ui::perf::VideoState;
+    let v = p.player.info().video_stream()?;
+    let (decoder, _) = ui::player::stream_info_labels(v, st, hardware_decoding);
+    let state = match p.player.state() {
+        PlayerState::Playing => VideoState::Playing(readings.video_fps()),
+        PlayerState::Paused => VideoState::Paused,
+        PlayerState::Buffering => VideoState::Buffering,
+        PlayerState::Ended | PlayerState::Failed => VideoState::Ended,
+    };
+    let mb_s = readings.mb_per_s();
+    Some(ui::perf::Video {
+        state,
+        film_fps: v.fps as f32,
+        dropped: st.frames_dropped,
+        stalls: st.stalls,
+        stuttered: readings.stuttered(),
+        decoder,
+        buffer: (st.read_ahead.0 as f32, st.read_ahead.1 as f32),
+        read_to_end: st.read_to_end,
+        network: on_network.then(|| ui::perf::Network {
+            mb_s,
+            idle: (st.read_enough || st.read_to_end) && mb_s.is_none_or(|m| m < 0.05),
+            retries: readings.retries(),
+            retried: readings.retried(),
+        }),
+        last_jump: st.last_jump.map(|j| ui::perf::LastJump {
+            skip: j.skip,
+            picture_s: j.picture.as_secs_f32(),
+            first_read_s: j.first_read.map(|d| d.as_secs_f32()),
+        }),
+    })
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -787,6 +830,26 @@ mod tests {
         );
         let with_picker = height(toast_pose(&bar, Some(0.5), &toast));
         assert!((with_picker.y - alone.y - 0.5).abs() < 1e-5);
+    }
+
+    #[test]
+    fn the_performance_overlay_starts_in_view_and_clear_of_the_other_panels() {
+        let half = |width: f32, distance: f32| (width / 2.0 / distance).atan().to_degrees();
+        let library = floating_panel([1600, 1000], 1.8, 1.25);
+        for scale in [0.8, 1.0, 1.5] {
+            let mut bar = growing_panel(BAR_PX, BAR_PX[0] as f32 * BAR_M_PER_PX, 1.25);
+            let mut perf = perf_panel();
+            bar.set_scale(scale);
+            perf.set_scale(scale);
+            let yaw = perf_start_yaw(library.size.x, bar.size.x, perf.size.x);
+            let inner = yaw - half(perf.size.x, PERF_DISTANCE);
+            assert!(inner > half(library.size.x, 1.5), "{scale}: {inner}");
+            assert!(inner > half(bar.size.x, 1.05), "{scale}: {inner}");
+            if scale == 1.0 {
+                let outer = yaw + half(perf.size.x, PERF_DISTANCE);
+                assert!(outer < 55.0, "{outer}° is beyond the edge of the view");
+            }
+        }
     }
 
     #[test]

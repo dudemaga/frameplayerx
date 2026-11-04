@@ -1383,6 +1383,10 @@ impl ByteSource for HttpFile {
         true
     }
 
+    fn net(&self) -> Option<std::sync::Arc<fp_core::NetCounters>> {
+        self.src.net()
+    }
+
     fn size(&self) -> Option<u64> {
         self.src.size()
     }

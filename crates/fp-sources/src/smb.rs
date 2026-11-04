@@ -421,11 +421,12 @@ mod imp {
     use crate::cache::{CacheOptions, CachedSource, RangeFetch};
     use crate::config::SmbConfig;
     use crate::error::{Error, Result};
-    use fp_core::source::ByteSource;
+    use fp_core::source::{ByteSource, NetCounters};
     use fp_core::sync::lock;
     use smb2::{ClientConfig, ErrorKind, FileReader, SmbClient, Tree};
     use std::collections::HashMap;
     use std::io;
+    use std::sync::atomic::Ordering;
     use std::sync::{Arc, Mutex, OnceLock};
     use std::time::{Duration, UNIX_EPOCH};
 
@@ -634,16 +635,19 @@ mod imp {
         pub(super) fn open_file(&self, loc: &SmbLocation) -> Result<Arc<dyn ByteSource>> {
             let url = loc.to_url();
             let open = self.sessions.open_file(loc, &url)?;
+            let net = Arc::new(NetCounters::default());
             let fetcher = SmbFetcher {
                 sessions: self.sessions.clone(),
                 size: open.reader.size(),
                 loc: loc.clone(),
                 open: Mutex::new(open),
                 url,
+                net: net.clone(),
             };
-            Ok(Arc::new(CachedSource::new(
+            Ok(Arc::new(CachedSource::counted(
                 fetcher,
                 &CacheOptions::default(),
+                net,
             )))
         }
     }
@@ -671,6 +675,7 @@ mod imp {
         open: Mutex<OpenFile>,
         size: u64,
         url: String,
+        net: Arc<NetCounters>,
     }
 
     impl SmbFetcher {
@@ -681,6 +686,7 @@ mod imp {
             if open.generation != failed.generation {
                 return Ok(open.clone());
             }
+            self.net.retries.fetch_add(1, Ordering::Relaxed);
             self.sessions.discard(&failed.session);
             let mut fresh = self.sessions.open_file(&self.loc, &self.url)?;
             fresh.generation = failed.generation + 1;
