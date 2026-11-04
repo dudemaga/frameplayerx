@@ -398,7 +398,7 @@ VK_ICD_FILENAMES=/usr/share/vulkan/icd.d/lvp_icd.json \
 
 ### Measuring stream reads
 
-`--seek-test` reports what the demuxer read by each first picture and skip, and ends with medians. `--play SECONDS` plays first, reporting every 10 s. `--trace-reads` prints every read's offset and length, and each jump with how much was read in order before it. `--read-test SECONDS` plays nothing and just reads from the start as fast as the source delivers.
+`--seek-test` reports what the demuxer read by each first picture and skip, and ends with medians. `--play SECONDS` plays first, reporting every 10 s. `--trace-reads` prints every read's offset and length, and each jump with how much was read in order before it. `--read-test SECONDS` plays nothing and just reads from the start as fast as the source delivers. `--read-ahead SECONDS` replaces the player's buffer of video read ahead.
 
 ```bash
 frameplayerx --seek-test URL --rounds 1 --play 60 --seeks 8 --step 120   # playback and skips

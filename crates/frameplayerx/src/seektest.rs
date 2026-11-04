@@ -36,6 +36,8 @@ pub struct SeekTestOptions {
     pub trace_reads: bool,
     /// Instead of playing, reads straight through for this many seconds.
     pub read_test: Option<f64>,
+    /// Seconds of video to read ahead, in place of the player's defaults.
+    pub read_ahead: Option<f64>,
 }
 
 impl Default for SeekTestOptions {
@@ -48,6 +50,7 @@ impl Default for SeekTestOptions {
             play: None,
             trace_reads: false,
             read_test: None,
+            read_ahead: None,
         }
     }
 }
@@ -196,6 +199,10 @@ impl ByteSource for ReadProbe {
     fn streamed(&self) -> bool {
         self.src.streamed()
     }
+
+    fn remote(&self) -> bool {
+        self.src.remote()
+    }
 }
 
 /// The middle value, or the mean of the middle two.
@@ -218,6 +225,8 @@ struct Summary {
     skip_ms: Vec<f64>,
     skip_mib: Vec<f64>,
     first_read_ms: Vec<f64>,
+    thrown_away_mib: Vec<f64>,
+    most_queued: u64,
     played: Duration,
     shown: u64,
     dropped: u64,
@@ -254,7 +263,11 @@ impl Summary {
                 self.first_read_ms.len()
             );
         }
+        if let Some(thrown) = median(&self.thrown_away_mib) {
+            println!("  buffer thrown away by a skip: median {thrown:.1} MiB");
+        }
         if !self.played.is_zero() {
+            println!("  most queued: {:.1} MiB", mib(self.most_queued));
             println!(
                 "  played {:.0} s: {} frames, {} dropped, {} stalls, read {:.1} MB/s, waiting on reads {:.0}% of the time",
                 self.played.as_secs_f64(),
@@ -345,6 +358,7 @@ fn play_reporting(p: &Player, tally: &Mutex<ReadTally>, secs: f64, summary: &mut
         summary.stalls += stalls;
         summary.played_bytes += bytes;
         summary.played_waited += waited;
+        summary.most_queued = summary.most_queued.max(p.stats().bytes_queued as u64);
     }
 }
 
@@ -427,10 +441,13 @@ pub fn run(location: &str, opts: &SeekTestOptions) -> Result<(), String> {
             started: t,
             trace: opts.trace_reads,
         });
+        let defaults = PlayerConfig::default();
         let cfg = PlayerConfig {
             hw_decode: opts.hw,
             audio: Backend::Null,
-            ..Default::default()
+            read_ahead_secs: opts.read_ahead.unwrap_or(defaults.read_ahead_secs),
+            remote_read_ahead_secs: opts.read_ahead.unwrap_or(defaults.remote_read_ahead_secs),
+            ..defaults
         };
         let p = Player::open(src, &name, cfg, |_| fp_media::Tracks::default())
             .map_err(|e| format!("{name}: {e}"))?;
@@ -475,6 +492,9 @@ pub fn run(location: &str, opts: &SeekTestOptions) -> Result<(), String> {
             if duration > 0.0 && target > duration - 5.0 {
                 target = 5.0_f64.min(duration / 2.0);
             }
+            summary
+                .thrown_away_mib
+                .push(mib(p.stats().bytes_queued as u64));
             let before = {
                 let mut t = lock(&tally);
                 t.start_skip();
@@ -653,6 +673,9 @@ mod tests {
         fn streamed(&self) -> bool {
             true
         }
+        fn remote(&self) -> bool {
+            true
+        }
     }
 
     #[test]
@@ -667,6 +690,7 @@ mod tests {
         assert_eq!(probe.size(), Some(100));
         assert_eq!(probe.describe(), "bytes");
         assert!(probe.streamed(), "demuxers must not seek in a live stream");
+        assert!(probe.remote(), "the player keeps more in hand");
         let mut buf = [0u8; 60];
         assert_eq!(probe.read_at(90, &mut buf).unwrap(), 10);
         assert_eq!(buf[..10], [7; 10]);
