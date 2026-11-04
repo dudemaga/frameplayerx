@@ -1207,10 +1207,15 @@ mod linux {
             if self.codec != Codec::Hevc {
                 return Ok(());
             }
-            // SAFETY: par and the initialised filter's par_out are valid;
-            // each extradata holds extradata_size bytes.
+            // SAFETY: par, the filter and its par_out are null or valid; each
+            // extradata holds extradata_size bytes.
             unsafe {
-                let (p, out) = (&*par, &*(*self.bsf).par_out);
+                let (Some(p), Some(out)) = (
+                    par.as_ref(),
+                    self.bsf.as_ref().and_then(|b| b.par_out.as_ref()),
+                ) else {
+                    return Ok(());
+                };
                 if p.extradata.is_null() || p.extradata_size < 3 || out.extradata.is_null() {
                     return Ok(());
                 }
