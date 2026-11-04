@@ -65,8 +65,9 @@ const USAGE: &str = "usage: frameplayerx [--verbose] [--exit-after SECONDS] [FIL
        frameplayerx --decode-bench FILE [--frames N] [--sw] [--seek SECONDS]
                    [--checksum N,N,...]  (decode only; print decoder and fps)
        frameplayerx --seek-test FILE|URL [--seeks N] [--step SECONDS] [--rounds N] [--sw]
+                   [--play SECONDS] [--trace-reads] [--read-test SECONDS]
                    (skip through a video headless; checks buffering and that
-                   hardware decoders are given back)
+                   hardware decoders are given back, and measures reads)
        frameplayerx --version";
 
 fn parse_args() -> Result<Args, String> {
@@ -122,6 +123,21 @@ fn parse_args() -> Result<Args, String> {
                     .next()
                     .and_then(|s| s.parse().ok())
                     .ok_or("--rounds needs a number")?;
+            }
+            "--play" => {
+                a.seek_opts.play = Some(
+                    it.next()
+                        .and_then(|s| s.parse().ok())
+                        .ok_or("--play needs seconds")?,
+                );
+            }
+            "--trace-reads" => a.seek_opts.trace_reads = true,
+            "--read-test" => {
+                a.seek_opts.read_test = Some(
+                    it.next()
+                        .and_then(|s| s.parse().ok())
+                        .ok_or("--read-test needs seconds")?,
+                );
             }
             "--seek" => {
                 a.bench_opts.seek = Some(
