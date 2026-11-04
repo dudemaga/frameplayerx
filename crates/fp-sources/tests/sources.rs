@@ -23,6 +23,7 @@ fn http_config(url: String, credentials: Option<Credentials>) -> HttpConfig {
         url,
         credentials,
         insecure_tls: false,
+        parallel_downloads: false,
     }
 }
 
@@ -356,6 +357,7 @@ fn feed(url: String, credentials: Option<Credentials>, max_height: Option<u32>) 
         url,
         credentials,
         insecure_tls: false,
+        parallel_downloads: false,
         max_height,
     }
 }

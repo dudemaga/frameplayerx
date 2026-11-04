@@ -1153,3 +1153,58 @@ fn closing_doesnt_wait_for_a_silent_server() {
         t.elapsed()
     );
 }
+
+fn parallel_blocks(read_timeout: Duration) -> HttpOptions {
+    let mut opts = small_blocks(read_timeout);
+    opts.cache.parallel_requests = 4;
+    opts
+}
+
+#[test]
+fn parallel_downloads_read_every_byte_over_http() {
+    let data = Arc::new(pattern(2 * MIB as usize));
+    let (url, connections) = range_server(data.clone(), 64 * 1024, Duration::ZERO, usize::MAX);
+    let f = HttpClient::new(parallel_blocks(Duration::from_secs(5)), None)
+        .open(&url)
+        .unwrap();
+    assert!(read_all(&f, 1500) == *data);
+    assert!(f.stats().long_requests > 0);
+    let opened = connections.load(Ordering::SeqCst);
+    assert!(opened <= 6, "{opened} connections");
+}
+
+#[test]
+fn servers_that_cap_their_ranges_are_read_in_full_with_parallel_on() {
+    for cap in [1024, 3 * 4096, 3 * 4096 + 100] {
+        let data = Arc::new(pattern(100 * 1024));
+        let d = data.clone();
+        let server = TestServer::start(move |req| capped(req, &d, cap));
+        let f = HttpClient::new(parallel_blocks(Duration::from_secs(5)), None)
+            .open(&server.url("/x.mp4"))
+            .unwrap();
+        assert!(read_all(&f, 1500) == *data, "cap {cap}");
+    }
+}
+
+#[test]
+fn a_200_reply_mid_file_is_rejected_with_parallel_on() {
+    let data = Arc::new(pattern(400 * 1024));
+    let d = data.clone();
+    let server = TestServer::start(move |req| {
+        let start: usize = req
+            .header("range")
+            .and_then(|r| r.strip_prefix("bytes="))
+            .and_then(|r| r.split_once('-'))
+            .and_then(|(a, _)| a.parse().ok())
+            .unwrap_or(0);
+        if start < 40 * 4096 {
+            return serve_bytes(req, &d, true);
+        }
+        resp(200, d.to_vec(), &[])
+    });
+    let f = HttpClient::new(parallel_blocks(Duration::from_secs(5)), None)
+        .open(&server.url("/x.mp4"))
+        .unwrap();
+    let e = read_until_error(&f, &data);
+    assert!(e.to_string().contains("range"), "{e}");
+}

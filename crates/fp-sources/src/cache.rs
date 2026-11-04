@@ -16,8 +16,8 @@
 
 use fp_core::ByteSource;
 use fp_core::sync::lock;
-use std::collections::HashMap;
 use std::collections::hash_map::Entry;
+use std::collections::{HashMap, HashSet};
 use std::io::{self, Read};
 use std::sync::mpsc::{self, Receiver, Sender};
 use std::sync::{Arc, Condvar, Mutex, PoisonError, Weak};
@@ -29,6 +29,12 @@ const GROW_AFTER: u64 = 4;
 /// Blocks left behind the reader when a long request fills the cache: a
 /// demuxer sometimes steps back a little.
 const KEEP_BEHIND: usize = 2;
+/// Requests at once for a source with parallel downloads on.
+const PARALLEL_REQUESTS: usize = 4;
+/// Most blocks in each of those: short, so a skip leaves little behind.
+const PARALLEL_BLOCKS: u64 = 4;
+/// Requests to finish before a source that backed off tries one more at once.
+const STEP_UP_AFTER: u32 = 16;
 
 /// Fetches byte ranges from the underlying file.
 pub(crate) trait RangeFetch: Send + Sync + 'static {
@@ -75,6 +81,20 @@ pub struct CacheOptions {
     pub read_ahead: bool,
     /// Most blocks one request may ask for. Default 64.
     pub longest_request: usize,
+    /// Requests at once once a video is playing. Default 1, one growing
+    /// request. More can be much faster on a server that gives each connection
+    /// little, and slower on one that has to seek, so a source's owner chooses.
+    pub parallel_requests: usize,
+}
+
+impl CacheOptions {
+    /// The options for a source with its parallel downloads switch `on`.
+    pub fn for_downloads(on: bool) -> CacheOptions {
+        CacheOptions {
+            parallel_requests: if on { PARALLEL_REQUESTS } else { 1 },
+            ..CacheOptions::default()
+        }
+    }
 }
 
 impl Default for CacheOptions {
@@ -84,6 +104,7 @@ impl Default for CacheOptions {
             max_blocks: 8,
             read_ahead: true,
             longest_request: 64,
+            parallel_requests: 1,
         }
     }
 }
@@ -128,6 +149,16 @@ struct State {
     /// ranges or keep failing long ones.
     longest: u64,
     closing: bool,
+    /// A run has reached [`GROW_AFTER`], so this is playback and not a probe.
+    playing: bool,
+    /// Blocks held for parallel requests, released when the reader jumps.
+    held: HashSet<u64>,
+    /// Parallel requests running, even ones a jump has left behind.
+    in_flight: usize,
+    /// How many may run at once now, lowered when requests fail.
+    parallel_now: usize,
+    /// Requests finished since that was last changed.
+    parallel_ok: u32,
 }
 
 struct Inner<F: RangeFetch> {
@@ -140,13 +171,16 @@ struct Inner<F: RangeFetch> {
     /// Wakes a long request waiting for the reader to make room.
     wake: Condvar,
     ahead: Mutex<Option<Sender<Job>>>,
+    parallel: usize,
+    pool: Mutex<Option<Sender<Job>>>,
 }
 
-/// Work for the read-ahead thread.
+/// Work for a read-ahead thread.
 struct Job {
     start: u64,
     blocks: u64,
     jumps: u64,
+    parallel: bool,
 }
 
 /// How reading a long request's body ended.
@@ -175,11 +209,17 @@ pub(crate) struct CachedSource<F: RangeFetch> {
 
 impl<F: RangeFetch> CachedSource<F> {
     pub(crate) fn new(fetcher: F, opts: &CacheOptions) -> Self {
+        let parallel = opts.parallel_requests.max(1);
+        let room_for_parallel = if parallel > 1 {
+            parallel * PARALLEL_BLOCKS as usize + KEEP_BEHIND
+        } else {
+            0
+        };
         CachedSource {
             inner: Arc::new(Inner {
                 fetcher,
                 block_size: opts.block_size.max(4096) as u64,
-                max_blocks: opts.max_blocks.max(3),
+                max_blocks: opts.max_blocks.max(3).max(room_for_parallel),
                 read_ahead: opts.read_ahead,
                 state: Mutex::new(State {
                     blocks: HashMap::new(),
@@ -194,10 +234,17 @@ impl<F: RangeFetch> CachedSource<F> {
                     frontier: None,
                     longest: opts.longest_request.max(1) as u64,
                     closing: false,
+                    playing: false,
+                    held: HashSet::new(),
+                    in_flight: 0,
+                    parallel_now: parallel,
+                    parallel_ok: 0,
                 }),
                 loaded: Condvar::new(),
                 wake: Condvar::new(),
                 ahead: Mutex::new(None),
+                parallel,
+                pool: Mutex::new(None),
             }),
         }
     }
@@ -273,10 +320,10 @@ impl<F: RangeFetch> Inner<F> {
                 .iter()
                 .filter(|(i, _)| **i != index)
                 .filter_map(|(i, s)| match s {
-                    // A block about to be read goes last, however long ago
+                    // The block being read and those about to be go last, however long ago
                     // it landed.
                     Slot::Ready { used, .. } => {
-                        Some((*i > reader && *i - reader <= near, *used, *i))
+                        Some((*i >= reader && *i - reader <= near, *used, *i))
                     }
                     Slot::Loading => None,
                 })
@@ -293,15 +340,20 @@ impl<F: RangeFetch> Inner<F> {
     fn note_position(&self, st: &mut State, index: u64) {
         let last = st.last_block;
         let in_order = last.is_some_and(|l| {
-            index == l || index == l + 1 || st.frontier.is_some_and(|f| index > l && index <= f)
+            index == l
+                || index == l + 1
+                || st.frontier.is_some_and(|f| index > l && index <= f)
+                || (index > l && st.held.contains(&index))
         });
         if in_order {
             st.run += index - last.unwrap_or(index);
+            st.playing |= st.run >= GROW_AFTER;
         } else {
             st.run = 0;
             st.jumps += 1;
             st.frontier = None;
             self.release_reserved(st);
+            self.release_held(st);
         }
         st.in_order = in_order;
         st.last_block = Some(index);
@@ -319,11 +371,20 @@ impl<F: RangeFetch> Inner<F> {
         }
     }
 
+    fn release_held(&self, st: &mut State) {
+        let held: Vec<u64> = st.held.drain().collect();
+        for i in held {
+            if matches!(st.blocks.get(&i), Some(Slot::Loading)) {
+                st.blocks.remove(&i);
+            }
+        }
+        self.loaded.notify_all();
+    }
+
     /// Returns block `index`, fetching it (or waiting for the read-ahead
     /// thread to finish fetching it) when needed.
     fn block(&self, index: u64) -> io::Result<Arc<Vec<u8>>> {
         let mut st = lock(&self.state);
-        self.note_position(&mut st, index);
         loop {
             st.tick += 1;
             let tick = st.tick;
@@ -408,7 +469,161 @@ impl<F: RangeFetch> Inner<F> {
             start: next,
             blocks,
             jumps: st.jumps,
+            parallel: false,
         })
+    }
+
+    fn parallel_on(&self) -> bool {
+        self.parallel > 1 && self.read_ahead && self.fetcher.long_ranges()
+    }
+
+    /// The parallel requests to start for a reader on block `index`, once the
+    /// video is playing: each small at first and growing as reads go on, as
+    /// many as may run, up to as far ahead as the cache holds. Their blocks are
+    /// held so a reader that gets there first waits for them.
+    fn parallel_jobs(&self, st: &mut State, index: u64) -> Vec<Job> {
+        let mut jobs = Vec::new();
+        if !self.parallel_on() || !st.playing {
+            return jobs;
+        }
+        let want = request_blocks(st.run, st.longest.min(PARALLEL_BLOCKS));
+        let size = self.fetcher.size().unwrap_or(0);
+        let room = self.room() as u64;
+        let free = |st: &State, i: u64| {
+            i * self.block_size < size && i - index <= room && !st.blocks.contains_key(&i)
+        };
+        let mut next = index + 1;
+        while st.in_flight < st.parallel_now {
+            while st.blocks.contains_key(&next) {
+                next += 1;
+            }
+            // Waiting for room for all of it: filling the cache a block at a
+            // time would turn every request into a one-block request.
+            if !free(st, next) || next + want - 1 - index > room {
+                break;
+            }
+            let mut blocks = 1;
+            while blocks < want && free(st, next + blocks) {
+                blocks += 1;
+            }
+            for i in next..next + blocks {
+                st.blocks.insert(i, Slot::Loading);
+                st.held.insert(i);
+            }
+            st.in_flight += 1;
+            jobs.push(Job {
+                start: next,
+                blocks,
+                jumps: st.jumps,
+                parallel: true,
+            });
+            next += blocks;
+        }
+        jobs
+    }
+
+    /// Runs one parallel request. If it ends early, its blocks go back to
+    /// whatever reads them next.
+    fn run_parallel(&self, job: Job) {
+        let end = if self.stop_reason(&job).is_some() {
+            LongEnd::Stopped
+        } else if job.blocks == 1 {
+            lock(&self.state).stats.read_aheads += 1;
+            match self.load(job.start) {
+                Ok(_) => LongEnd::Finished,
+                Err(e) => {
+                    self.log_failed(&job, &e);
+                    LongEnd::Failed
+                }
+            }
+        } else {
+            lock(&self.state).stats.long_requests += 1;
+            let body = self
+                .fetcher
+                .open_range(job.start * self.block_size, job.blocks * self.block_size);
+            match body {
+                Ok(body) => self.read_long(&job, body),
+                Err(e) => {
+                    self.log_failed(&job, &e);
+                    LongEnd::Failed
+                }
+            }
+        };
+        // The next request starts now rather than when the reader moves: it may
+        // be waiting on an earlier block while later ones finish. After a
+        // failure, it's left to the reader, or a dead server would be retried
+        // for as long as nobody reads.
+        let carry_on = !matches!(end, LongEnd::Failed);
+        self.finish_parallel(&job, end);
+        if carry_on {
+            let more = {
+                let mut st = lock(&self.state);
+                if st.closing {
+                    Vec::new()
+                } else {
+                    let at = st.last_block.unwrap_or(0);
+                    self.parallel_jobs(&mut st, at)
+                }
+            };
+            self.queue_parallel(more);
+        }
+    }
+
+    /// Hands requests to the threads running them.
+    fn queue_parallel(&self, jobs: Vec<Job>) {
+        let refused: Vec<Job> = {
+            let pool = lock(&self.pool);
+            jobs.into_iter()
+                .filter_map(|job| match pool.as_ref() {
+                    Some(tx) => tx.send(job).err().map(|e| e.0),
+                    None => Some(job),
+                })
+                .collect()
+        };
+        for job in refused {
+            self.finish_parallel(&job, LongEnd::Stopped);
+        }
+    }
+
+    fn log_failed(&self, job: &Job, e: &io::Error) {
+        log::debug!(
+            "request at block {} failed for {}: {e}",
+            job.start,
+            self.fetcher.describe()
+        );
+    }
+
+    /// Releases what a parallel request still holds, and backs off after a
+    /// failure: fewer at once and shorter, stepping back up slowly.
+    fn finish_parallel(&self, job: &Job, end: LongEnd) {
+        let mut st = lock(&self.state);
+        st.in_flight -= 1;
+        if st.jumps == job.jumps {
+            for i in job.start..job.start + job.blocks {
+                if st.held.remove(&i) && matches!(st.blocks.get(&i), Some(Slot::Loading)) {
+                    st.blocks.remove(&i);
+                }
+            }
+            match end {
+                LongEnd::Failed => {
+                    st.parallel_now = (st.parallel_now / 2).max(1);
+                    st.parallel_ok = 0;
+                    if job.blocks > 1 {
+                        st.longest = st.longest.min((job.blocks / 2).max(1));
+                    }
+                }
+                LongEnd::Finished => {
+                    st.parallel_ok += 1;
+                    if st.parallel_ok >= STEP_UP_AFTER {
+                        st.parallel_ok = 0;
+                        st.parallel_now = (st.parallel_now + 1).min(self.parallel);
+                    }
+                }
+                LongEnd::Stopped | LongEnd::ClosedWhilePaused => {}
+            }
+        }
+        drop(st);
+        self.loaded.notify_all();
     }
 
     /// Gives up a job that never ran. A jump since then has already released
@@ -496,7 +711,13 @@ impl<F: RangeFetch> Inner<F> {
         let mut left = len;
         let mut paused = false;
         for index in job.start..=last {
-            if let Some(why) = self.wait_for_room(job, index, &mut paused) {
+            // Parallel requests only start with room for all their blocks.
+            let stop = if job.parallel {
+                self.stop_reason(job)
+            } else {
+                self.wait_for_room(job, index, &mut paused)
+            };
+            if let Some(why) = stop {
                 return Self::leave(reader, left, bs, why);
             }
             let mut data = vec![0u8; left.min(bs) as usize];
@@ -586,10 +807,14 @@ impl<F: RangeFetch> Inner<F> {
         let mut st = lock(&self.state);
         st.stats.read_aheads += 1;
         self.insert_ready(&mut st, index, Arc::new(data));
-        if index == last {
+        if job.parallel {
+            if st.jumps == job.jumps {
+                st.held.remove(&index);
+            }
+        } else if index == last {
             st.streaming = false;
         }
-        if st.jumps == job.jumps {
+        if !job.parallel && st.jumps == job.jumps {
             st.reserved = None;
             st.frontier = None;
             if index < last {
@@ -623,14 +848,68 @@ fn read_ahead_worker<F: RangeFetch>(weak: Weak<Inner<F>>, rx: Receiver<Job>) {
     }
 }
 
+fn parallel_worker<F: RangeFetch>(weak: Weak<Inner<F>>, rx: Arc<Mutex<Receiver<Job>>>) {
+    loop {
+        let job = lock(&rx).recv();
+        let Ok(job) = job else { break };
+        let Some(inner) = weak.upgrade() else { break };
+        inner.run_parallel(job);
+    }
+}
+
 impl<F: RangeFetch> CachedSource<F> {
+    /// Records where the reader is going. With parallel downloads on, requests
+    /// for what follows start now, so a skip doesn't wait for its first block.
+    fn note_position(&self, index: u64) {
+        let jobs = {
+            let mut st = lock(&self.inner.state);
+            self.inner.note_position(&mut st, index);
+            self.inner.parallel_jobs(&mut st, index)
+        };
+        self.send_parallel(jobs);
+    }
+
+    fn send_parallel(&self, jobs: Vec<Job>) {
+        if jobs.is_empty() {
+            return;
+        }
+        let inner = &self.inner;
+        {
+            let mut pool = lock(&inner.pool);
+            if pool.is_none() {
+                let (tx, rx) = mpsc::channel();
+                let rx = Arc::new(Mutex::new(rx));
+                for _ in 0..inner.parallel {
+                    let (weak, rx) = (Arc::downgrade(inner), rx.clone());
+                    match std::thread::Builder::new()
+                        .name("fp-read-ahead".into())
+                        .spawn(move || parallel_worker(weak, rx))
+                    {
+                        Ok(_) => *pool = Some(tx.clone()),
+                        Err(e) => log::warn!("cannot start read-ahead thread: {e}"),
+                    }
+                }
+            }
+        }
+        inner.queue_parallel(jobs);
+    }
+
     /// Starts fetching ahead of block `index` when access looks sequential.
     fn note_access(&self, index: u64) {
         let inner = &self.inner;
         if !inner.read_ahead || inner.fetcher.sequential_only() {
             return;
         }
-        let Some(job) = inner.next_job(&mut lock(&inner.state), index) else {
+        let mut st = lock(&inner.state);
+        if inner.parallel_on() && st.playing {
+            let jobs = inner.parallel_jobs(&mut st, index);
+            drop(st);
+            self.send_parallel(jobs);
+            return;
+        }
+        let job = inner.next_job(&mut st, index);
+        drop(st);
+        let Some(job) = job else {
             return;
         };
         let mut ahead = lock(&inner.ahead);
@@ -678,6 +957,7 @@ impl<F: RangeFetch> ByteSource for CachedSource<F> {
                 break;
             }
             let index = pos / bs;
+            self.note_position(index);
             let block = match self.inner.block(index) {
                 Ok(b) => b,
                 // Return what we have; the caller will ask again.
@@ -947,9 +1227,30 @@ mod tests {
         /// A long body breaks off on reaching this offset, once: with an
         /// error, or by just ending.
         break_at: Mutex<Option<(u64, bool)>>,
+        /// Requests running now, and the most at once.
+        active: AtomicUsize,
+        peak: AtomicUsize,
+        /// Time each read of a request takes.
+        pace_ms: AtomicUsize,
     }
 
     impl Wire {
+        fn enter(&self) {
+            let now = self.active.fetch_add(1, Ordering::SeqCst) + 1;
+            self.peak.fetch_max(now, Ordering::SeqCst);
+        }
+
+        fn leave(&self) {
+            self.active.fetch_sub(1, Ordering::SeqCst);
+        }
+
+        fn pace(&self) {
+            let ms = self.pace_ms.load(Ordering::SeqCst) as u64;
+            if ms > 0 {
+                std::thread::sleep(Duration::from_millis(ms));
+            }
+        }
+
         fn requests(&self) -> Vec<(u64, u64)> {
             lock(&self.requests).clone()
         }
@@ -972,6 +1273,9 @@ mod tests {
     impl RangeFetch for Long {
         fn fetch(&self, offset: u64, len: usize) -> io::Result<Vec<u8>> {
             lock(&self.wire.requests).push((offset, len as u64));
+            self.wire.enter();
+            self.wire.pace();
+            self.wire.leave();
             let start = (offset as usize).min(self.data.len());
             let end = (start + len).min(self.data.len());
             Ok(self.data[start..end].to_vec())
@@ -992,6 +1296,7 @@ mod tests {
             }
             let rest = self.data.len() as u64 - offset;
             let len = self.cap.map_or(len, |c| len.min(c)).min(rest);
+            self.wire.enter();
             Ok(RangeBody {
                 reader: Box::new(Body {
                     data: self.data.clone(),
@@ -1016,6 +1321,7 @@ mod tests {
             if self.pos == self.end {
                 return Ok(0);
             }
+            self.wire.pace();
             let mut hold = lock(&self.wire.hold);
             while self.pos >= *hold {
                 hold = self
@@ -1049,6 +1355,7 @@ mod tests {
 
     impl Drop for Body {
         fn drop(&mut self) {
+            self.wire.leave();
             if self.pos < self.end {
                 self.wire.dropped.fetch_add(1, Ordering::SeqCst);
             }
@@ -1057,16 +1364,23 @@ mod tests {
 
     type LongParts = (Arc<CachedSource<Long>>, Arc<Wire>, Arc<Vec<u8>>);
 
-    fn long_with(bytes: u64, cap: Option<u64>, long: bool, refuse_long: bool) -> LongParts {
-        let d = Arc::new(data(bytes as usize));
-        let wire = Arc::new(Wire {
+    fn new_wire() -> Arc<Wire> {
+        Arc::new(Wire {
             requests: Mutex::default(),
             sent: AtomicUsize::new(0),
             dropped: AtomicUsize::new(0),
             hold: Mutex::new(u64::MAX),
             raised: Condvar::new(),
             break_at: Mutex::new(None),
-        });
+            active: AtomicUsize::new(0),
+            peak: AtomicUsize::new(0),
+            pace_ms: AtomicUsize::new(0),
+        })
+    }
+
+    fn long_with(bytes: u64, cap: Option<u64>, long: bool, refuse_long: bool) -> LongParts {
+        let d = Arc::new(data(bytes as usize));
+        let wire = new_wire();
         let fetcher = Long {
             data: d.clone(),
             wire: wire.clone(),
@@ -1298,11 +1612,13 @@ mod tests {
                 "short data taken as the file's"
             );
             let requests = wire.requests();
+            let block = 11 * BLOCK;
+            let asked_for = |r: &&(u64, u64)| r.0 <= block && block < r.0 + r.1;
             assert!(
-                requests.iter().filter(|r| r.0 == 11 * BLOCK).count() == 1,
+                requests.iter().filter(asked_for).count() >= 2,
                 "the block that failed is fetched again from its start: {requests:?}"
             );
-            assert!(requests.last().unwrap().0 > 11 * BLOCK);
+            assert!(requests.last().unwrap().0 > block);
         }
     }
 
@@ -1320,8 +1636,6 @@ mod tests {
         let (s, wire, d) = long_with(100 * BLOCK, Some(3 * BLOCK + 100), true, false);
         assert!(read_range(&s, 0, 100 * BLOCK) == *d);
         let requests = wire.requests();
-        let longest = requests.iter().map(|r| r.1).max().unwrap();
-        assert!(longest <= 4 * BLOCK, "{requests:?}");
         let last = requests.iter().rev().take(5);
         assert!(last.clone().all(|r| r.1 <= 3 * BLOCK), "{requests:?}");
 
@@ -1403,5 +1717,200 @@ mod tests {
         wire.hold_at(u64::MAX);
         wait_until("the request ends", || weak.upgrade().is_none());
         assert_eq!(wire.dropped.load(Ordering::SeqCst), 1);
+    }
+
+    fn parallel_source(bytes: u64, cap: Option<u64>, refuse_long: bool) -> LongParts {
+        let d = Arc::new(data(bytes as usize));
+        let wire = new_wire();
+        let fetcher = Long {
+            data: d.clone(),
+            wire: wire.clone(),
+            cap,
+            long: true,
+            refuse_long,
+        };
+        let options = CacheOptions {
+            block_size: BLOCK as usize,
+            ..CacheOptions::for_downloads(true)
+        };
+        (Arc::new(CachedSource::new(fetcher, &options)), wire, d)
+    }
+
+    #[test]
+    fn parallel_downloads_are_off_unless_chosen() {
+        assert_eq!(CacheOptions::default().parallel_requests, 1);
+        assert_eq!(CacheOptions::for_downloads(false), CacheOptions::default());
+        assert!(CacheOptions::for_downloads(true).parallel_requests > 1);
+    }
+
+    #[test]
+    fn with_parallel_on_opening_stays_one_block_at_a_time() {
+        let (s, wire, d) = parallel_source(200 * BLOCK, None, false);
+        assert!(read_range(&s, 0, 3 * BLOCK) == d[..3 * BLOCK as usize]);
+        let_it_settle();
+        let requests = wire.requests();
+        assert!(requests.iter().all(|r| r.1 == BLOCK), "{requests:?}");
+        assert!(requests.len() <= 4, "{requests:?}");
+        assert_eq!(s.stats().long_requests, 0);
+        assert!(wire.peak.load(Ordering::SeqCst) <= 2);
+    }
+
+    #[test]
+    fn with_parallel_on_a_jump_before_playing_stays_one_block_at_a_time() {
+        let (s, wire, _) = parallel_source(200 * BLOCK, None, false);
+        read_range(&s, 0, 3 * BLOCK);
+        read_range(&s, 100 * BLOCK, 103 * BLOCK);
+        let_it_settle();
+        let requests = wire.requests();
+        assert!(requests.iter().all(|r| r.1 == BLOCK), "{requests:?}");
+        assert!(wire.peak.load(Ordering::SeqCst) <= 2);
+    }
+
+    #[test]
+    fn parallel_downloads_read_every_byte_up_to_four_at_once() {
+        let (s, wire, d) = parallel_source(200 * BLOCK, None, false);
+        wire.pace_ms.store(1, Ordering::SeqCst);
+        assert!(read_range(&s, 0, 200 * BLOCK) == *d);
+        let peak = wire.peak.load(Ordering::SeqCst);
+        assert!((3..=5).contains(&peak), "{peak} at once");
+        let requests = wire.requests();
+        assert!(
+            requests.iter().all(|r| r.1 <= PARALLEL_BLOCKS * BLOCK),
+            "{requests:?}"
+        );
+        assert!(s.stats().long_requests > 0);
+    }
+
+    #[test]
+    fn a_skip_goes_parallel_straight_away() {
+        let (s, wire, d) = parallel_source(200 * BLOCK, None, false);
+        read_range(&s, 0, 20 * BLOCK);
+        let far = 150 * BLOCK;
+        assert!(read_range(&s, far, far + 100) == d[far as usize..far as usize + 100]);
+        wait_until("what follows the skip is fetched", || {
+            let requests = wire.requests();
+            (151..=154).all(|b| requests.contains(&(b * BLOCK, BLOCK)))
+        });
+    }
+
+    #[test]
+    fn a_jump_never_waits_on_parallel_requests() {
+        let (s, wire, d) = parallel_source(200 * BLOCK, None, false);
+        wire.hold_at(25 * BLOCK);
+        read_range(&s, 0, 25 * BLOCK);
+        wait_until("a request waits on the server", || {
+            lock(&s.inner.state).in_flight > 0 && wire.active.load(Ordering::SeqCst) > 0
+        });
+        let far = 150 * BLOCK;
+        assert!(read_range(&s, far, far + 100) == d[far as usize..far as usize + 100]);
+        let held = 26 * BLOCK;
+        assert!(read_range(&s, held, held + 100) == d[held as usize..held as usize + 100]);
+        wire.hold_at(u64::MAX);
+        wait_until("the old requests end", || {
+            lock(&s.inner.state).in_flight == 0
+        });
+    }
+
+    #[test]
+    fn a_paused_reader_holds_no_more_than_the_parallel_cache() {
+        let (s, wire, d) = parallel_source(120 * BLOCK, None, false);
+        read_range(&s, 0, 30 * BLOCK);
+        let_it_settle();
+        let sent = wire.sent.load(Ordering::SeqCst) as u64;
+        assert!(
+            sent <= 46 * BLOCK,
+            "{sent} bytes while the reader is on block 29"
+        );
+        let st = lock(&s.inner.state);
+        assert_eq!(st.in_flight, 0, "stops at the edge of the cache");
+        let ready = st
+            .blocks
+            .values()
+            .filter(|b| matches!(b, Slot::Ready { .. }))
+            .count();
+        assert!(ready <= s.inner.max_blocks, "{ready} blocks in memory");
+        drop(st);
+        assert!(read_range(&s, 30 * BLOCK, 120 * BLOCK) == d[30 * BLOCK as usize..]);
+    }
+
+    #[test]
+    fn failing_parallel_requests_back_off_and_every_byte_still_arrives() {
+        let (s, _, d) = parallel_source(60 * BLOCK, None, true);
+        assert!(read_range(&s, 0, 60 * BLOCK) == *d);
+        assert_eq!(lock(&s.inner.state).longest, 1, "back to single blocks");
+
+        for error in [true, false] {
+            let (s, wire, d) = parallel_source(120 * BLOCK, None, false);
+            *lock(&wire.break_at) = Some((11 * BLOCK + 100, error));
+            assert!(
+                read_range(&s, 0, 120 * BLOCK) == *d,
+                "short data taken as the file's"
+            );
+        }
+    }
+
+    #[test]
+    fn a_capped_server_is_read_in_full_with_parallel_on() {
+        let (s, wire, d) = parallel_source(100 * BLOCK, Some(3 * BLOCK + 100), false);
+        assert!(read_range(&s, 0, 100 * BLOCK) == *d);
+        let requests = wire.requests();
+        let last = requests.iter().rev().take(5);
+        assert!(last.clone().all(|r| r.1 <= 3 * BLOCK), "{requests:?}");
+
+        let (s, _, d) = parallel_source(100 * BLOCK, Some(1024), false);
+        assert!(read_range(&s, 0, 100 * BLOCK) == *d);
+        assert_eq!(lock(&s.inner.state).longest, 1);
+    }
+
+    #[test]
+    fn a_short_last_block_with_parallel_on_is_the_end_of_the_file() {
+        let bytes = 100 * BLOCK + 700;
+        let (s, _, d) = parallel_source(bytes, None, false);
+        assert!(read_range(&s, 0, bytes) == *d);
+        let mut buf = [0u8; 16];
+        assert_eq!(s.read_at(bytes, &mut buf).unwrap(), 0);
+    }
+
+    #[test]
+    fn a_full_cache_doesnt_shrink_parallel_requests() {
+        let (s, wire, d) = parallel_source(120 * BLOCK, None, false);
+        read_range(&s, 0, 20 * BLOCK);
+        let before = {
+            let_it_settle();
+            wire.requests().len()
+        };
+        // A reader slower than the requests, as during playback.
+        for block in 20..100 {
+            let at = block * BLOCK;
+            assert!(read_range(&s, at, at + BLOCK) == d[at as usize..(at + BLOCK) as usize]);
+            std::thread::sleep(Duration::from_millis(2));
+        }
+        let requests = wire.requests();
+        assert!(
+            requests[before..]
+                .iter()
+                .all(|r| r.1 == PARALLEL_BLOCKS * BLOCK),
+            "{:?}",
+            &requests[before..]
+        );
+    }
+
+    #[test]
+    fn closing_never_waits_for_parallel_requests() {
+        let (s, wire, _) = parallel_source(200 * BLOCK, None, false);
+        wire.hold_at(25 * BLOCK);
+        read_range(&s, 0, 20 * BLOCK);
+        let_it_settle();
+        let s = only_owner(s);
+        let weak = Arc::downgrade(&s.inner);
+        let t = Instant::now();
+        drop(s);
+        assert!(
+            t.elapsed() < Duration::from_millis(100),
+            "{:?}",
+            t.elapsed()
+        );
+        wire.hold_at(u64::MAX);
+        wait_until("the requests end", || weak.upgrade().is_none());
     }
 }

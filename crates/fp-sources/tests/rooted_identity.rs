@@ -13,6 +13,7 @@ fn config(id: &str, url: &str) -> HttpConfig {
         url: url.into(),
         credentials: None,
         insecure_tls: false,
+        parallel_downloads: false,
     }
 }
 

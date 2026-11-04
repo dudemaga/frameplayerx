@@ -576,6 +576,9 @@ source-user-name = User name
 source-user-name-desc = If the server asks for one.
 source-self-signed = Accept self-signed certificates
 source-self-signed-desc = For HTTPS servers on your own network.
+# A switch on a server's form, with the description below it.
+source-parallel-downloads = Parallel downloads
+source-parallel-downloads-desc = Downloads several parts of a video at once over separate connections, like a download manager. This helps if the server limits the speed of each connection. If it doesn't, it may gain nothing, and a server on hard drives can get slower.
 source-passwords-note = Passwords are stored on this device only, in a file only you can read.
 quick-connect-code = Pairing code
 quick-connect-code-desc = Enter this code in your Jellyfin or Emby app under Quick Connect:

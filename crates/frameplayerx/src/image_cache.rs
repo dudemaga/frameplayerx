@@ -524,6 +524,7 @@ mod tests {
                     url: server.base.clone(),
                     credentials: None,
                     insecure_tls: false,
+                    parallel_downloads: false,
                 })])
                 .is_empty()
         );
@@ -554,6 +555,7 @@ mod tests {
                     url: s.base.clone(),
                     credentials: None,
                     insecure_tls: false,
+                    parallel_downloads: false,
                 })])
                 .is_empty()
         );

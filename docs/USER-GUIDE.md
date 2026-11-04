@@ -350,6 +350,10 @@ A PIN locks that one source only. Another source on the same server, or
 with the same folder, stays open: lock it too, with the same PIN or its
 own, if it shows the same videos.
 
+### Parallel downloads
+
+A server's form has a **Parallel downloads** switch, off by default. On, FramePlayerX downloads several parts of a video at once over separate connections while it plays, the way some download managers do. This helps if the server limits the speed of each connection. If it doesn't, the switch may gain nothing, and a server on hard drives can get slower, because the drives have to jump between parts of the file. SMB shares and DLNA servers don't have the switch.
+
 ### Editing a source
 
 The pencil next to a source under **Sources** opens its details: rename it,

@@ -58,6 +58,7 @@ impl WebDavSource {
         let (url, creds) = clean_url_and_credentials(&url, config.credentials.as_ref())?;
         let opts = HttpOptions {
             insecure_tls: config.insecure_tls,
+            cache: crate::cache::CacheOptions::for_downloads(config.parallel_downloads),
             ..HttpOptions::default()
         };
         Ok(WebDavSource {
@@ -244,6 +245,23 @@ mod tests {
     use fp_core::source::EntryKind;
 
     #[test]
+    fn the_parallel_downloads_switch_reaches_the_client() {
+        let source = |parallel_downloads| {
+            WebDavSource::new(&HttpConfig {
+                id: "w".into(),
+                name: "W".into(),
+                url: "https://example.invalid/dav/".into(),
+                credentials: None,
+                insecure_tls: false,
+                parallel_downloads,
+            })
+            .unwrap()
+        };
+        assert_eq!(source(false).client.options().cache.parallel_requests, 1);
+        assert!(source(true).client.options().cache.parallel_requests > 1);
+    }
+
+    #[test]
     fn parses_nextcloud_style_multistatus() {
         let xml = r#"<?xml version="1.0"?>
 <d:multistatus xmlns:d="DAV:" xmlns:s="http://sabredav.org/ns" xmlns:oc="http://owncloud.org/ns">
@@ -306,6 +324,7 @@ mod tests {
             url: "davs://u:secret@nas:5006/vr".into(),
             credentials: None,
             insecure_tls: true,
+            parallel_downloads: false,
         })
         .unwrap();
         assert_eq!(s.root(), "https://nas:5006/vr/");

@@ -150,6 +150,10 @@ pub struct HttpConfig {
     /// home NAS boxes).
     #[serde(default)]
     pub insecure_tls: bool,
+    /// Download several parts of a video at once: much faster on some
+    /// servers, slower on others, so it's off unless chosen.
+    #[serde(default)]
+    pub parallel_downloads: bool,
 }
 
 /// A DLNA/UPnP media server.
@@ -185,6 +189,10 @@ pub struct FeedConfig {
     /// Accept invalid TLS certificates.
     #[serde(default)]
     pub insecure_tls: bool,
+    /// Download several parts of a video at once: much faster on some
+    /// servers, slower on others, so it's off unless chosen.
+    #[serde(default)]
+    pub parallel_downloads: bool,
     /// Highest video height to pick among the encodings a scene offers
     /// (e.g. 2880 to skip 8K files). `None` picks the best.
     #[serde(default)]
@@ -226,6 +234,10 @@ pub struct MediaBrowserConfig {
     /// Accept invalid TLS certificates.
     #[serde(default)]
     pub insecure_tls: bool,
+    /// Download several parts of a video at once: much faster on some
+    /// servers, slower on others, so it's off unless chosen.
+    #[serde(default)]
+    pub parallel_downloads: bool,
     /// Highest video height to select among media sources.
     #[serde(default)]
     pub max_height: Option<u32>,
@@ -258,6 +270,10 @@ pub struct PlexConfig {
     pub auth: Option<crate::plex::auth::PlexCredentials>,
     #[serde(default)]
     pub insecure_tls: bool,
+    /// Download several parts of a video at once: much faster on some
+    /// servers, slower on others, so it's off unless chosen.
+    #[serde(default)]
+    pub parallel_downloads: bool,
     #[serde(default)]
     pub max_height: Option<u32>,
     #[serde(default)]
@@ -552,6 +568,7 @@ mod tests {
                 url: "webdavs://nas/vr/".into(),
                 credentials: Some(Credentials::new("bob", "hunter2")),
                 insecure_tls: true,
+                parallel_downloads: false,
             }),
             SourceConfig::DeoVr(FeedConfig {
                 id: "d".into(),
@@ -559,6 +576,7 @@ mod tests {
                 url: "http://vr:9999/deovr".into(),
                 credentials: None,
                 insecure_tls: false,
+                parallel_downloads: false,
                 max_height: Some(2880),
             }),
             SourceConfig::Smb(SmbConfig {
@@ -576,6 +594,7 @@ mod tests {
                 url: "http://jellyfin:8096".into(),
                 credentials: Some(Credentials::new("alice", "hunter2")),
                 insecure_tls: false,
+                parallel_downloads: false,
                 max_height: Some(2880),
                 access_token: None,
                 user_id: None,
@@ -636,6 +655,13 @@ mod tests {
             serde_json::from_str(r#"{"type":"http","id":"h","name":"H","url":"http://h/"}"#)
                 .unwrap();
         assert_eq!(c.kind(), SourceKind::Http);
+        let SourceConfig::Http(c) = c else {
+            unreachable!()
+        };
+        assert!(
+            !c.parallel_downloads,
+            "off for a source saved before it existed"
+        );
     }
 
     #[test]
@@ -647,6 +673,7 @@ mod tests {
             url: "http://bob:hunter2@h/".into(),
             credentials: None,
             insecure_tls: false,
+            parallel_downloads: false,
         }));
         for c in &configs {
             let dbg = format!("{c:?}");

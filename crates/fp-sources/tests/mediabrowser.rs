@@ -17,6 +17,7 @@ fn mediabrowser_config(url: String, creds: Option<Credentials>) -> MediaBrowserC
         url,
         credentials: creds,
         insecure_tls: false,
+        parallel_downloads: false,
         max_height: None,
         access_token: None,
         user_id: None,

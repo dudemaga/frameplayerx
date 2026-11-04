@@ -834,6 +834,7 @@ mod tests {
             url: "http://old.example/old-root/".into(),
             credentials: None,
             insecure_tls: false,
+            parallel_downloads: false,
         };
         let opener = Opener::new();
         let old = [SourceConfig::Http(config.clone())];
