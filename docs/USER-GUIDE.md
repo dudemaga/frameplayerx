@@ -580,7 +580,8 @@ no hardware path on the Frame, so they decode on the CPU, which can't keep
 up with VR resolutions: they stutter or stop to buffer, and a warning pill
 appears on the control bar. Point at it to read why ("No hardware decoding
 for AV1", "… for 4:2:2 HEVC"). Convert them to 4:2:0 HEVC once on a PC and
-they play smoothly.
+they play smoothly. VP9 also decodes on the CPU: it keeps up at lower
+resolutions, but can stutter at 8K.
 
 "Too big for hardware" means the file can't fit even with nothing else
 open: the decoder takes at most 8192×4320 pixels a frame. 8192×4320 and

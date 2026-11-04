@@ -1141,11 +1141,11 @@ fn has_hardware_decoder(v: &StreamInfo) -> bool {
     hardware_decodes(v, fp_media::hevc_10bit_hardware())
 }
 
-/// 8-bit 4:2:0 HEVC, H.264 and VP9, and 10-bit 4:2:0 HEVC when `hevc_10bit`
-/// (the renderer shows it, see [`fp_media::set_hevc_10bit_hardware`]).
+/// 8-bit 4:2:0 HEVC and H.264, and 10-bit 4:2:0 HEVC when `hevc_10bit` (the
+/// renderer shows it, see [`fp_media::set_hevc_10bit_hardware`]).
 fn hardware_decodes(v: &StreamInfo, hevc_10bit: bool) -> bool {
     let depth = v.bit_depth <= 8 || (hevc_10bit && v.codec == "hevc" && v.bit_depth == 10);
-    matches!(v.codec.as_str(), "hevc" | "h264" | "vp9") && depth && v.chroma() == "4:2:0"
+    matches!(v.codec.as_str(), "hevc" | "h264") && depth && v.chroma() == "4:2:0"
 }
 
 /// The stream's codec, with its bit depth and chroma when they are not
@@ -1871,7 +1871,7 @@ mod tests {
         assert!(hardware_decodes(&stream("hevc", 10), true));
         assert!(!hardware_decodes(&stream("hevc", 10), false));
         assert!(!hardware_decodes(&stream("h264", 10), true));
-        assert!(!hardware_decodes(&stream("vp9", 10), true));
+        assert!(!hardware_decodes(&stream("vp9", 8), true));
         let mut s12 = stream("hevc", 12);
         s12.pixel_format = "yuv420p12le".into();
         assert!(!hardware_decodes(&s12, true));
