@@ -355,7 +355,7 @@ fn general(ui: &mut egui::Ui, v: &mut View) {
         );
         r.switch(
             tr!("settings-perf-overlay"),
-            Some(tr!("settings-perf-overlay-desc")),
+            Some(tr!("settings-perf-panel-desc")),
             &mut s.perf_overlay,
         );
     });

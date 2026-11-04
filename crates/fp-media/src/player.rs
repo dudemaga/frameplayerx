@@ -19,14 +19,14 @@ use crate::info::{MediaInfo, read_info};
 use crate::input::Input;
 use crate::subtitle::{self, Cue};
 use crate::{Error, Result};
-use fp_core::ByteSource;
 use fp_core::sync::lock;
+use fp_core::{ByteSource, NetCounters};
 use fp_ffmpeg_sys as ff;
 use std::collections::VecDeque;
 use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
 use std::sync::{Arc, Condvar, Mutex, MutexGuard};
 use std::thread::JoinHandle;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 /// Asks the server to transcode again from a time (seconds into the video).
 pub type Restart =
@@ -123,6 +123,25 @@ pub struct Stats {
     pub video_queue: usize,
     pub packets_queued: usize,
     pub bytes_queued: usize,
+    /// Changes with every seek.
+    pub serial: u64,
+    /// Seconds of video read ahead of the picture, and how far it's aiming.
+    pub read_ahead: (f64, f64),
+    /// The demuxer has read all it wants for now.
+    pub read_enough: bool,
+    /// The demuxer has reached the end of the file.
+    pub read_to_end: bool,
+    pub last_jump: Option<LastJump>,
+}
+
+/// What the last open or seek took, up to its picture.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct LastJump {
+    /// A seek rather than opening the file.
+    pub skip: bool,
+    pub picture: Duration,
+    /// Its first read at the new place, over the network.
+    pub first_read: Option<Duration>,
 }
 
 struct PacketQueue {
@@ -199,6 +218,14 @@ struct Shared {
     frames_cv: Condvar,
     current: Mutex<Option<Arc<VideoFrame>>>,
     serial: AtomicU64,
+    /// How far the demuxer has read and how far it's aiming, seconds
+    /// (`f64` bits), and whether it has read enough for now.
+    read_to: AtomicU64,
+    read_target: AtomicU64,
+    read_enough: AtomicBool,
+    /// When the open or seek waiting for its picture began, and if a seek.
+    jump: Mutex<Option<(Instant, bool)>>,
+    net: Option<Arc<NetCounters>>,
     /// Precise seek: frames before this time (in serial) are dropped.
     seek_floor: Mutex<Option<(u64, f64)>>,
     /// Waiting for the first frame after open/seek before the clock runs.
@@ -264,7 +291,9 @@ impl Player {
         config: PlayerConfig,
         tracks: impl FnOnce(&MediaInfo) -> Tracks,
     ) -> Result<Player> {
+        let started = Instant::now();
         let config = config.for_source(&*src);
+        let net = src.net();
         let quit = Arc::new(AtomicBool::new(false));
         let mut input = Input::open(src, name, quit.clone())?;
         if let Some(tl) = &config.timeline {
@@ -299,6 +328,11 @@ impl Player {
             frames_cv: Condvar::new(),
             current: Mutex::new(None),
             serial: AtomicU64::new(1),
+            read_to: AtomicU64::new(0f64.to_bits()),
+            read_target: AtomicU64::new(config.read_ahead_secs.to_bits()),
+            read_enough: AtomicBool::new(false),
+            jump: Mutex::new(Some((started, false))),
+            net,
             seek_floor: Mutex::new(None),
             buffering: AtomicBool::new(true),
             demux_eof: AtomicBool::new(false),
@@ -474,6 +508,10 @@ impl Player {
         } else {
             target.max(0.0)
         };
+        *lock(&s.jump) = Some((Instant::now(), true));
+        if let Some(net) = &s.net {
+            net.expect_first_read();
+        }
         s.ctl().seek = Some(SeekRequest { target, precise });
         // Reflect the new position immediately in the UI.
         s.clock.set(target);
@@ -577,7 +615,18 @@ impl Player {
         st.packets_queued = s.vpkts.len() + s.apkts.len();
         st.bytes_queued =
             s.vpkts.bytes.load(Ordering::Relaxed) + s.apkts.bytes.load(Ordering::Relaxed);
+        st.serial = s.serial();
+        let read_to = f64::from_bits(s.read_to.load(Ordering::Relaxed));
+        let target = f64::from_bits(s.read_target.load(Ordering::Relaxed));
+        st.read_ahead = ((read_to - s.clock.now()).max(0.0), target);
+        st.read_enough = s.read_enough.load(Ordering::Relaxed);
+        st.read_to_end = s.demux_eof.load(Ordering::Acquire);
         st
+    }
+
+    /// How reading the file over the network is going, when it is.
+    pub fn net(&self) -> Option<Arc<NetCounters>> {
+        self.shared.net.clone()
     }
 
     /// The frame to display now. Call once per display frame: it advances the
@@ -601,7 +650,20 @@ impl Player {
                     // Start the clock exactly at the first frame shown.
                     s.clock.set(f.pts);
                     *lock(&s.current) = Some(f);
-                    s.stats().frames_shown += 1;
+                    let mut st = s.stats();
+                    st.frames_shown += 1;
+                    if let Some((at, skip)) = lock(&s.jump).take() {
+                        st.last_jump = Some(LastJump {
+                            skip,
+                            picture: at.elapsed(),
+                            first_read: s
+                                .net
+                                .as_ref()
+                                .filter(|_| skip)
+                                .and_then(|n| n.first_read()),
+                        });
+                    }
+                    drop(st);
                     s.frames_cv.notify_all();
                 }
                 s.buffering.store(false, Ordering::Release);
@@ -826,6 +888,7 @@ fn demux_thread(
             sh.buffering.store(true, Ordering::Release);
             sh.clock.pause();
             sh.clock.set(req.target);
+            sh.read_to.store(req.target.to_bits(), Ordering::Relaxed);
             first_video_ts = None;
             await_key = Some(req.target + 20.0);
             sh.frames_cv.notify_all();
@@ -841,9 +904,12 @@ fn demux_thread(
             .map(|f| last_video_ts - f.max(now))
             .unwrap_or(0.0);
         let target = cfg.read_ahead_target(first_video_ts.map_or(0.0, |f| now - f));
+        sh.read_target.store(target.to_bits(), Ordering::Relaxed);
         let bytes = sh.vpkts.bytes.load(Ordering::Relaxed) + sh.apkts.bytes.load(Ordering::Relaxed);
         let audio_starved = sh.has_audio.load(Ordering::Acquire) && sh.apkts.len() < 4;
-        if read_enough(&cfg, target, ahead, bytes, sh.vpkts.len(), audio_starved) {
+        let enough = read_enough(&cfg, target, ahead, bytes, sh.vpkts.len(), audio_starved);
+        sh.read_enough.store(enough, Ordering::Relaxed);
+        if enough {
             let c = sh.ctl();
             let _ = sh.ctl_cv.wait_timeout(c, Duration::from_millis(10));
             continue;
@@ -885,6 +951,7 @@ fn demux_thread(
                     if let Some(t) = t {
                         last_video_ts = t;
                         first_video_ts.get_or_insert(t);
+                        sh.read_to.store(t.to_bits(), Ordering::Relaxed);
                     }
                     sh.vpkts.push(serial, Some(pkt.take()));
                 } else if Some(idx) == audio_stream {
@@ -1416,6 +1483,36 @@ mod tests {
         let local = cfg().for_source(&*crate::ts_fixture::h264_aac_ts(0.0));
         assert_eq!(local.read_ahead_target(0.0), 4.0);
         assert_eq!(local.read_ahead_target(600.0), 4.0);
+    }
+
+    #[test]
+    fn stats_say_how_far_it_has_read_and_what_opening_and_a_skip_took() {
+        let p = open(
+            "h264_aac_180_LR.mp4",
+            PlayerConfig {
+                start_paused: true,
+                ..cfg()
+            },
+        );
+        run(&p, 3.0, |p, _| p.stats().read_enough);
+        let st = p.stats();
+        let (ahead, target) = st.read_ahead;
+        assert!(ahead > 0.5, "{ahead} s");
+        assert_eq!(target, 4.0);
+        let opened = st.last_jump.expect("the first picture");
+        assert!(!opened.skip);
+        assert!(opened.picture > Duration::ZERO);
+
+        let serial = st.serial;
+        p.seek(1.0, true);
+        assert!(
+            p.stats().last_jump.is_some_and(|j| !j.skip),
+            "until its picture"
+        );
+        run(&p, 3.0, |p, _| p.stats().last_jump.is_some_and(|j| j.skip));
+        let st = p.stats();
+        assert!(st.last_jump.is_some_and(|j| j.skip));
+        assert_ne!(st.serial, serial);
     }
 
     #[test]

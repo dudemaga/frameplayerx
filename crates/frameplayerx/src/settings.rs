@@ -129,6 +129,8 @@ pub struct PanelOffsets {
     /// The control bar, from below a flat screen (or in front of you
     /// during a 180°/360° video).
     pub bar: [f32; 2],
+    /// The performance overlay, from where it starts.
+    pub perf: [f32; 2],
 }
 
 impl Default for Settings {

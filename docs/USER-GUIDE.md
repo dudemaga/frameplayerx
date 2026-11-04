@@ -857,9 +857,26 @@ The translations started as machine drafts. If one reads wrong, the
 ## Troubleshooting
 
 - When a video stutters, turn on Settings › General › **Performance
-  overlay**. Low in your view, it shows how long each frame takes to draw
-  (amber when longer than the display allows), the video's frame rate and
-  dropped frames, its decoder, how busy the CPU and GPU are, and memory.
+  overlay**. It starts to your left. Squeeze a grip on it to move it, and it
+  stays where you leave it, next time too. Amber marks trouble.
+  - **Display**: frames drawn against the display's rate, and how long the
+    app's work on each one typically takes. Low means the headset can't draw
+    fast enough.
+  - **Video**: frames shown against the film's own rate, and frames dropped
+    and stalls since it opened.
+  - **Decoder**: hardware or software, and the format.
+  - **Buffer**: seconds of video read ahead, against how many it's aiming for.
+    Falling means the source isn't keeping up.
+  - **Network**: how fast data is arriving, and how many requests have failed.
+    With a full buffer it only reads what the film uses, or nothing, so that
+    isn't your connection's limit.
+  - **Last skip**: how long the last skip took to show a picture, and how long
+    its first read of the file took. It says **Opened** until you skip.
+  - **CPU** and **GPU**: how busy and how hot they are, amber when the headset
+    is slowing them for heat, and the GPU's clock.
+  - **Memory**: how much is in use.
+
+  Without a video open, it shows only Display, CPU, GPU and Memory.
 - After a crash, the next start asks whether to send a crash report to
   FramePlayerX's developers, as a private issue on GitHub. It contains the
   versions of FramePlayerX and the headset's system, what went wrong, and

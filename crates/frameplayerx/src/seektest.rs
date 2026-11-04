@@ -203,6 +203,10 @@ impl ByteSource for ReadProbe {
     fn remote(&self) -> bool {
         self.src.remote()
     }
+
+    fn net(&self) -> Option<Arc<fp_core::NetCounters>> {
+        self.src.net()
+    }
 }
 
 /// The middle value, or the mean of the middle two.
