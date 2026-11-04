@@ -559,6 +559,7 @@ fn servers_without_ranges_stream_sequentially() {
             block_size: 64 * 1024,
             max_blocks: 3,
             read_ahead: true,
+            ..CacheOptions::default()
         },
         max_forward_skip: 128 * 1024,
         ..HttpOptions::default()
@@ -781,4 +782,373 @@ fn a_short_first_range_is_no_end_of_file() {
         "end of file at 1024"
     );
     assert!(read_all(&f, 3000) == *data);
+}
+
+const MIB: u64 = 1 << 20;
+
+/// The ranges asked for so far, as (first byte, length).
+fn ranges(server: &TestServer) -> Vec<(u64, u64)> {
+    server
+        .requests()
+        .iter()
+        .filter(|r| is_get(r))
+        .filter_map(|r| {
+            let (a, b) = r.header("range")?.strip_prefix("bytes=")?.split_once('-')?;
+            let (a, b): (u64, u64) = (a.parse().ok()?, b.parse().ok()?);
+            Some((a, b + 1 - a))
+        })
+        .collect()
+}
+
+fn small_blocks(read_timeout: Duration) -> HttpOptions {
+    HttpOptions {
+        read_timeout,
+        max_retries: 0,
+        cache: CacheOptions {
+            block_size: 4096,
+            ..CacheOptions::default()
+        },
+        ..HttpOptions::default()
+    }
+}
+
+#[test]
+fn opening_and_reading_a_little_fetches_two_blocks() {
+    let data = Arc::new(pattern(12 * MIB as usize));
+    let d = data.clone();
+    let server = TestServer::start(move |req| serve_bytes(req, &d, true));
+    let f = HttpClient::new(HttpOptions::default(), None)
+        .open(&server.url("/x.mp4"))
+        .unwrap();
+    let mut buf = vec![0u8; 64 * 1024];
+    for i in 0..4 {
+        let at = i * buf.len();
+        assert_eq!(f.read_at(at as u64, &mut buf).unwrap(), buf.len());
+        assert_eq!(buf[..], data[at..at + buf.len()]);
+    }
+    std::thread::sleep(Duration::from_millis(100));
+    assert_eq!(ranges(&server), [(0, MIB), (MIB, MIB)]);
+}
+
+#[test]
+fn the_first_4_mib_are_read_one_block_at_a_time() {
+    let data = Arc::new(pattern(12 * MIB as usize));
+    let d = data.clone();
+    let server = TestServer::start(move |req| serve_bytes(req, &d, true));
+    let f = HttpClient::new(HttpOptions::default(), None)
+        .open(&server.url("/x.mp4"))
+        .unwrap();
+    let mut buf = vec![0u8; 256 * 1024];
+    let mut at = 0;
+    while at < 4 * MIB {
+        let n = f.read_at(at, &mut buf).unwrap();
+        assert_eq!(buf[..n], data[at as usize..at as usize + n]);
+        at += n as u64;
+    }
+    std::thread::sleep(Duration::from_millis(100));
+    // Reaching block 3 reads block 4 ahead, as it always did.
+    let want: Vec<_> = (0..5).map(|b| (b * MIB, MIB)).collect();
+    assert_eq!(ranges(&server), want);
+    assert_eq!(f.stats().long_requests, 0);
+}
+
+#[test]
+fn long_requests_grow_and_read_every_byte() {
+    let data = Arc::new(pattern(2 * MIB as usize));
+    let d = data.clone();
+    let server = TestServer::start(move |req| serve_bytes(req, &d, true));
+    let f = HttpClient::new(small_blocks(Duration::from_secs(5)), None)
+        .open(&server.url("/x.mp4"))
+        .unwrap();
+    assert!(read_all(&f, 1500) == *data);
+    assert!(f.stats().long_requests > 0);
+    let asked = ranges(&server);
+    assert_eq!(
+        asked.iter().map(|r| r.1).max(),
+        Some(64 * 4096),
+        "{asked:?}"
+    );
+    for pair in asked.windows(2) {
+        assert_eq!(pair[0].0 + pair[0].1, pair[1].0, "gap or repeat: {asked:?}");
+    }
+}
+
+#[test]
+fn servers_that_cap_their_ranges_are_read_in_full_by_long_requests() {
+    for cap in [1024, 3 * 4096, 3 * 4096 + 100] {
+        let data = Arc::new(pattern(100 * 1024));
+        let d = data.clone();
+        let server = TestServer::start(move |req| capped(req, &d, cap));
+        let f = HttpClient::new(small_blocks(Duration::from_secs(5)), None)
+            .open(&server.url("/x.mp4"))
+            .unwrap();
+        assert!(read_all(&f, 1500) == *data, "cap {cap}");
+    }
+}
+
+/// Reads until an error, checking every byte before it.
+fn read_until_error(f: &dyn ByteSource, data: &[u8]) -> std::io::Error {
+    let mut at = 0;
+    let mut buf = [0u8; 1500];
+    loop {
+        match f.read_at(at as u64, &mut buf) {
+            Ok(0) => panic!("read to the end"),
+            Ok(n) => {
+                assert_eq!(buf[..n], data[at..at + n]);
+                at += n;
+            }
+            Err(e) => return e,
+        }
+    }
+}
+
+#[test]
+fn a_reply_from_the_wrong_offset_is_rejected_on_every_path() {
+    // Wrong for long requests only: they stop, and the file still reads.
+    let data = Arc::new(pattern(400 * 1024));
+    let d = data.clone();
+    let server = TestServer::start(move |req| {
+        let reply = resp(
+            206,
+            d[1..4097].to_vec(),
+            &[("Content-Range", &format!("bytes 1-4096/{}", d.len()))],
+        );
+        match req.header("range").and_then(|r| r.strip_prefix("bytes=")) {
+            Some(r) => {
+                let (a, b) = r.split_once('-').unwrap();
+                let (a, b): (u64, u64) = (a.parse().unwrap(), b.parse().unwrap());
+                if b + 1 - a > 4096 {
+                    return reply;
+                }
+                serve_bytes(req, &d, true)
+            }
+            None => reply,
+        }
+    });
+    let f = HttpClient::new(small_blocks(Duration::from_secs(5)), None)
+        .open(&server.url("/x.mp4"))
+        .unwrap();
+    assert!(read_all(&f, 1500) == *data);
+
+    // Wrong for every request from some point on: the read fails.
+    let data = Arc::new(pattern(400 * 1024));
+    let d = data.clone();
+    let server = TestServer::start(move |req| {
+        let start: usize = req
+            .header("range")
+            .and_then(|r| r.strip_prefix("bytes="))
+            .and_then(|r| r.split_once('-'))
+            .and_then(|(a, _)| a.parse().ok())
+            .unwrap_or(0);
+        if start < 40 * 4096 {
+            return serve_bytes(req, &d, true);
+        }
+        let from = start + 1;
+        resp(
+            206,
+            d[from..from + 4096].to_vec(),
+            &[(
+                "Content-Range",
+                &format!("bytes {from}-{}/{}", from + 4095, d.len()),
+            )],
+        )
+    });
+    let f = HttpClient::new(small_blocks(Duration::from_secs(5)), None)
+        .open(&server.url("/x.mp4"))
+        .unwrap();
+    let e = read_until_error(&f, &data);
+    assert!(e.to_string().contains("server sent bytes from"), "{e}");
+}
+
+#[test]
+fn a_200_reply_mid_file_is_rejected() {
+    let data = Arc::new(pattern(400 * 1024));
+    let d = data.clone();
+    let server = TestServer::start(move |req| {
+        let start: usize = req
+            .header("range")
+            .and_then(|r| r.strip_prefix("bytes="))
+            .and_then(|r| r.split_once('-'))
+            .and_then(|(a, _)| a.parse().ok())
+            .unwrap_or(0);
+        if start < 40 * 4096 {
+            return serve_bytes(req, &d, true);
+        }
+        resp(200, d.to_vec(), &[])
+    });
+    let f = HttpClient::new(small_blocks(Duration::from_secs(5)), None)
+        .open(&server.url("/x.mp4"))
+        .unwrap();
+    let e = read_until_error(&f, &data);
+    assert!(e.to_string().contains("range"), "{e}");
+}
+
+/// A keep-alive server that honours ranges, sending `chunk` bytes every
+/// `pause` and going silent at byte `stall_at`. Returns its URL and a count
+/// of its connections.
+fn range_server(
+    data: Arc<Vec<u8>>,
+    chunk: usize,
+    pause: Duration,
+    stall_at: usize,
+) -> (String, Arc<AtomicUsize>) {
+    use std::io::{BufRead, BufReader, Write};
+    let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+    let url = format!("http://{}/x.mp4", listener.local_addr().unwrap());
+    let connections = Arc::new(AtomicUsize::new(0));
+    let count = connections.clone();
+    std::thread::spawn(move || {
+        for stream in listener.incoming().flatten() {
+            count.fetch_add(1, Ordering::SeqCst);
+            let data = data.clone();
+            std::thread::spawn(move || {
+                let mut reader = BufReader::new(&stream);
+                let mut writer = &stream;
+                loop {
+                    let mut range = None;
+                    loop {
+                        let mut line = String::new();
+                        if reader.read_line(&mut line).unwrap_or(0) == 0 {
+                            return;
+                        }
+                        if line == "\r\n" {
+                            break;
+                        }
+                        let line = line.to_ascii_lowercase();
+                        if let Some(v) = line.strip_prefix("range: bytes=") {
+                            let (a, b) = v.trim().split_once('-').unwrap();
+                            let b = b.parse::<usize>().unwrap().min(data.len() - 1);
+                            range = Some((a.parse::<usize>().unwrap(), b));
+                        }
+                    }
+                    let (a, b) = range.unwrap();
+                    let head = format!(
+                        "HTTP/1.1 206 Partial Content\r\nContent-Range: bytes {a}-{b}/{}\r\nContent-Length: {}\r\n\r\n",
+                        data.len(),
+                        b + 1 - a
+                    );
+                    if writer.write_all(head.as_bytes()).is_err() {
+                        return;
+                    }
+                    let mut at = a;
+                    for piece in data[a..=b].chunks(chunk) {
+                        if at + piece.len() > stall_at {
+                            std::thread::sleep(Duration::from_secs(30));
+                            return;
+                        }
+                        std::thread::sleep(pause);
+                        if writer.write_all(piece).is_err() {
+                            return;
+                        }
+                        at += piece.len();
+                    }
+                }
+            });
+        }
+    });
+    (url, connections)
+}
+
+#[test]
+fn finished_long_requests_give_their_connection_back() {
+    let data = Arc::new(pattern(2 * MIB as usize));
+    let (url, connections) = range_server(data.clone(), 64 * 1024, Duration::ZERO, usize::MAX);
+    let f = HttpClient::new(small_blocks(Duration::from_secs(5)), None)
+        .open(&url)
+        .unwrap();
+    assert!(read_all(&f, 1500) == *data);
+    assert!(f.stats().long_requests > 3);
+    let opened = connections.load(Ordering::SeqCst);
+    assert!(opened <= 3, "{opened} connections");
+}
+
+#[test]
+fn a_long_request_may_outlast_the_read_timeout() {
+    // Over a second in all, with data every 50 ms against a 300 ms timeout.
+    let data = Arc::new(pattern(200 * 1024));
+    let (url, connections) = range_server(
+        data.clone(),
+        8 * 1024,
+        Duration::from_millis(50),
+        usize::MAX,
+    );
+    let got = within(Duration::from_secs(20), {
+        let url = url.clone();
+        move || {
+            let f = HttpClient::new(small_blocks(Duration::from_millis(300)), None)
+                .open(&url)
+                .unwrap();
+            read_all(&f, 1500)
+        }
+    });
+    assert!(got == *data);
+    let opened = connections.load(Ordering::SeqCst);
+    assert!(opened <= 3, "cut off and reconnected: {opened} connections");
+}
+
+#[test]
+fn a_reader_paused_past_the_read_timeout_carries_on() {
+    let data = Arc::new(pattern(400 * 1024));
+    let (url, connections) = range_server(data.clone(), 64 * 1024, Duration::ZERO, usize::MAX);
+    let f = HttpClient::new(small_blocks(Duration::from_millis(300)), None)
+        .open(&url)
+        .unwrap();
+    let mut got = vec![0u8; 30 * 4096];
+    let mut at = 0;
+    while at < got.len() {
+        at += f.read_at(at as u64, &mut got[at..]).unwrap();
+    }
+    std::thread::sleep(Duration::from_millis(700));
+    let mut buf = [0u8; 1500];
+    loop {
+        let n = f.read_at(got.len() as u64, &mut buf).unwrap();
+        if n == 0 {
+            break;
+        }
+        got.extend_from_slice(&buf[..n]);
+    }
+    assert!(got == *data);
+    let opened = connections.load(Ordering::SeqCst);
+    assert!(opened <= 3, "{opened} connections");
+}
+
+#[test]
+fn a_long_request_that_stops_fails_the_read_in_time() {
+    let data = Arc::new(pattern(400 * 1024));
+    let (url, _) = range_server(data.clone(), 1024, Duration::ZERO, 50 * 4096);
+    let t = Instant::now();
+    let e = within(Duration::from_secs(10), move || {
+        let f = HttpClient::new(small_blocks(Duration::from_millis(300)), None)
+            .open(&url)
+            .unwrap();
+        read_until_error(&f, &data)
+    });
+    assert!(!e.to_string().is_empty());
+    assert!(
+        t.elapsed() < Duration::from_secs(5),
+        "took {:?}",
+        t.elapsed()
+    );
+}
+
+#[test]
+fn closing_doesnt_wait_for_a_silent_server() {
+    let data = Arc::new(pattern(400 * 1024));
+    let (url, _) = range_server(data, 1024, Duration::ZERO, 22 * 4096);
+    let f = HttpClient::new(small_blocks(Duration::from_secs(30)), None)
+        .open(&url)
+        .unwrap();
+    let mut buf = vec![0u8; 20 * 4096];
+    let mut at = 0;
+    while at < buf.len() {
+        at += f.read_at(at as u64, &mut buf[at..]).unwrap();
+    }
+    std::thread::sleep(Duration::from_millis(100));
+    let t = Instant::now();
+    drop(f);
+    assert!(
+        t.elapsed() < Duration::from_millis(200),
+        "took {:?}",
+        t.elapsed()
+    );
 }

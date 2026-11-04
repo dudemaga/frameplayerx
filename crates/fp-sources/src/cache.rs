@@ -7,13 +7,28 @@
 //! blocks (1 MiB by default) kept in a small LRU. When access is sequential
 //! the next block is fetched on a background thread so playback never waits
 //! on the network for data it was always going to need.
+//!
+//! One block at a time spends most of a slow-responding server's time on
+//! round trips, so a fetcher that can stream a range gets one growing request
+//! once the reader has kept going in order. The body is cut into blocks as it
+//! arrives, and its socket is left unread while the cache is full, which slows
+//! the server through TCP and keeps memory at the size of the cache.
 
 use fp_core::ByteSource;
 use fp_core::sync::lock;
 use std::collections::HashMap;
-use std::io;
+use std::collections::hash_map::Entry;
+use std::io::{self, Read};
 use std::sync::mpsc::{self, Receiver, Sender};
 use std::sync::{Arc, Condvar, Mutex, PoisonError, Weak};
+
+/// Blocks read in order before requests start to grow. Opening a video jumps
+/// around, and a probe or thumbnail stops early, so those stay one block at a
+/// time.
+const GROW_AFTER: u64 = 4;
+/// Blocks left behind the reader when a long request fills the cache: a
+/// demuxer sometimes steps back a little.
+const KEEP_BEHIND: usize = 2;
 
 /// Fetches byte ranges from the underlying file.
 pub(crate) trait RangeFetch: Send + Sync + 'static {
@@ -30,18 +45,36 @@ pub(crate) trait RangeFetch: Send + Sync + 'static {
     fn sequential_only(&self) -> bool {
         false
     }
+    /// True when [`Self::open_range`] works. The size must be known, or a
+    /// short body can't be told from the end of the file.
+    fn long_ranges(&self) -> bool {
+        false
+    }
+    /// Starts one request for `len` bytes at `offset`, read as they arrive.
+    fn open_range(&self, _offset: u64, _len: u64) -> io::Result<RangeBody> {
+        Err(io::ErrorKind::Unsupported.into())
+    }
+}
+
+/// A request started by [`RangeFetch::open_range`].
+pub(crate) struct RangeBody {
+    pub reader: Box<dyn Read + Send>,
+    /// Bytes the server will send: fewer than asked if it caps its ranges.
+    pub len: u64,
 }
 
 /// Tuning of the block cache.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct CacheOptions {
-    /// Bytes per block (and per network request). Default 1 MiB.
+    /// Bytes per block. Default 1 MiB.
     pub block_size: usize,
     /// Blocks kept in memory. Default 8 (8 MiB per open file). At least 3
     /// are always kept so a read-ahead block is not evicted before use.
     pub max_blocks: usize,
-    /// Fetch the next block in the background when reads are sequential.
+    /// Fetch ahead in the background when reads are sequential.
     pub read_ahead: bool,
+    /// Most blocks one request may ask for. Default 64.
+    pub longest_request: usize,
 }
 
 impl Default for CacheOptions {
@@ -50,6 +83,7 @@ impl Default for CacheOptions {
             block_size: 1 << 20,
             max_blocks: 8,
             read_ahead: true,
+            longest_request: 64,
         }
     }
 }
@@ -61,6 +95,8 @@ pub struct CacheStats {
     pub fetches: u64,
     /// Blocks fetched by the read-ahead thread.
     pub read_aheads: u64,
+    /// Requests for more than one block.
+    pub long_requests: u64,
     /// Block lookups served from memory (including blocks a reader waited
     /// on while the read-ahead thread was fetching them).
     pub hits: u64,
@@ -76,6 +112,22 @@ struct State {
     tick: u64,
     last_block: Option<u64>,
     stats: CacheStats,
+    /// Whether the block last asked for carried on from the one before.
+    in_order: bool,
+    /// Blocks moved through in order since the last jump.
+    run: u64,
+    /// Counts jumps, so a request can tell it has been left behind.
+    jumps: u64,
+    /// The block held for read-ahead, released when the reader jumps.
+    reserved: Option<u64>,
+    /// A long request is running, even one a jump has left behind.
+    streaming: bool,
+    /// The block the current long request delivers next.
+    frontier: Option<u64>,
+    /// Most blocks a request may ask for: lowered by servers that cap their
+    /// ranges or keep failing long ones.
+    longest: u64,
+    closing: bool,
 }
 
 struct Inner<F: RangeFetch> {
@@ -85,7 +137,35 @@ struct Inner<F: RangeFetch> {
     read_ahead: bool,
     state: Mutex<State>,
     loaded: Condvar,
-    ahead: Mutex<Option<Sender<u64>>>,
+    /// Wakes a long request waiting for the reader to make room.
+    wake: Condvar,
+    ahead: Mutex<Option<Sender<Job>>>,
+}
+
+/// Work for the read-ahead thread.
+struct Job {
+    start: u64,
+    blocks: u64,
+    jumps: u64,
+}
+
+/// How reading a long request's body ended.
+enum LongEnd {
+    /// The last block is published and the request's state cleared.
+    Finished,
+    /// A jump or the source closing ended it.
+    Stopped,
+    /// It broke off.
+    Failed,
+    /// It broke off after sitting unread: servers may do that, so it doesn't
+    /// count against long requests.
+    ClosedWhilePaused,
+}
+
+/// Why a long request stops early.
+enum Leave {
+    LeftBehind,
+    Closing,
 }
 
 /// A [`ByteSource`] reading through the block cache.
@@ -106,8 +186,17 @@ impl<F: RangeFetch> CachedSource<F> {
                     tick: 0,
                     last_block: None,
                     stats: CacheStats::default(),
+                    in_order: false,
+                    run: 0,
+                    jumps: 0,
+                    reserved: None,
+                    streaming: false,
+                    frontier: None,
+                    longest: opts.longest_request.max(1) as u64,
+                    closing: false,
                 }),
                 loaded: Condvar::new(),
+                wake: Condvar::new(),
                 ahead: Mutex::new(None),
             }),
         }
@@ -133,7 +222,40 @@ impl<F: RangeFetch> CachedSource<F> {
     }
 }
 
+impl<F: RangeFetch> Drop for CachedSource<F> {
+    /// Tells a long request to stop. Nothing here waits for it: a blocked
+    /// read ends by itself, at worst after the read timeout.
+    fn drop(&mut self) {
+        lock(&self.inner.state).closing = true;
+        self.inner.wake.notify_all();
+    }
+}
+
+/// Blocks to ask for after `run` blocks read in order: one at first, then
+/// doubling, never more than has been read already.
+fn request_blocks(run: u64, longest: u64) -> u64 {
+    if run < GROW_AFTER {
+        return 1;
+    }
+    (1u64 << (run - 2).ilog2()).min(longest)
+}
+
+/// Blocks ready and not reached yet, up to the block a long request delivers
+/// next. Others further on are left over from before a jump.
+fn unread(st: &State, frontier: u64) -> usize {
+    let reader = st.last_block.unwrap_or(0);
+    st.blocks
+        .iter()
+        .filter(|(i, s)| **i > reader && **i < frontier && matches!(s, Slot::Ready { .. }))
+        .count()
+}
+
 impl<F: RangeFetch> Inner<F> {
+    /// Blocks a long request may keep ahead of the reader.
+    fn room(&self) -> usize {
+        self.max_blocks - KEEP_BEHIND
+    }
+
     fn insert_ready(&self, st: &mut State, index: u64, data: Arc<Vec<u8>>) {
         st.tick += 1;
         let used = st.tick;
@@ -144,19 +266,56 @@ impl<F: RangeFetch> Inner<F> {
             .filter(|s| matches!(s, Slot::Ready { .. }))
             .count();
         if ready > self.max_blocks {
+            let reader = st.last_block.unwrap_or(0);
+            let near = self.max_blocks as u64;
             let victim = st
                 .blocks
                 .iter()
                 .filter(|(i, _)| **i != index)
                 .filter_map(|(i, s)| match s {
-                    Slot::Ready { used, .. } => Some((*used, *i)),
+                    // A block about to be read goes last, however long ago
+                    // it landed.
+                    Slot::Ready { used, .. } => {
+                        Some((*i > reader && *i - reader <= near, *used, *i))
+                    }
                     Slot::Loading => None,
                 })
                 .min()
-                .map(|(_, i)| i);
+                .map(|(_, _, i)| i);
             if let Some(v) = victim {
                 st.blocks.remove(&v);
             }
+        }
+    }
+
+    /// Records where the reader went. A jump ends the run and releases what
+    /// was held for the old position, before the reader could wait on it.
+    fn note_position(&self, st: &mut State, index: u64) {
+        let last = st.last_block;
+        let in_order = last.is_some_and(|l| {
+            index == l || index == l + 1 || st.frontier.is_some_and(|f| index > l && index <= f)
+        });
+        if in_order {
+            st.run += index - last.unwrap_or(index);
+        } else {
+            st.run = 0;
+            st.jumps += 1;
+            st.frontier = None;
+            self.release_reserved(st);
+        }
+        st.in_order = in_order;
+        st.last_block = Some(index);
+        if st.streaming {
+            self.wake.notify_all();
+        }
+    }
+
+    fn release_reserved(&self, st: &mut State) {
+        if let Some(r) = st.reserved.take()
+            && matches!(st.blocks.get(&r), Some(Slot::Loading))
+        {
+            st.blocks.remove(&r);
+            self.loaded.notify_all();
         }
     }
 
@@ -164,6 +323,7 @@ impl<F: RangeFetch> Inner<F> {
     /// thread to finish fetching it) when needed.
     fn block(&self, index: u64) -> io::Result<Arc<Vec<u8>>> {
         let mut st = lock(&self.state);
+        self.note_position(&mut st, index);
         loop {
             st.tick += 1;
             let tick = st.tick;
@@ -192,6 +352,9 @@ impl<F: RangeFetch> Inner<F> {
             .fetcher
             .fetch(index * self.block_size, self.block_size as usize);
         let mut st = lock(&self.state);
+        if st.reserved == Some(index) {
+            st.reserved = None;
+        }
         let out = match result {
             Ok(data) => {
                 let data = Arc::new(data);
@@ -208,67 +371,268 @@ impl<F: RangeFetch> Inner<F> {
         out
     }
 
-    /// Fetches a block reserved for read-ahead (see
-    /// [`CachedSource::note_access`]).
-    fn read_ahead(&self, index: u64) {
-        lock(&self.state).stats.read_aheads += 1;
-        if let Err(e) = self.load(index) {
+    /// What to fetch next for a reader on block `index`, reserved so a reader
+    /// that gets there first waits for it instead of fetching it too.
+    fn next_job(&self, st: &mut State, index: u64) -> Option<Job> {
+        if !st.in_order || st.streaming {
+            return None;
+        }
+        let bs = self.block_size;
+        let longest = if self.fetcher.long_ranges() {
+            st.longest
+        } else {
+            1
+        };
+        let want = request_blocks(st.run, longest);
+        let mut next = index + 1;
+        if want > 1 {
+            while matches!(st.blocks.get(&next), Some(Slot::Ready { .. })) {
+                next += 1;
+            }
+            if unread(st, next) >= self.room() {
+                return None;
+            }
+        }
+        let size = self.fetcher.size();
+        if size.is_some_and(|s| next * bs >= s) || st.blocks.contains_key(&next) {
+            return None;
+        }
+        let blocks = size.map_or(want, |s| want.min((s - next * bs).div_ceil(bs)));
+        st.blocks.insert(next, Slot::Loading);
+        st.reserved = Some(next);
+        if blocks > 1 {
+            st.streaming = true;
+            st.frontier = Some(next);
+        }
+        Some(Job {
+            start: next,
+            blocks,
+            jumps: st.jumps,
+        })
+    }
+
+    /// Gives up a job that never ran. A jump since then has already released
+    /// its block.
+    fn abandon(&self, job: &Job) {
+        let mut st = lock(&self.state);
+        if st.jumps == job.jumps && st.reserved == Some(job.start) {
+            self.release_reserved(&mut st);
+        }
+        if job.blocks > 1 {
+            st.streaming = false;
+            if st.jumps == job.jumps {
+                st.frontier = None;
+            }
+        }
+    }
+
+    /// Fetches one block reserved for read-ahead (see [`Self::next_job`]).
+    fn read_ahead(&self, job: Job) {
+        {
+            let mut st = lock(&self.state);
+            if st.jumps != job.jumps {
+                return;
+            }
+            st.stats.read_aheads += 1;
+        }
+        if let Err(e) = self.load(job.start) {
             log::debug!(
-                "read-ahead of block {index} failed for {}: {e}",
+                "read-ahead of block {} failed for {}: {e}",
+                job.start,
                 self.fetcher.describe()
             );
         }
     }
 
-    /// Gives up a block reserved for read-ahead; a reader waiting for it
-    /// fetches it itself.
-    fn unreserve(&self, index: u64) {
+    /// Runs one long request. If it ends early, whatever is reading next
+    /// fetches the next unfetched block and requests carry on from there.
+    fn stream_ahead(&self, job: Job) {
+        let body = self
+            .fetcher
+            .open_range(job.start * self.block_size, job.blocks * self.block_size);
+        lock(&self.state).stats.long_requests += 1;
+        let end = match body {
+            Ok(body) => self.read_long(&job, body),
+            Err(e) => {
+                log::debug!(
+                    "long request at block {} failed for {}: {e}",
+                    job.start,
+                    self.fetcher.describe()
+                );
+                LongEnd::Failed
+            }
+        };
+        if matches!(end, LongEnd::Finished) {
+            return;
+        }
         let mut st = lock(&self.state);
-        if matches!(st.blocks.get(&index), Some(Slot::Loading)) {
-            st.blocks.remove(&index);
+        st.streaming = false;
+        if st.jumps == job.jumps {
+            st.frontier = None;
+            self.release_reserved(&mut st);
+            if matches!(end, LongEnd::Failed) {
+                st.longest = (job.blocks / 2).max(1);
+            }
+        }
+    }
+
+    /// Cuts a long request's body into blocks, publishing each as it lands.
+    fn read_long(&self, job: &Job, body: RangeBody) -> LongEnd {
+        let bs = self.block_size;
+        let RangeBody { mut reader, len } = body;
+        let to_eof = self
+            .fetcher
+            .size()
+            .is_some_and(|s| job.start * bs + len >= s);
+        let whole = if to_eof { len.div_ceil(bs) } else { len / bs };
+        if !to_eof && len < job.blocks * bs {
+            let mut st = lock(&self.state);
+            st.longest = st.longest.min(whole.max(1));
+        }
+        if whole == 0 {
+            return LongEnd::Failed;
+        }
+        let last = job.start + whole - 1;
+        let mut left = len;
+        let mut paused = false;
+        for index in job.start..=last {
+            if let Some(why) = self.wait_for_room(job, index, &mut paused) {
+                return Self::leave(reader, left, bs, why);
+            }
+            let mut data = vec![0u8; left.min(bs) as usize];
+            let mut got = 0;
+            while got < data.len() {
+                match reader.read(&mut data[got..]) {
+                    Ok(0) => return Self::broke_off(paused),
+                    Ok(n) => {
+                        got += n;
+                        left -= n as u64;
+                    }
+                    Err(e) if e.kind() == io::ErrorKind::Interrupted => {}
+                    Err(e) => {
+                        log::debug!(
+                            "long request broke off at block {index} for {}: {e}",
+                            self.fetcher.describe()
+                        );
+                        return Self::broke_off(paused);
+                    }
+                }
+                if let Some(why) = self.stop_reason(job) {
+                    return Self::leave(reader, left, bs, why);
+                }
+            }
+            self.publish(job, index, last, data);
+            paused = false;
+        }
+        if left == 0 {
+            // Reaching the end of the body returns its connection to the pool.
+            let _ = reader.read(&mut [0u8; 1]);
+        }
+        LongEnd::Finished
+    }
+
+    fn broke_off(paused: bool) -> LongEnd {
+        if paused {
+            LongEnd::ClosedWhilePaused
+        } else {
+            LongEnd::Failed
+        }
+    }
+
+    /// Ends a request something has stopped. Dropping its body closes its
+    /// connection, so one within a block of its end is finished instead and
+    /// the connection goes back to the pool.
+    fn leave(mut reader: Box<dyn Read + Send>, left: u64, bs: u64, why: Leave) -> LongEnd {
+        if matches!(why, Leave::LeftBehind) && left <= bs {
+            let _ = io::copy(&mut reader, &mut io::sink());
+        }
+        LongEnd::Stopped
+    }
+
+    fn stop_reason(&self, job: &Job) -> Option<Leave> {
+        let st = lock(&self.state);
+        if st.closing {
+            Some(Leave::Closing)
+        } else if st.jumps != job.jumps {
+            Some(Leave::LeftBehind)
+        } else {
+            None
+        }
+    }
+
+    /// Waits while the blocks ahead of the reader fill the cache, leaving the
+    /// socket unread. Returns why to stop, if the request should.
+    fn wait_for_room(&self, job: &Job, index: u64, paused: &mut bool) -> Option<Leave> {
+        let mut st = lock(&self.state);
+        loop {
+            if st.closing {
+                return Some(Leave::Closing);
+            }
+            if st.jumps != job.jumps {
+                return Some(Leave::LeftBehind);
+            }
+            if unread(&st, index) < self.room() {
+                return None;
+            }
+            *paused = true;
+            st = self.wake.wait(st).unwrap_or_else(PoisonError::into_inner);
+        }
+    }
+
+    /// Publishes a block of a long request and holds the next one. The last
+    /// block also ends the request's state, in the same step, so a reader
+    /// woken by it can start the next request straight away.
+    fn publish(&self, job: &Job, index: u64, last: u64, data: Vec<u8>) {
+        let mut st = lock(&self.state);
+        st.stats.read_aheads += 1;
+        self.insert_ready(&mut st, index, Arc::new(data));
+        if index == last {
+            st.streaming = false;
+        }
+        if st.jumps == job.jumps {
+            st.reserved = None;
+            st.frontier = None;
+            if index < last {
+                let next = index + 1;
+                let state = &mut *st;
+                state.frontier = Some(next);
+                if let Entry::Vacant(slot) = state.blocks.entry(next) {
+                    slot.insert(Slot::Loading);
+                    state.reserved = Some(next);
+                }
+            }
         }
         drop(st);
         self.loaded.notify_all();
     }
 }
 
-fn read_ahead_worker<F: RangeFetch>(weak: Weak<Inner<F>>, rx: Receiver<u64>) {
-    while let Ok(mut index) = rx.recv() {
+fn read_ahead_worker<F: RangeFetch>(weak: Weak<Inner<F>>, rx: Receiver<Job>) {
+    while let Ok(mut job) = rx.recv() {
         let Some(inner) = weak.upgrade() else { break };
         // After a seek only the newest request matters.
         while let Ok(newer) = rx.try_recv() {
-            inner.unreserve(index);
-            index = newer;
+            inner.abandon(&job);
+            job = newer;
         }
-        inner.read_ahead(index);
+        if job.blocks > 1 {
+            inner.stream_ahead(job);
+        } else {
+            inner.read_ahead(job);
+        }
     }
 }
 
 impl<F: RangeFetch> CachedSource<F> {
-    /// Records that the reader used block `index` and starts a read-ahead of
-    /// the next block when access looks sequential.
+    /// Starts fetching ahead of block `index` when access looks sequential.
     fn note_access(&self, index: u64) {
         let inner = &self.inner;
         if !inner.read_ahead || inner.fetcher.sequential_only() {
             return;
         }
-        let next = index + 1;
-        {
-            let mut st = lock(&inner.state);
-            let sequential = matches!(st.last_block, Some(l) if l == index || l + 1 == index);
-            st.last_block = Some(index);
-            let in_file = inner
-                .fetcher
-                .size()
-                .is_none_or(|s| next * inner.block_size < s);
-            if !sequential || !in_file || st.blocks.contains_key(&next) {
-                return;
-            }
-            // Reserved now, not when the thread gets to it: a reader that
-            // gets there first waits for the read-ahead instead of fetching
-            // the block itself.
-            st.blocks.insert(next, Slot::Loading);
-        }
+        let Some(job) = inner.next_job(&mut lock(&inner.state), index) else {
+            return;
+        };
         let mut ahead = lock(&inner.ahead);
         if ahead.is_none() {
             let (tx, rx) = mpsc::channel();
@@ -281,10 +645,13 @@ impl<F: RangeFetch> CachedSource<F> {
                 Err(e) => log::warn!("cannot start read-ahead thread: {e}"),
             }
         }
-        let sent = ahead.as_ref().is_some_and(|tx| tx.send(next).is_ok());
+        let refused = match ahead.as_ref() {
+            Some(tx) => tx.send(job).err().map(|e| e.0),
+            None => Some(job),
+        };
         drop(ahead);
-        if !sent {
-            inner.unreserve(next);
+        if let Some(job) = refused {
+            inner.abandon(&job);
         }
     }
 }
@@ -388,6 +755,7 @@ mod tests {
             block_size: block,
             max_blocks: blocks,
             read_ahead: ahead,
+            ..CacheOptions::default()
         }
     }
 
@@ -557,5 +925,479 @@ mod tests {
             std::thread::sleep(Duration::from_millis(5));
         }
         assert!(weak.upgrade().is_none());
+    }
+
+    const BLOCK: u64 = 4096;
+
+    /// What a [`Long`] fetcher's requests did.
+    struct Wire {
+        /// Every request, as (offset, length asked for).
+        requests: Mutex<Vec<(u64, u64)>>,
+        /// Bytes long bodies have sent.
+        sent: AtomicUsize,
+        /// Long bodies dropped before their end.
+        dropped: AtomicUsize,
+        /// A long body sends nothing from this offset until it's raised.
+        hold: Mutex<u64>,
+        raised: Condvar,
+        /// A long body breaks off on reaching this offset, once: with an
+        /// error, or by just ending.
+        break_at: Mutex<Option<(u64, bool)>>,
+    }
+
+    impl Wire {
+        fn requests(&self) -> Vec<(u64, u64)> {
+            lock(&self.requests).clone()
+        }
+
+        fn hold_at(&self, offset: u64) {
+            *lock(&self.hold) = offset;
+            self.raised.notify_all();
+        }
+    }
+
+    struct Long {
+        data: Arc<Vec<u8>>,
+        wire: Arc<Wire>,
+        /// Most bytes one long request sends.
+        cap: Option<u64>,
+        long: bool,
+        refuse_long: bool,
+    }
+
+    impl RangeFetch for Long {
+        fn fetch(&self, offset: u64, len: usize) -> io::Result<Vec<u8>> {
+            lock(&self.wire.requests).push((offset, len as u64));
+            let start = (offset as usize).min(self.data.len());
+            let end = (start + len).min(self.data.len());
+            Ok(self.data[start..end].to_vec())
+        }
+        fn size(&self) -> Option<u64> {
+            Some(self.data.len() as u64)
+        }
+        fn describe(&self) -> String {
+            "long".into()
+        }
+        fn long_ranges(&self) -> bool {
+            self.long
+        }
+        fn open_range(&self, offset: u64, len: u64) -> io::Result<RangeBody> {
+            lock(&self.wire.requests).push((offset, len));
+            if self.refuse_long {
+                return Err(io::ErrorKind::ConnectionRefused.into());
+            }
+            let rest = self.data.len() as u64 - offset;
+            let len = self.cap.map_or(len, |c| len.min(c)).min(rest);
+            Ok(RangeBody {
+                reader: Box::new(Body {
+                    data: self.data.clone(),
+                    pos: offset,
+                    end: offset + len,
+                    wire: self.wire.clone(),
+                }),
+                len,
+            })
+        }
+    }
+
+    struct Body {
+        data: Arc<Vec<u8>>,
+        pos: u64,
+        end: u64,
+        wire: Arc<Wire>,
+    }
+
+    impl Read for Body {
+        fn read(&mut self, buf: &mut [u8]) -> io::Result<usize> {
+            if self.pos == self.end {
+                return Ok(0);
+            }
+            let mut hold = lock(&self.wire.hold);
+            while self.pos >= *hold {
+                hold = self
+                    .wire
+                    .raised
+                    .wait(hold)
+                    .unwrap_or_else(PoisonError::into_inner);
+            }
+            let mut stop = self.end.min(*hold);
+            drop(hold);
+            let mut breaking = lock(&self.wire.break_at);
+            if let Some((at, error)) = *breaking {
+                if self.pos >= at {
+                    *breaking = None;
+                    return if error {
+                        Err(io::ErrorKind::ConnectionReset.into())
+                    } else {
+                        Ok(0)
+                    };
+                }
+                stop = stop.min(at);
+            }
+            drop(breaking);
+            let n = buf.len().min(1024).min((stop - self.pos) as usize);
+            buf[..n].copy_from_slice(&self.data[self.pos as usize..][..n]);
+            self.pos += n as u64;
+            self.wire.sent.fetch_add(n, Ordering::SeqCst);
+            Ok(n)
+        }
+    }
+
+    impl Drop for Body {
+        fn drop(&mut self) {
+            if self.pos < self.end {
+                self.wire.dropped.fetch_add(1, Ordering::SeqCst);
+            }
+        }
+    }
+
+    type LongParts = (Arc<CachedSource<Long>>, Arc<Wire>, Arc<Vec<u8>>);
+
+    fn long_with(bytes: u64, cap: Option<u64>, long: bool, refuse_long: bool) -> LongParts {
+        let d = Arc::new(data(bytes as usize));
+        let wire = Arc::new(Wire {
+            requests: Mutex::default(),
+            sent: AtomicUsize::new(0),
+            dropped: AtomicUsize::new(0),
+            hold: Mutex::new(u64::MAX),
+            raised: Condvar::new(),
+            break_at: Mutex::new(None),
+        });
+        let fetcher = Long {
+            data: d.clone(),
+            wire: wire.clone(),
+            cap,
+            long,
+            refuse_long,
+        };
+        let s = CachedSource::new(fetcher, &opts(BLOCK as usize, 8, true));
+        (Arc::new(s), wire, d)
+    }
+
+    fn long_source(blocks: u64) -> LongParts {
+        long_with(blocks * BLOCK, None, true, false)
+    }
+
+    /// Reads `from..to` a piece at a time like a demuxer, on a thread of its
+    /// own so a read that hangs fails the test.
+    fn read_range(s: &Arc<CachedSource<Long>>, from: u64, to: u64) -> Vec<u8> {
+        let s = s.clone();
+        let (tx, rx) = mpsc::channel();
+        std::thread::spawn(move || {
+            let mut out = Vec::new();
+            let mut buf = [0u8; 1024];
+            while from + (out.len() as u64) < to {
+                let want = (to - from - out.len() as u64).min(buf.len() as u64) as usize;
+                let n = s
+                    .read_at(from + out.len() as u64, &mut buf[..want])
+                    .unwrap();
+                assert_ne!(n, 0, "end of file before {to}");
+                out.extend_from_slice(&buf[..n]);
+            }
+            let _ = tx.send(out);
+        });
+        rx.recv_timeout(Duration::from_secs(10))
+            .expect("the read is stuck")
+    }
+
+    fn wait_until(what: &str, mut done: impl FnMut() -> bool) {
+        let deadline = Instant::now() + Duration::from_secs(5);
+        while !done() {
+            assert!(Instant::now() < deadline, "never happened: {what}");
+            std::thread::sleep(Duration::from_millis(2));
+        }
+    }
+
+    /// Time for a long request to fill the cache and stop reading.
+    fn let_it_settle() {
+        std::thread::sleep(Duration::from_millis(60));
+    }
+
+    /// Reads on until a long request runs at least `past` blocks beyond
+    /// where it would wait for the reader, and returns the next block to read.
+    fn read_until_mid_request(s: &Arc<CachedSource<Long>>, wire: &Wire, past: u64) -> u64 {
+        let mut next = 30;
+        read_range(s, 0, next * BLOCK);
+        loop {
+            let_it_settle();
+            let (offset, len) = *wire.requests().last().unwrap();
+            if (offset + len) / BLOCK > next + 6 + past {
+                return next;
+            }
+            read_range(s, next * BLOCK, (next + 1) * BLOCK);
+            next += 1;
+        }
+    }
+
+    #[test]
+    fn request_sizes_follow_the_table() {
+        for (run, want) in [
+            (0, 1),
+            (3, 1),
+            (4, 2),
+            (5, 2),
+            (6, 4),
+            (9, 4),
+            (10, 8),
+            (18, 16),
+            (34, 32),
+            (65, 32),
+            (66, 64),
+            (1000, 64),
+        ] {
+            assert_eq!(request_blocks(run, 64), want, "after {run} blocks");
+        }
+        assert_eq!(request_blocks(1000, 16), 16);
+        assert_eq!(request_blocks(1000, 1), 1);
+    }
+
+    #[test]
+    fn requests_grow_as_reads_go_on_and_restart_after_a_jump() {
+        let (s, wire, d) = long_source(300);
+        assert!(read_range(&s, 0, 200 * BLOCK) == d[..200 * BLOCK as usize]);
+        let requests = wire.requests();
+        assert!(requests[..5].iter().all(|r| r.1 == BLOCK), "{requests:?}");
+        assert_eq!(requests[5], (5 * BLOCK, 2 * BLOCK), "{requests:?}");
+        for pair in requests.windows(2) {
+            assert_eq!(
+                pair[0].0 + pair[0].1,
+                pair[1].0,
+                "gap or repeat: {requests:?}"
+            );
+            assert!(pair[0].1 <= pair[1].1, "shrank: {requests:?}");
+        }
+        assert!(
+            requests.iter().all(|r| r.1 <= r.0.max(BLOCK)),
+            "{requests:?}"
+        );
+        assert_eq!(requests.iter().map(|r| r.1).max(), Some(64 * BLOCK));
+
+        let_it_settle();
+        let before = wire.requests().len();
+        assert!(
+            read_range(&s, 280 * BLOCK, 284 * BLOCK)
+                == d[280 * BLOCK as usize..284 * BLOCK as usize]
+        );
+        let after = wire.requests();
+        assert_eq!(after[before], (280 * BLOCK, BLOCK));
+        assert!(after[before..].iter().all(|r| r.1 == BLOCK), "{after:?}");
+    }
+
+    #[test]
+    fn a_waiting_reader_gets_a_block_before_its_request_finishes() {
+        let (s, wire, d) = long_source(40);
+        wire.hold_at(6 * BLOCK);
+        assert!(read_range(&s, 0, 6 * BLOCK) == d[..6 * BLOCK as usize]);
+        assert!(wire.requests().contains(&(5 * BLOCK, 2 * BLOCK)));
+        assert_eq!(wire.sent.load(Ordering::SeqCst), BLOCK as usize);
+        wire.hold_at(u64::MAX);
+    }
+
+    #[test]
+    fn a_jump_drops_a_long_request_and_never_waits_on_it() {
+        let (s, wire, d) = long_source(400);
+        let next = read_until_mid_request(&s, &wire, 3);
+        assert_eq!(wire.dropped.load(Ordering::SeqCst), 0);
+        let far = 390 * BLOCK;
+        assert!(read_range(&s, far, far + 100) == d[far as usize..far as usize + 100]);
+        wait_until("the request is dropped", || {
+            wire.dropped.load(Ordering::SeqCst) == 1
+        });
+        let back = (next + 6) * BLOCK;
+        assert!(read_range(&s, back, back + 100) == d[back as usize..back as usize + 100]);
+
+        // A request stuck waiting for its server doesn't hold the reader.
+        let (s, wire, d) = long_source(40);
+        wire.hold_at(6 * BLOCK);
+        read_range(&s, 0, 6 * BLOCK);
+        wait_until("the request is waiting on block 6", || {
+            matches!(lock(&s.inner.state).blocks.get(&6), Some(Slot::Loading))
+        });
+        let far = 30 * BLOCK;
+        assert!(read_range(&s, far, far + 100) == d[far as usize..far as usize + 100]);
+        let held = 6 * BLOCK;
+        assert!(read_range(&s, held, held + 100) == d[held as usize..held as usize + 100]);
+        wire.hold_at(u64::MAX);
+    }
+
+    #[test]
+    fn a_request_nearly_done_finishes_instead_of_dropping() {
+        let (s, wire, _) = long_source(400);
+        let mut next = read_until_mid_request(&s, &wire, 3);
+        let (offset, len) = *wire.requests().last().unwrap();
+        let end = (offset + len) / BLOCK;
+        // A reader on block r leaves the request waiting on block r + 7.
+        while next + 7 < end {
+            read_range(&s, next * BLOCK, (next + 1) * BLOCK);
+            next += 1;
+        }
+        let_it_settle();
+        let far = 395 * BLOCK;
+        read_range(&s, far, far + 100);
+        wait_until("the last block is read", || !lock(&s.inner.state).streaming);
+        assert_eq!(wire.dropped.load(Ordering::SeqCst), 0);
+    }
+
+    #[test]
+    fn a_paused_reader_holds_no_more_than_the_cache_then_resumes() {
+        let (s, wire, d) = long_source(120);
+        read_range(&s, 0, 30 * BLOCK);
+        let_it_settle();
+        let sent = wire.sent.load(Ordering::SeqCst) as u64;
+        assert!(
+            sent <= 36 * BLOCK,
+            "{sent} bytes while the reader is on block 29"
+        );
+        let ready = lock(&s.inner.state)
+            .blocks
+            .values()
+            .filter(|b| matches!(b, Slot::Ready { .. }))
+            .count();
+        assert!(ready <= 8, "{ready} blocks in memory");
+        let_it_settle();
+        assert_eq!(
+            wire.sent.load(Ordering::SeqCst) as u64,
+            sent,
+            "kept reading"
+        );
+
+        assert!(read_range(&s, 30 * BLOCK, 120 * BLOCK) == d[30 * BLOCK as usize..]);
+        let requests = wire.requests();
+        for pair in requests.windows(2) {
+            assert_eq!(pair[0].0 + pair[0].1, pair[1].0, "refetched: {requests:?}");
+        }
+    }
+
+    #[test]
+    fn a_server_closing_a_paused_request_costs_no_error() {
+        for error in [true, false] {
+            let (s, wire, d) = long_source(400);
+            let next = read_until_mid_request(&s, &wire, 3);
+            // The request is waiting on block next + 6.
+            *lock(&wire.break_at) = Some(((next + 6) * BLOCK, error));
+            assert!(
+                read_range(&s, next * BLOCK, 400 * BLOCK) == d[next as usize * BLOCK as usize..]
+            );
+            assert_eq!(lock(&s.inner.state).longest, 64);
+            assert!(wire.requests().last().unwrap().1 > BLOCK);
+        }
+    }
+
+    #[test]
+    fn a_body_failing_midway_resumes_and_every_byte_matches() {
+        for error in [true, false] {
+            let (s, wire, d) = long_source(120);
+            let at = 11 * BLOCK + 100;
+            *lock(&wire.break_at) = Some((at, error));
+            assert!(
+                read_range(&s, 0, 120 * BLOCK) == *d,
+                "short data taken as the file's"
+            );
+            let requests = wire.requests();
+            assert!(
+                requests.iter().filter(|r| r.0 == 11 * BLOCK).count() == 1,
+                "the block that failed is fetched again from its start: {requests:?}"
+            );
+            assert!(requests.last().unwrap().0 > 11 * BLOCK);
+        }
+    }
+
+    #[test]
+    fn a_fetcher_that_refuses_long_requests_falls_back_to_blocks() {
+        let (s, wire, d) = long_with(60 * BLOCK, None, true, true);
+        assert!(read_range(&s, 0, 60 * BLOCK) == *d);
+        assert_eq!(s.stats().long_requests, 1);
+        let requests = wire.requests();
+        assert_eq!(requests.iter().filter(|r| r.1 > BLOCK).count(), 1);
+    }
+
+    #[test]
+    fn a_cap_stops_requests_growing_and_the_file_is_read_in_full() {
+        let (s, wire, d) = long_with(100 * BLOCK, Some(3 * BLOCK + 100), true, false);
+        assert!(read_range(&s, 0, 100 * BLOCK) == *d);
+        let requests = wire.requests();
+        let longest = requests.iter().map(|r| r.1).max().unwrap();
+        assert!(longest <= 4 * BLOCK, "{requests:?}");
+        let last = requests.iter().rev().take(5);
+        assert!(last.clone().all(|r| r.1 <= 3 * BLOCK), "{requests:?}");
+
+        // Under one block, long requests can't work: back to single blocks.
+        let (s, wire, d) = long_with(100 * BLOCK, Some(1024), true, false);
+        assert!(read_range(&s, 0, 100 * BLOCK) == *d);
+        assert_eq!(s.stats().long_requests, 1, "{:?}", wire.requests());
+    }
+
+    #[test]
+    fn a_short_last_block_in_a_long_request_is_the_end_of_the_file() {
+        let bytes = 100 * BLOCK + 700;
+        let (s, _, d) = long_with(bytes, None, true, false);
+        assert!(read_range(&s, 0, bytes) == *d);
+        let mut buf = [0u8; 16];
+        assert_eq!(s.read_at(bytes, &mut buf).unwrap(), 0);
+        assert!(s.stats().long_requests > 0);
+    }
+
+    #[test]
+    fn two_alternating_readers_stay_one_block_at_a_time() {
+        let (s, wire, d) = long_source(400);
+        for i in 0..60u64 {
+            for base in [0, 300 * BLOCK] {
+                let at = base + i * 2048;
+                assert!(read_range(&s, at, at + 2048) == d[at as usize..at as usize + 2048]);
+            }
+        }
+        assert!(wire.requests().iter().all(|r| r.1 == BLOCK));
+        assert_eq!(s.stats().long_requests, 0);
+        assert_eq!(wire.dropped.load(Ordering::SeqCst), 0);
+    }
+
+    #[test]
+    fn a_fetcher_without_long_requests_stays_one_block_ahead() {
+        let (s, wire, d) = long_with(60 * BLOCK, None, false, false);
+        for block in 0..50 {
+            let at = block * BLOCK;
+            assert!(read_range(&s, at, at + BLOCK) == d[at as usize..(at + BLOCK) as usize]);
+            let requested = wire.requests().iter().map(|r| r.0).max().unwrap();
+            assert!(requested <= (block + 1) * BLOCK, "ahead of block {block}");
+        }
+        assert!(wire.requests().iter().all(|r| r.1 == BLOCK));
+        assert_eq!(s.stats().long_requests, 0);
+    }
+
+    /// Hands back the source itself once `read_range`'s threads have let go.
+    fn only_owner(s: Arc<CachedSource<Long>>) -> CachedSource<Long> {
+        wait_until("the reader lets go", || Arc::strong_count(&s) == 1);
+        Arc::try_unwrap(s).ok().unwrap()
+    }
+
+    #[test]
+    fn closing_never_waits_for_a_long_request() {
+        // Waiting for room: it ends at once.
+        let (s, _, _) = long_source(120);
+        read_range(&s, 0, 30 * BLOCK);
+        let_it_settle();
+        let s = only_owner(s);
+        let weak = Arc::downgrade(&s.inner);
+        drop(s);
+        wait_until("the paused request ends", || weak.upgrade().is_none());
+
+        // Blocked on a silent server: closing returns anyway, and the request
+        // ends when the socket does.
+        let (s, wire, _) = long_source(120);
+        wire.hold_at(6 * BLOCK);
+        read_range(&s, 0, 6 * BLOCK);
+        let s = only_owner(s);
+        let weak = Arc::downgrade(&s.inner);
+        let t = Instant::now();
+        drop(s);
+        assert!(
+            t.elapsed() < Duration::from_millis(100),
+            "{:?}",
+            t.elapsed()
+        );
+        assert!(weak.upgrade().is_some(), "still blocked on its socket");
+        wire.hold_at(u64::MAX);
+        wait_until("the request ends", || weak.upgrade().is_none());
+        assert_eq!(wire.dropped.load(Ordering::SeqCst), 1);
     }
 }
