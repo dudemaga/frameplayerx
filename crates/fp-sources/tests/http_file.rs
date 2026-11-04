@@ -399,6 +399,7 @@ fn range_requests_cache_and_read_ahead() {
     let url = server.url("/v/My%20Clip.mp4");
     let f = client.open(&url).unwrap();
     assert!(f.supports_ranges());
+    assert!(f.remote());
     assert_eq!(f.size(), Some(data.len() as u64));
     assert_eq!(f.block_size(), 1 << 20);
     assert!(f.describe().contains("My%20Clip.mp4"));

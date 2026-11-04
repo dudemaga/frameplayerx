@@ -657,6 +657,10 @@ impl<F: RangeFetch> CachedSource<F> {
 }
 
 impl<F: RangeFetch> ByteSource for CachedSource<F> {
+    fn remote(&self) -> bool {
+        true
+    }
+
     fn size(&self) -> Option<u64> {
         self.inner.fetcher.size()
     }

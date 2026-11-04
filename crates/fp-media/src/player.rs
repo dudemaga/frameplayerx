@@ -62,8 +62,12 @@ pub struct PlayerConfig {
     pub audio: output::Backend,
     /// Decoded frames kept ahead of the display.
     pub video_queue: usize,
-    /// Demuxer read-ahead limit in seconds of video.
+    /// Demuxer read-ahead limit in seconds of video, after opening or a skip.
     pub read_ahead_secs: f64,
+    /// What that grows to as a video from a network source plays. A slow patch
+    /// comes without warning and a buffer can't fill during one, so this has
+    /// to be in hand beforehand, but reading this far at once slows opening.
+    pub remote_read_ahead_secs: f64,
     /// Demuxer read-ahead limit in bytes (network sources).
     pub read_ahead_bytes: usize,
     /// Start paused at this position instead of 0.
@@ -82,6 +86,7 @@ impl Default for PlayerConfig {
             audio: output::Backend::default(),
             video_queue: 8,
             read_ahead_secs: 4.0,
+            remote_read_ahead_secs: 15.0,
             read_ahead_bytes: 96 << 20,
             start_at: 0.0,
             start_paused: false,
@@ -259,6 +264,7 @@ impl Player {
         config: PlayerConfig,
         tracks: impl FnOnce(&MediaInfo) -> Tracks,
     ) -> Result<Player> {
+        let config = config.for_source(&*src);
         let quit = Arc::new(AtomicBool::new(false));
         let mut input = Input::open(src, name, quit.clone())?;
         if let Some(tl) = &config.timeline {
@@ -672,16 +678,41 @@ impl Drop for Player {
     }
 }
 
-/// Whether the demuxer has read far enough ahead for now: `ahead` seconds
-/// and `bytes` of packets queued, `video_packets` of them video.
+/// Seconds played after opening or a skip before the read-ahead grows, so
+/// neither has to compete with a burst of reading.
+const READ_AHEAD_GROWS_AFTER: f64 = 10.0;
+/// Seconds of read-ahead gained per second played: gentle enough to ask for
+/// only half as much again as the video's own rate.
+const READ_AHEAD_GROWTH: f64 = 0.5;
+
+impl PlayerConfig {
+    /// Only a network source grows its read-ahead.
+    fn for_source(mut self, src: &dyn ByteSource) -> PlayerConfig {
+        if !src.remote() {
+            self.remote_read_ahead_secs = self.read_ahead_secs;
+        }
+        self
+    }
+
+    /// Seconds to read ahead, `played` seconds after opening or a skip.
+    fn read_ahead_target(&self, played: f64) -> f64 {
+        let grown = (played - READ_AHEAD_GROWS_AFTER).max(0.0) * READ_AHEAD_GROWTH;
+        (self.read_ahead_secs + grown).min(self.remote_read_ahead_secs)
+    }
+}
+
+/// Whether the demuxer has read far enough ahead for now, aiming for `target`
+/// seconds: `ahead` seconds and `bytes` of packets queued, `video_packets` of
+/// them video.
 fn read_enough(
     cfg: &PlayerConfig,
+    target: f64,
     ahead: f64,
     bytes: usize,
     video_packets: usize,
     audio_starved: bool,
 ) -> bool {
-    let budget = ahead > cfg.read_ahead_secs || bytes > cfg.read_ahead_bytes || video_packets > 600;
+    let budget = ahead > target || bytes > cfg.read_ahead_bytes || video_packets > 600;
     // Starved audio may read past the budget to find its next packets, but
     // only so far: audio that ended early, or lags far behind, would
     // otherwise queue the rest of the video in memory.
@@ -805,12 +836,14 @@ fn demux_thread(
             continue;
         }
         // Back-pressure: enough read ahead?
+        let now = sh.clock.now();
         let ahead = first_video_ts
-            .map(|f| last_video_ts - f.max(sh.clock.now()))
+            .map(|f| last_video_ts - f.max(now))
             .unwrap_or(0.0);
+        let target = cfg.read_ahead_target(first_video_ts.map_or(0.0, |f| now - f));
         let bytes = sh.vpkts.bytes.load(Ordering::Relaxed) + sh.apkts.bytes.load(Ordering::Relaxed);
         let audio_starved = sh.has_audio.load(Ordering::Acquire) && sh.apkts.len() < 4;
-        if read_enough(&cfg, ahead, bytes, sh.vpkts.len(), audio_starved) {
+        if read_enough(&cfg, target, ahead, bytes, sh.vpkts.len(), audio_starved) {
             let c = sh.ctl();
             let _ = sh.ctl_cv.wait_timeout(c, Duration::from_millis(10));
             continue;
@@ -1332,13 +1365,57 @@ mod tests {
             read_ahead_bytes: 1000,
             ..cfg()
         };
-        assert!(!read_enough(&cfg, 1.0, 500, 10, false));
-        assert!(read_enough(&cfg, 5.0, 500, 10, false), "time");
-        assert!(read_enough(&cfg, 1.0, 1500, 10, false), "bytes");
+        assert!(!read_enough(&cfg, 4.0, 1.0, 500, 10, false));
+        assert!(read_enough(&cfg, 4.0, 5.0, 500, 10, false), "time");
+        assert!(
+            !read_enough(&cfg, 15.0, 5.0, 500, 10, false),
+            "a grown target"
+        );
+        assert!(read_enough(&cfg, 4.0, 1.0, 1500, 10, false), "bytes");
         // Waiting for audio packets: past the budget, up to four times it.
-        assert!(!read_enough(&cfg, 60.0, 3000, 10, true));
-        assert!(read_enough(&cfg, 60.0, 4001, 10, true));
-        assert!(read_enough(&cfg, 60.0, 100, 2401, true));
+        assert!(!read_enough(&cfg, 4.0, 60.0, 3000, 10, true));
+        assert!(read_enough(&cfg, 4.0, 60.0, 4001, 10, true));
+        assert!(read_enough(&cfg, 4.0, 60.0, 100, 2401, true));
+    }
+
+    struct Remote(Arc<dyn ByteSource>);
+
+    impl ByteSource for Remote {
+        fn size(&self) -> Option<u64> {
+            self.0.size()
+        }
+        fn read_at(&self, offset: u64, buf: &mut [u8]) -> std::io::Result<usize> {
+            self.0.read_at(offset, buf)
+        }
+        fn describe(&self) -> String {
+            self.0.describe()
+        }
+        fn remote(&self) -> bool {
+            true
+        }
+    }
+
+    #[test]
+    fn a_remote_read_ahead_starts_small_and_grows_as_the_video_plays() {
+        let remote = cfg().for_source(&Remote(crate::ts_fixture::h264_aac_ts(0.0)));
+        for (played, want) in [
+            (-1.0, 4.0),
+            (0.0, 4.0),
+            (10.0, 4.0),
+            (12.0, 5.0),
+            (20.0, 9.0),
+            (32.0, 15.0),
+            (600.0, 15.0),
+        ] {
+            assert_eq!(remote.read_ahead_target(played), want, "after {played} s");
+        }
+    }
+
+    #[test]
+    fn a_local_read_ahead_never_grows() {
+        let local = cfg().for_source(&*crate::ts_fixture::h264_aac_ts(0.0));
+        assert_eq!(local.read_ahead_target(0.0), 4.0);
+        assert_eq!(local.read_ahead_target(600.0), 4.0);
     }
 
     #[test]

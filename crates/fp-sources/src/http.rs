@@ -1379,6 +1379,10 @@ impl HttpFile {
 }
 
 impl ByteSource for HttpFile {
+    fn remote(&self) -> bool {
+        true
+    }
+
     fn size(&self) -> Option<u64> {
         self.src.size()
     }
