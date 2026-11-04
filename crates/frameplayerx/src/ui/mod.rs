@@ -653,6 +653,7 @@ pub struct SourceForm {
     pub username: String,
     pub password: String,
     pub insecure_tls: bool,
+    pub parallel_downloads: bool,
     /// Signing in to a Jellyfin/Emby server with Quick Connect rather than a
     /// password.
     pub use_quick_connect: bool,
@@ -691,6 +692,7 @@ impl Default for SourceForm {
             username: String::new(),
             password: String::new(),
             insecure_tls: false,
+            parallel_downloads: false,
             use_quick_connect: true,
             quick_connect: QuickConnect::Idle,
             plex: plex::Connect::default(),

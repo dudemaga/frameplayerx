@@ -17,6 +17,7 @@ fn mb_config(url: &str) -> MediaBrowserConfig {
         url: url.into(),
         credentials: None,
         insecure_tls: false,
+        parallel_downloads: false,
         max_height: None,
         access_token: Some("current-token".into()),
         user_id: Some("alice".into()),
@@ -106,6 +107,7 @@ fn feed_config(id: &str, url: &str) -> FeedConfig {
         url: url.into(),
         credentials: None,
         insecure_tls: false,
+        parallel_downloads: false,
         max_height: None,
     }
 }

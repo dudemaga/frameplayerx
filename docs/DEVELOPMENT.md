@@ -394,7 +394,18 @@ VK_ICD_FILENAMES=/usr/share/vulkan/icd.d/lvp_icd.json \
 |---|---|
 | `frameplayerx --info FILE` | Prints what FramePlayerX detects about a video: format, streams, HDR |
 | `frameplayerx --decode-bench FILE [--sw]` | Decodes without displaying and prints the decoder and frame rate |
-| `frameplayerx --seek-test FILE\|URL` | Skips through a video headless, checking buffering and that hardware decoders are given back |
+| `frameplayerx --seek-test FILE\|URL` | Skips through a video headless, checking buffering and that hardware decoders are given back, and measures reads |
+
+### Measuring stream reads
+
+`--seek-test` reports what the demuxer read by each first picture and skip, and ends with medians. `--play SECONDS` plays first, reporting every 10 s. `--trace-reads` prints every read's offset and length, and each jump with how much was read in order before it. `--read-test SECONDS` plays nothing and just reads from the start as fast as the source delivers. `--read-ahead SECONDS` replaces the player's buffer of video read ahead.
+
+```bash
+frameplayerx --seek-test URL --rounds 1 --play 60 --seeks 8 --step 120   # playback and skips
+frameplayerx --seek-test URL --rounds 5 --seeks 0 --play 0               # first picture
+```
+
+A skip slower than 2 s counts as a failure, so a slow route ends in `FAIL`; the numbers are still good. "Read speed while the buffer fills" counts only bursts of at least 16 MiB with no gap over 5 ms, so time the demuxer spends waiting with a full queue doesn't lower it, and reads served from the block cache don't raise it. A link's speed can swing 2x between runs, so compare builds in one session, on medians.
 
 ## On the headset
 

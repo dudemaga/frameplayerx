@@ -258,6 +258,7 @@ impl FeedSource {
         let (url, creds) = clean_url_and_credentials(&config.url, config.credentials.as_ref())?;
         let opts = HttpOptions {
             insecure_tls: config.insecure_tls,
+            cache: crate::cache::CacheOptions::for_downloads(config.parallel_downloads),
             ..HttpOptions::default()
         };
         Ok(FeedSource {
@@ -845,6 +846,7 @@ mod tests {
             url: server.url("/feed"),
             credentials: None,
             insecure_tls: false,
+            parallel_downloads: false,
             max_height: None,
         })
         .unwrap();
@@ -947,6 +949,7 @@ mod tests {
             url: "http://u:pwx9@vr:9999/deovr?apikey=SECRETKEY".into(),
             credentials: Some(Credentials::new("bob", "hunter2")),
             insecure_tls: false,
+            parallel_downloads: false,
             max_height: None,
         };
         let d = FeedSource::deovr(&config).unwrap();

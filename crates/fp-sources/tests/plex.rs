@@ -102,6 +102,7 @@ fn config(server: &TestServer) -> PlexConfig {
         connections: Vec::new(),
         auth: None,
         insecure_tls: false,
+        parallel_downloads: false,
         max_height: None,
         local_only: false,
         allow_relay: true,

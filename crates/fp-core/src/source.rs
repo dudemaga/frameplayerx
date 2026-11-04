@@ -23,6 +23,12 @@ pub trait ByteSource: Send + Sync {
     fn streamed(&self) -> bool {
         false
     }
+    /// Read over a network, whose speed can drop at any moment, so a player
+    /// should keep more in hand. A live transcode isn't: it arrives no faster
+    /// than the server encodes.
+    fn remote(&self) -> bool {
+        false
+    }
 }
 
 /// A `ByteSource` over a local file.

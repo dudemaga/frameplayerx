@@ -130,6 +130,7 @@ impl PlexSource {
     fn options(config: &PlexConfig) -> HttpOptions {
         HttpOptions {
             insecure_tls: config.insecure_tls,
+            cache: crate::cache::CacheOptions::for_downloads(config.parallel_downloads),
             connect_timeout: Duration::from_secs(3),
             max_retries: 1,
             ..Default::default()
