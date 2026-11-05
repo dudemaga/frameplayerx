@@ -349,7 +349,8 @@ pub fn read_info(input: &Input) -> MediaInfo {
                     hints.eyes_swapped =
                         dict_get(st.metadata, "stereo_mode").as_deref() == Some("block_rl");
                 } else if hints.stereo.is_none()
-                    && let Some((stereo, swapped)) = stereo3d(par, st.metadata)
+                    && let Some((stereo, swapped)) =
+                        stereo3d(par, st.metadata).or_else(|| input.frame_packing(index))
                 {
                     hints.stereo = Some(stereo);
                     hints.eyes_swapped = swapped;
@@ -571,6 +572,13 @@ pub(crate) mod tests {
         assert_eq!(info.hints.projection, Some(Projection::EQUIRECT_180));
         let d = fp_core::format::resolve(None, info.hints, "camera_clip.mp4", 256, 128);
         assert_eq!(d.evidence, fp_core::format::Evidence::Metadata);
+    }
+
+    #[test]
+    fn a_3d_layout_stated_only_in_the_video_stream_is_read() {
+        let hints = read_info(&open("h264_sei_sbs.mp4")).hints;
+        assert_eq!(hints.stereo, Some(StereoLayout::SideBySide));
+        assert!(!hints.eyes_swapped);
     }
 
     #[test]

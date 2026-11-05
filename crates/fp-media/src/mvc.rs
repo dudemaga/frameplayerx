@@ -32,7 +32,7 @@
 //! Both eyes are put side by side into one picture twice as wide, which the
 //! renderer shows as full side-by-side 3D.
 
-mod bits;
+pub(crate) mod bits;
 mod rewrite;
 mod syntax;
 
