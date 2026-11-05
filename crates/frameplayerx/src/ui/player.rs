@@ -687,7 +687,7 @@ pub(crate) fn stream_info_labels(
     } else {
         format!("{} ({}-bit {chroma})", v.pixel_format, v.bit_depth)
     };
-    let size = if v.mvc {
+    let size = if v.mvc || v.frame_sequential {
         let (w, h) = (v.width / 2, v.height);
         tr!("player-size-per-eye", width = w, height = h)
     } else {

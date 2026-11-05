@@ -466,7 +466,7 @@ videos onto it and put it in the Frame. exFAT has no 4 GB file limit, so
 The format is picked automatically from, in order: your own choice for that
 file, the file's spherical/stereo metadata, the file name, and the picture's
 shape. File-name tags understood include `_180`, `_360`, `_LR`/`_SBS`,
-`_TB`/`_OU`, `_RL`, `_FISHEYE190`, `_MKX200`, `_MKX220`, `_VRCA220`,
+`_TB`/`_OU`/`_HTAB`, `_RL`, `_FISHEYE190`, `_MKX200`, `_MKX220`, `_VRCA220`,
 `_EAC`, `_2D`, `_3D`.
 
 Movie shapes (16:9, 4:3, 1.85, scope) and portrait phone clips play on a
@@ -495,6 +495,12 @@ BDMV folder the film's `.ssif` file in `BDMV/STREAM/SSIF` (the `.m2ts` of
 the same name holds the left eye alone). The few streams it can't take
 that way (none of the discs tried) play their left eye in 2D; the decoder
 line in the video's info says "3D Blu-ray as 2D".
+
+Frame sequential 3D files, whose eyes take turns frame by frame at twice the
+film's frame rate, play as full 3D at the film's own rate, each eye at its
+full size. They are found by the label in the file, or by `FS3D` in the file
+name when a file has none. If depth looks inside out, **Swap eyes** in the
+adjust panel corrects it.
 
 A disc image, 2D or 3D, plays its main title (its longest playlist) with
 its chapters (under **⚙ › Chapters**) and its audio and subtitle languages.

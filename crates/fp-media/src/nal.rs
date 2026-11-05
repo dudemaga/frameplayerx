@@ -2,7 +2,15 @@
 //! picture is decoded from, which a precise seek can leave out on its way
 //! to the target.
 
+use crate::mvc::bits::{Reader, unescape};
+use fp_core::format::StereoLayout;
 use fp_ffmpeg_sys as ff;
+
+/// H.264's SEI NAL unit type, HEVC's prefix SEI, and the SEI message that says
+/// how a picture holds two eyes.
+const H264_SEI: u8 = 6;
+const HEVC_SEI: u8 = 39;
+const FRAME_PACKING: usize = 45;
 
 /// Reads the NAL units in one stream's packets.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -83,6 +91,28 @@ impl NalReader {
         }
     }
 
+    pub(crate) fn length_size(&self) -> usize {
+        self.length_size
+    }
+
+    /// How a packet's frame packing SEI message says the eyes are packed, and
+    /// whether the right eye comes first. None when it has none, or states
+    /// a packing that can't be shown.
+    pub(crate) fn frame_packing(&self, data: &[u8]) -> Option<(Packing, bool)> {
+        units(data, self.length_size).find_map(|nal| {
+            let h0 = *nal.first()?;
+            let (kind, sei, header) = if self.hevc {
+                ((h0 >> 1) & 0x3f, HEVC_SEI, 2)
+            } else {
+                (h0 & 0x1f, H264_SEI, 1)
+            };
+            if kind != sei {
+                return None;
+            }
+            sei_frame_packing(&unescape(nal.get(header..)?))
+        })
+    }
+
     /// Whether a packet holds only pictures no other picture is decoded
     /// from, and no parameter sets. SPSs on the way are noted.
     pub(crate) fn disposable(&mut self, data: &[u8]) -> bool {
@@ -127,6 +157,60 @@ impl NalReader {
     }
 }
 
+/// How a frame packing message says the eyes are packed.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum Packing {
+    /// Both eyes in each picture (or a 2D one).
+    Layout(StereoLayout),
+    /// The eyes take turns, picture by picture.
+    FrameSequential,
+}
+
+/// Finds the frame packing message among an SEI RBSP's messages.
+fn sei_frame_packing(mut rbsp: &[u8]) -> Option<(Packing, bool)> {
+    // Each is its type and size, in bytes of 255 and a last one that add up.
+    fn number(rest: &mut &[u8]) -> Option<usize> {
+        let mut n = 0;
+        loop {
+            let (&byte, tail) = rest.split_first()?;
+            *rest = tail;
+            n += byte as usize;
+            if byte != 255 {
+                return Some(n);
+            }
+        }
+    }
+    loop {
+        let kind = number(&mut rbsp)?;
+        let size = number(&mut rbsp)?;
+        let payload = rbsp.get(..size)?;
+        if kind == FRAME_PACKING {
+            return frame_packing_message(payload);
+        }
+        rbsp = &rbsp[size..];
+    }
+}
+
+fn frame_packing_message(payload: &[u8]) -> Option<(Packing, bool)> {
+    let mut r = Reader::new(payload, 0);
+    r.ue().ok()?; // frame_packing_arrangement_id
+    if r.flag().ok()? {
+        return None; // cancelled
+    }
+    let arrangement = r.u(7).ok()?;
+    r.flag().ok()?; // quincunx_sampling_flag
+    let interpretation = r.u(6).ok()?;
+    let packing = match arrangement {
+        3 => Packing::Layout(StereoLayout::SideBySide),
+        4 => Packing::Layout(StereoLayout::TopBottom),
+        5 => Packing::FrameSequential,
+        6 => Packing::Layout(StereoLayout::Mono),
+        _ => return None,
+    };
+    let two_d = packing == Packing::Layout(StereoLayout::Mono);
+    Some((packing, !two_d && interpretation == 2))
+}
+
 /// The NAL units in `data`, each from its header on. A unit cut short by
 /// the end of the data is returned as far as it goes.
 pub(crate) fn units(data: &[u8], length_size: usize) -> impl Iterator<Item = &[u8]> {
@@ -157,6 +241,65 @@ pub(crate) fn start_code(data: &[u8]) -> Option<usize> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_frame_packing_message_says_the_3d_layout() {
+        let h264 = NalReader {
+            hevc: false,
+            length_size: 0,
+            top_layer: None,
+        };
+        let hevc = NalReader { hevc: true, ..h264 };
+        // id 0, not cancelled, then the arrangement, sampling and eye order.
+        let sei = |payload: [u8; 2]| vec![45, 2, payload[0], payload[1], 0x80];
+        let side_by_side = sei([0x81, 0x81]);
+        let cases = [
+            (
+                side_by_side.clone(),
+                Some((Packing::Layout(StereoLayout::SideBySide), false)),
+            ),
+            (
+                sei([0x81, 0x82]),
+                Some((Packing::Layout(StereoLayout::SideBySide), true)),
+            ),
+            (
+                sei([0x82, 0x01]),
+                Some((Packing::Layout(StereoLayout::TopBottom), false)),
+            ),
+            (
+                sei([0x83, 0x01]),
+                Some((Packing::Layout(StereoLayout::Mono), false)),
+            ),
+            (sei([0x82, 0x81]), Some((Packing::FrameSequential, false))),
+            (sei([0x82, 0x82]), Some((Packing::FrameSequential, true))),
+            (sei([0x80, 0x81]), None),       // checkerboard
+            (vec![45, 1, 0xc0, 0x80], None), // cancelled
+            (vec![45, 9, 0x81], None),       // cut short
+        ];
+        for (rbsp, want) in cases {
+            let in_h264 = [&[6u8][..], &rbsp].concat();
+            assert_eq!(h264.frame_packing(&annex_b(&[&in_h264])), want, "{rbsp:x?}");
+            let in_hevc = [&[39u8 << 1, 1][..], &rbsp].concat();
+            assert_eq!(hevc.frame_packing(&annex_b(&[&in_hevc])), want, "{rbsp:x?}");
+        }
+
+        // After other messages and other units, in a length-prefixed packet.
+        let two = [&[6u8, 5, 3, 1, 2, 3][..], &side_by_side].concat();
+        let with_lengths = NalReader {
+            length_size: 4,
+            ..h264
+        };
+        assert_eq!(
+            with_lengths.frame_packing(&prefixed(&[&[0x65, 1, 2], &two])),
+            Some((Packing::Layout(StereoLayout::SideBySide), false))
+        );
+        // Not an SEI unit, and another message type with a long type number.
+        assert_eq!(
+            h264.frame_packing(&annex_b(&[&[0x65, 45, 2, 0x81, 0x81]])),
+            None
+        );
+        assert_eq!(h264.frame_packing(&annex_b(&[&[6, 255, 1, 0, 0x80]])), None);
+    }
 
     fn prefixed(nals: &[&[u8]]) -> Vec<u8> {
         let mut out = Vec::new();

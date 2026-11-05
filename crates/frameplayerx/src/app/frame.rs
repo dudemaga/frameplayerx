@@ -686,12 +686,8 @@ impl App {
         let video = p.player.info().video_stream();
         let pixel_aspect = video.map_or(1.0, |v| v.pixel_aspect as f32);
         let stereo = video
-            .filter(|_| pictures && p.format.stereo.is_stereo())
-            .map(|v| crate::subtitles::StereoSubs {
-                layout: p.format.stereo,
-                canvas: (v.width, v.height),
-                swap_eyes: p.format.eyes_swapped ^ s.swap_eyes,
-            });
+            .filter(|_| pictures)
+            .and_then(|v| crate::subtitles::StereoSubs::of(v, &p.format, s.swap_eyes));
         self.subs_split = stereo.is_some();
         let key: String = cues
             .iter()

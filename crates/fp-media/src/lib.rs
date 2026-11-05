@@ -8,6 +8,7 @@
 //! - `v4l2`: the native V4L2 stateful decoder for H.264/HEVC (10-bit HEVC as
 //!   Q10C), with the Steam Frame's admission-check workaround.
 //! - `mvc`: 3D Blu-ray video (H.264 MVC) on a plain H.264 decoder;
+//! - `frame_seq`: frame sequential 3D, its eyes paired into one picture;
 //!   `second_view`: its second view read from transport streams.
 //! - `bluray`: Blu-ray disc images, their main title played clip after clip.
 //! - [`frame`]: decoded video frames in GPU-uploadable layouts.
@@ -21,6 +22,7 @@ pub(crate) mod bluray;
 pub mod clock;
 pub(crate) mod decode;
 pub mod frame;
+pub(crate) mod frame_seq;
 pub mod info;
 pub(crate) mod input;
 pub(crate) mod io;

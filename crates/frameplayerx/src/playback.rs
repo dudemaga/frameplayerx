@@ -1790,6 +1790,7 @@ mod tests {
             rotation: 0,
             pixel_aspect: 1.0,
             mvc: false,
+            frame_sequential: false,
             sample_rate: 0,
             channels: 0,
             ambisonic: false,

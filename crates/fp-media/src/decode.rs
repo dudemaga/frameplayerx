@@ -307,10 +307,26 @@ pub struct Decoder {
     /// Reads H.264 and HEVC packets' NAL units.
     nal: Option<NalReader>,
     skip: Option<Skip>,
-    /// 3D Blu-ray video (MVC), decoded by the H.264 decoder it holds.
-    mvc: Option<Box<crate::mvc::MvcDecoder>>,
+    /// 3D video decoded by the decoder this holds, its eyes paired.
+    paired: Option<Paired>,
     /// Packets precise seeks left out.
     pub(crate) left_out: u64,
+}
+
+/// The ways of decoding 3D through another decoder, pairing its pictures.
+enum Paired {
+    /// 3D Blu-ray (MVC).
+    Mvc(Box<crate::mvc::MvcDecoder>),
+    FrameSequential(Box<crate::frame_seq::FrameSeqDecoder>),
+}
+
+impl Paired {
+    fn inner(&mut self) -> &mut Decoder {
+        match self {
+            Paired::Mvc(m) => &mut m.inner,
+            Paired::FrameSequential(f) => &mut f.inner,
+        }
+    }
 }
 
 /// What a precise seek leaves out: frames shown mostly before its target.
@@ -381,7 +397,43 @@ impl Decoder {
             };
             NalReader::new(p.codec_id, extradata)
         };
+        if let Some(stream) = crate::frame_seq::stream(input, index) {
+            return Ok(Self::open_frame_sequential(
+                dec,
+                stream,
+                hw == HwDecode::Stills,
+            ));
+        }
         Ok(dec)
+    }
+
+    /// A decoder pairing a frame sequential stream's eyes, around `inner`.
+    fn open_frame_sequential(
+        inner: Decoder,
+        stream: crate::frame_seq::Stream,
+        stills: bool,
+    ) -> Decoder {
+        let mut dec = Decoder {
+            ctx: std::ptr::null_mut(),
+            #[cfg(target_os = "linux")]
+            native: None,
+            replay: Default::default(),
+            replay_end: false,
+            name: String::new(),
+            hardware: false,
+            hardware_error: None,
+            hardware_holders: Default::default(),
+            time_base: inner.time_base,
+            origin: inner.origin,
+            nal: None,
+            skip: None,
+            paired: Some(Paired::FrameSequential(Box::new(
+                crate::frame_seq::FrameSeqDecoder::new(inner, stream, stills),
+            ))),
+            left_out: 0,
+        };
+        dec.follow_paired();
+        dec
     }
 
     /// A decoder of 3D Blu-ray video (MVC): an H.264 decoder of the stream
@@ -424,28 +476,27 @@ impl Decoder {
             origin: 0.0,
             nal: None,
             skip: None,
-            mvc: Some(Box::new(mvc)),
+            paired: Some(Paired::Mvc(Box::new(mvc))),
             left_out: 0,
         };
-        dec.follow_mvc();
+        dec.follow_paired();
         Ok(dec)
     }
 
-    /// Takes the MVC decoder's inner decoder's name and hardware state
+    /// Takes the pairing decoder's inner decoder's name and hardware state
     /// (which change when the hardware decoder fails and software takes
     /// over).
-    fn follow_mvc(&mut self) {
-        if let Some(m) = &self.mvc {
-            let what = if m.two_d.is_some() {
-                "3D Blu-ray as 2D"
-            } else {
-                "3D Blu-ray"
-            };
-            self.name = format!("{} ({what})", m.inner.name);
-            self.hardware = m.inner.hardware;
-            self.hardware_error = m.inner.hardware_error.clone();
-            self.hardware_holders = m.inner.hardware_holders.clone();
-        }
+    fn follow_paired(&mut self) {
+        let (inner, what) = match &self.paired {
+            None => return,
+            Some(Paired::Mvc(m)) if m.two_d.is_some() => (&m.inner, "3D Blu-ray as 2D"),
+            Some(Paired::Mvc(m)) => (&m.inner, "3D Blu-ray"),
+            Some(Paired::FrameSequential(f)) => (&f.inner, "frame sequential 3D"),
+        };
+        self.name = format!("{} ({what})", inner.name);
+        self.hardware = inner.hardware;
+        self.hardware_error = inner.hardware_error.clone();
+        self.hardware_holders = inner.hardware_holders.clone();
     }
 
     pub(crate) fn open_with(
@@ -542,7 +593,7 @@ impl Decoder {
             origin: 0.0,
             nal: None,
             skip: None,
-            mvc: None,
+            paired: None,
             left_out: 0,
         })
     }
@@ -584,7 +635,7 @@ impl Decoder {
                 origin: 0.0,
                 nal: None,
                 skip: None,
-                mvc: None,
+                paired: None,
                 left_out: 0,
             };
             if hardware {
@@ -695,9 +746,13 @@ impl Decoder {
     /// Sends a packet (or end of stream when `pkt` is null). Returns false if
     /// the decoder is full and frames must be received first.
     pub(crate) fn send(&mut self, pkt: *const ff::AVPacket) -> Result<bool> {
-        if let Some(m) = self.mvc.as_mut() {
-            let r = m.send(pkt);
-            self.follow_mvc();
+        let sent = match self.paired.as_mut() {
+            Some(Paired::Mvc(m)) => Some(m.send(pkt)),
+            Some(Paired::FrameSequential(f)) => Some(f.inner.send(pkt)),
+            None => None,
+        };
+        if let Some(r) = sent {
+            self.follow_paired();
             return r;
         }
         if self.leaves_out(pkt) {
@@ -756,9 +811,13 @@ impl Decoder {
     /// Receives a frame. `Ok(None)` means more input is needed, `Ok(Some(false))`
     /// means the decoder is fully drained.
     pub fn receive(&mut self, frame: &mut Frame) -> Result<Option<bool>> {
-        if let Some(m) = self.mvc.as_mut() {
-            let r = m.receive(frame);
-            self.follow_mvc();
+        let received = match self.paired.as_mut() {
+            Some(Paired::Mvc(m)) => Some(m.receive(frame)),
+            Some(Paired::FrameSequential(f)) => Some(f.receive(frame)),
+            None => None,
+        };
+        if let Some(r) = received {
+            self.follow_paired();
             return r;
         }
         #[cfg(target_os = "linux")]
@@ -834,8 +893,16 @@ impl Decoder {
             frame_duration: frame_duration / tb,
             start: self.origin / tb,
         });
-        if let Some(m) = self.mvc.as_mut() {
-            m.skip = self.skip.take();
+        match self.paired.as_mut() {
+            Some(Paired::Mvc(m)) => m.skip = self.skip.take(),
+            // Half a picture early: the pair showing the target starts with
+            // a frame that may be mostly before it.
+            Some(Paired::FrameSequential(f)) => {
+                self.skip = None;
+                f.inner
+                    .skip_before(target - frame_duration / 2.0, frame_duration);
+            }
+            None => {}
         }
     }
 
@@ -861,8 +928,8 @@ impl Decoder {
     /// A flag that, once set, cuts the native decoder's waits for the
     /// device short (the player sets it when closing).
     pub(crate) fn set_interrupt(&mut self, flag: Arc<AtomicBool>) {
-        if let Some(m) = self.mvc.as_mut() {
-            m.inner.set_interrupt(flag);
+        if let Some(p) = self.paired.as_mut() {
+            p.inner().set_interrupt(flag);
             return;
         }
         #[cfg(target_os = "linux")]
@@ -875,9 +942,10 @@ impl Decoder {
 
     pub fn flush(&mut self) {
         self.skip = None;
-        if let Some(m) = self.mvc.as_mut() {
-            m.flush();
-            return;
+        match self.paired.as_mut() {
+            Some(Paired::Mvc(m)) => return m.flush(),
+            Some(Paired::FrameSequential(f)) => return f.flush(),
+            None => {}
         }
         #[cfg(target_os = "linux")]
         if let Some(n) = self.native.as_mut() {
