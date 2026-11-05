@@ -1,7 +1,7 @@
 //! Which subtitles a video starts with, and how its tracks are named.
 
 use crate::settings::SubtitleMode;
-use fp_core::format::StereoLayout;
+use fp_core::format::{StereoLayout, VideoFormat};
 use fp_core::language::Tag;
 use fp_core::source::SubtitleFile;
 use fp_library::PickedSubtitles;
@@ -342,6 +342,17 @@ pub struct StereoSubs {
 }
 
 impl StereoSubs {
+    /// How a 3D video's picture subtitles are drawn. A 3D Blu-ray's are made
+    /// for one eye's picture, not the two side by side it's decoded into, so
+    /// they're drawn like a 2D video's, for both eyes.
+    pub fn of(video: &StreamInfo, format: &VideoFormat, swap_eyes: bool) -> Option<StereoSubs> {
+        (format.stereo.is_stereo() && !video.mvc).then_some(StereoSubs {
+            layout: format.stereo,
+            canvas: (video.width, video.height),
+            swap_eyes: format.eyes_swapped ^ swap_eyes,
+        })
+    }
+
     /// The size of an eye's half of the frame, and how many times wider and
     /// taller it shows (a half side-by-side eye is squeezed to half width).
     pub fn half(&self) -> ((u32, u32), (f32, f32)) {
@@ -693,6 +704,20 @@ mod tests {
             height,
             rgba,
         }
+    }
+
+    #[test]
+    fn a_3d_blu_rays_pictures_are_for_both_eyes() {
+        use fp_core::format::Projection;
+        let format = VideoFormat::new(Projection::Flat, StereoLayout::SideBySide);
+        let mut video = stream(0, StreamKind::Video, None);
+        (video.width, video.height) = (3840, 1080);
+        assert!(StereoSubs::of(&video, &format, false).is_some());
+        video.mvc = true;
+        assert_eq!(StereoSubs::of(&video, &format, false), None);
+        video.mvc = false;
+        let mono = VideoFormat::new(Projection::Flat, StereoLayout::Mono);
+        assert_eq!(StereoSubs::of(&video, &mono, false), None);
     }
 
     #[test]
