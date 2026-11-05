@@ -242,7 +242,7 @@ fn tokens(name: &str) -> Vec<String> {
 /// Detects projection and stereo layout from a file name.
 ///
 /// Follows the conventions DeoVR and HereSphere document: `_LR`/`_SBS`/`_3DH`
-/// for side by side, `_TB`/`_OU`/`_3DV` for top/bottom, `_180`/`_360`,
+/// for side by side, `_TB`/`_OU`/`_TAB`/`_3DV` for top/bottom, `_180`/`_360`,
 /// `_FISHEYE`, `_FISHEYE190`, `_MKX200`, `_MKX220`, `_RF52`, `_VRCA220`,
 /// `_EAC`, `_FLAT`/`_2D`/`_MONO`, and `_ALPHA` for a packed passthrough
 /// mask. Returns `None` when the name says nothing about the layout.
@@ -266,10 +266,14 @@ pub fn detect_from_name(name: &str) -> Option<VideoFormat> {
                 stereo = Some(StereoLayout::HalfSideBySide);
                 swapped = true;
             }
-            "TB" | "OU" | "3DV" | "FOU" | "FTB" | "OVERUNDER" | "TOPBOTTOM" => {
+            "TB" | "OU" | "3DV" | "FOU" | "FTB" | "FTAB" | "OVERUNDER" | "TOPBOTTOM" => {
                 stereo = Some(StereoLayout::TopBottom);
             }
-            "HOU" | "HTB" => stereo = Some(StereoLayout::HalfTopBottom),
+            "HOU" | "HTB" | "HTAB" => stereo = Some(StereoLayout::HalfTopBottom),
+            // On its own it could be a word in a title ("Bar Tab").
+            "TAB" if ["3D", "H", "F", "HALF", "FULL"].iter().any(|t| has(t)) => {
+                stereo = Some(StereoLayout::TopBottom);
+            }
             "BT" | "FBT" => {
                 stereo = Some(StereoLayout::TopBottom);
                 swapped = true;
@@ -421,7 +425,7 @@ fn refine_flat_stereo(format: &mut VideoFormat, name: &str, width: u32, height: 
     let toks = tokens(name);
     let is_explicit_full = toks
         .iter()
-        .any(|t| t == "FSBS" || t == "FOU" || t == "FTB" || t == "FULL");
+        .any(|t| t == "FSBS" || t == "FOU" || t == "FTB" || t == "FTAB" || t == "FULL");
     if is_explicit_full {
         return;
     }
@@ -502,6 +506,36 @@ mod tests {
 
     fn d(name: &str) -> Option<(P, S, bool)> {
         detect_from_name(name).map(|f| (f.projection, f.stereo, f.eyes_swapped))
+    }
+
+    #[test]
+    fn tab_means_top_and_bottom_unless_it_could_be_a_word() {
+        let flat = |s| Some((P::Flat, s, false));
+        assert_eq!(d("Clip.HTAB.mkv"), flat(S::HalfTopBottom));
+        assert_eq!(d("HTAB-3D.mkv"), flat(S::HalfTopBottom));
+        assert_eq!(d("Clip.FTAB.mkv"), flat(S::TopBottom));
+        assert_eq!(d("Movie.3D.TAB.1080p.mkv"), flat(S::TopBottom));
+        assert_eq!(d("Movie.H-TAB.mkv"), flat(S::TopBottom));
+        assert_eq!(d("Movie.Half-TAB.mkv"), flat(S::HalfTopBottom));
+        for name in ["Bar Tab.mkv", "Tab Hunter 2015.mkv", "Clip.TAB.mkv"] {
+            assert_eq!(d(name), None, "{name}");
+        }
+        let halves = resolve(
+            None,
+            ContainerHints::default(),
+            "Movie.H-TAB.mkv",
+            1920,
+            1080,
+        );
+        assert_eq!(halves.format.stereo, S::HalfTopBottom, "by its shape");
+        let full = resolve(
+            None,
+            ContainerHints::default(),
+            "Movie.FTAB.mkv",
+            1920,
+            1080,
+        );
+        assert_eq!(full.format.stereo, S::TopBottom, "named full");
     }
 
     #[test]

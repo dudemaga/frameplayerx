@@ -466,7 +466,7 @@ videos onto it and put it in the Frame. exFAT has no 4 GB file limit, so
 The format is picked automatically from, in order: your own choice for that
 file, the file's spherical/stereo metadata, the file name, and the picture's
 shape. File-name tags understood include `_180`, `_360`, `_LR`/`_SBS`,
-`_TB`/`_OU`, `_RL`, `_FISHEYE190`, `_MKX200`, `_MKX220`, `_VRCA220`,
+`_TB`/`_OU`/`_HTAB`, `_RL`, `_FISHEYE190`, `_MKX200`, `_MKX220`, `_VRCA220`,
 `_EAC`, `_2D`, `_3D`.
 
 Movie shapes (16:9, 4:3, 1.85, scope) and portrait phone clips play on a
