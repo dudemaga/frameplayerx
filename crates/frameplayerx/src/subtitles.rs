@@ -342,11 +342,13 @@ pub struct StereoSubs {
 }
 
 impl StereoSubs {
-    /// How a 3D video's picture subtitles are drawn. A 3D Blu-ray's are made
-    /// for one eye's picture, not the two side by side it's decoded into, so
-    /// they're drawn like a 2D video's, for both eyes.
+    /// How a 3D video's picture subtitles are drawn. A 3D Blu-ray's or frame
+    /// sequential video's are made for one eye's picture, not the two side by
+    /// side it's decoded into, so they're drawn like a 2D video's, for both
+    /// eyes.
     pub fn of(video: &StreamInfo, format: &VideoFormat, swap_eyes: bool) -> Option<StereoSubs> {
-        (format.stereo.is_stereo() && !video.mvc).then_some(StereoSubs {
+        let paired = video.mvc || video.frame_sequential;
+        (format.stereo.is_stereo() && !paired).then_some(StereoSubs {
             layout: format.stereo,
             canvas: (video.width, video.height),
             swap_eyes: format.eyes_swapped ^ swap_eyes,
@@ -424,6 +426,7 @@ mod tests {
             rotation: 0,
             pixel_aspect: 1.0,
             mvc: false,
+            frame_sequential: false,
             sample_rate: 0,
             channels: 0,
             ambisonic: false,
@@ -716,6 +719,9 @@ mod tests {
         video.mvc = true;
         assert_eq!(StereoSubs::of(&video, &format, false), None);
         video.mvc = false;
+        video.frame_sequential = true;
+        assert_eq!(StereoSubs::of(&video, &format, false), None);
+        video.frame_sequential = false;
         let mono = VideoFormat::new(Projection::Flat, StereoLayout::Mono);
         assert_eq!(StereoSubs::of(&video, &mono, false), None);
     }

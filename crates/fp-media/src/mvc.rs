@@ -539,7 +539,7 @@ impl MvcDecoder {
 /// # Safety
 /// `left` and `right` are decoded frames of the same size and planar (or
 /// semi-planar) format; `out` is a valid frame.
-unsafe fn side_by_side(
+pub(crate) unsafe fn side_by_side(
     out: *mut ff::AVFrame,
     left: *const ff::AVFrame,
     right: *const ff::AVFrame,
@@ -548,11 +548,11 @@ unsafe fn side_by_side(
     unsafe {
         let (l, r) = (&*left, &*right);
         if (l.width, l.height, l.format) != (r.width, r.height, r.format) {
-            return Err(Error::Unsupported("MVC views of different sizes".into()));
+            return Err(Error::Unsupported("eyes of different sizes".into()));
         }
         let desc = ff::av_pix_fmt_desc_get(l.format);
         if desc.is_null() {
-            return Err(Error::Unsupported("MVC pixel format".into()));
+            return Err(Error::Unsupported("side-by-side pixel format".into()));
         }
         ff::av_frame_unref(out);
         (*out).format = l.format;

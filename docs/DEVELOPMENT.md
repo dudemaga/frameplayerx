@@ -288,6 +288,14 @@ reader (`udf.rs`, 2.50 metadata partitions included), the playlists
 clips one after another, their timestamps moved onto the title's clock;
 3D titles read each clip's SSIF straight out of the image.
 
+**Frame sequential 3D.** `fp-media/src/frame_seq.rs` wraps an ordinary
+decoder and puts each left frame and the right frame after it side by side,
+the same step 3D Blu-ray ends with. `StreamInfo` then reports what comes out:
+twice the width, half the frame rate, full side by side. A frame's eye comes
+from its timestamp, not a count, so a seek or a lost frame can't leave later
+frames on the wrong eye. An odd gap in a file's timestamps would swap them,
+which no file tried has.
+
 **Pictures.** A card shows `MediaRecord::picture`: the frame where a partly
 watched video was left off, else its server's picture, else a thumbnail the
 metadata worker made (`fp-library/src/worker.rs`; only for videos whose

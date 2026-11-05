@@ -95,10 +95,10 @@ impl NalReader {
         self.length_size
     }
 
-    /// The 3D layout a packet's frame packing SEI message states, and whether
-    /// the right eye comes first. None when it has none, or states a layout
-    /// that can't be shown.
-    pub(crate) fn frame_packing(&self, data: &[u8]) -> Option<(StereoLayout, bool)> {
+    /// How a packet's frame packing SEI message says the eyes are packed, and
+    /// whether the right eye comes first. None when it has none, or states
+    /// a packing that can't be shown.
+    pub(crate) fn frame_packing(&self, data: &[u8]) -> Option<(Packing, bool)> {
         units(data, self.length_size).find_map(|nal| {
             let h0 = *nal.first()?;
             let (kind, sei, header) = if self.hevc {
@@ -157,8 +157,17 @@ impl NalReader {
     }
 }
 
+/// How a frame packing message says the eyes are packed.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum Packing {
+    /// Both eyes in each picture (or a 2D one).
+    Layout(StereoLayout),
+    /// The eyes take turns, picture by picture.
+    FrameSequential,
+}
+
 /// Finds the frame packing message among an SEI RBSP's messages.
-fn sei_frame_packing(mut rbsp: &[u8]) -> Option<(StereoLayout, bool)> {
+fn sei_frame_packing(mut rbsp: &[u8]) -> Option<(Packing, bool)> {
     // Each is its type and size, in bytes of 255 and a last one that add up.
     fn number(rest: &mut &[u8]) -> Option<usize> {
         let mut n = 0;
@@ -182,7 +191,7 @@ fn sei_frame_packing(mut rbsp: &[u8]) -> Option<(StereoLayout, bool)> {
     }
 }
 
-fn frame_packing_message(payload: &[u8]) -> Option<(StereoLayout, bool)> {
+fn frame_packing_message(payload: &[u8]) -> Option<(Packing, bool)> {
     let mut r = Reader::new(payload, 0);
     r.ue().ok()?; // frame_packing_arrangement_id
     if r.flag().ok()? {
@@ -191,13 +200,15 @@ fn frame_packing_message(payload: &[u8]) -> Option<(StereoLayout, bool)> {
     let arrangement = r.u(7).ok()?;
     r.flag().ok()?; // quincunx_sampling_flag
     let interpretation = r.u(6).ok()?;
-    let layout = match arrangement {
-        3 => StereoLayout::SideBySide,
-        4 => StereoLayout::TopBottom,
-        6 => StereoLayout::Mono,
+    let packing = match arrangement {
+        3 => Packing::Layout(StereoLayout::SideBySide),
+        4 => Packing::Layout(StereoLayout::TopBottom),
+        5 => Packing::FrameSequential,
+        6 => Packing::Layout(StereoLayout::Mono),
         _ => return None,
     };
-    Some((layout, layout != StereoLayout::Mono && interpretation == 2))
+    let two_d = packing == Packing::Layout(StereoLayout::Mono);
+    Some((packing, !two_d && interpretation == 2))
 }
 
 /// The NAL units in `data`, each from its header on. A unit cut short by
@@ -245,13 +256,23 @@ mod tests {
         let cases = [
             (
                 side_by_side.clone(),
-                Some((StereoLayout::SideBySide, false)),
+                Some((Packing::Layout(StereoLayout::SideBySide), false)),
             ),
-            (sei([0x81, 0x82]), Some((StereoLayout::SideBySide, true))),
-            (sei([0x82, 0x01]), Some((StereoLayout::TopBottom, false))),
-            (sei([0x83, 0x01]), Some((StereoLayout::Mono, false))),
+            (
+                sei([0x81, 0x82]),
+                Some((Packing::Layout(StereoLayout::SideBySide), true)),
+            ),
+            (
+                sei([0x82, 0x01]),
+                Some((Packing::Layout(StereoLayout::TopBottom), false)),
+            ),
+            (
+                sei([0x83, 0x01]),
+                Some((Packing::Layout(StereoLayout::Mono), false)),
+            ),
+            (sei([0x82, 0x81]), Some((Packing::FrameSequential, false))),
+            (sei([0x82, 0x82]), Some((Packing::FrameSequential, true))),
             (sei([0x80, 0x81]), None),       // checkerboard
-            (sei([0x82, 0x81]), None),       // frame sequential
             (vec![45, 1, 0xc0, 0x80], None), // cancelled
             (vec![45, 9, 0x81], None),       // cut short
         ];
@@ -270,7 +291,7 @@ mod tests {
         };
         assert_eq!(
             with_lengths.frame_packing(&prefixed(&[&[0x65, 1, 2], &two])),
-            Some((StereoLayout::SideBySide, false))
+            Some((Packing::Layout(StereoLayout::SideBySide), false))
         );
         // Not an SEI unit, and another message type with a long type number.
         assert_eq!(

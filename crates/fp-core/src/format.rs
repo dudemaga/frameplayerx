@@ -239,6 +239,12 @@ fn tokens(name: &str) -> Vec<String> {
         .collect()
 }
 
+/// Whether a file name calls the video frame sequential 3D, its eyes taking
+/// turns frame by frame.
+pub fn names_frame_sequential(name: &str) -> bool {
+    tokens(name).iter().any(|t| t == "FS3D")
+}
+
 /// Detects projection and stereo layout from a file name.
 ///
 /// Follows the conventions DeoVR and HereSphere document: `_LR`/`_SBS`/`_3DH`
@@ -536,6 +542,14 @@ mod tests {
             1080,
         );
         assert_eq!(full.format.stereo, S::TopBottom, "named full");
+    }
+
+    #[test]
+    fn frame_sequential_names() {
+        assert!(names_frame_sequential("(FS3D) Toy Story 5 Trailer 1.mkv"));
+        assert!(names_frame_sequential("/films/Film.2023.fs3d.mkv"));
+        assert!(!names_frame_sequential("FS3D/Film.mkv"));
+        assert!(!names_frame_sequential("Film FS 3D.mkv"));
     }
 
     #[test]

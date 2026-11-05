@@ -496,6 +496,12 @@ the same name holds the left eye alone). The few streams it can't take
 that way (none of the discs tried) play their left eye in 2D; the decoder
 line in the video's info says "3D Blu-ray as 2D".
 
+Frame sequential 3D files, whose eyes take turns frame by frame at twice the
+film's frame rate, play as full 3D at the film's own rate, each eye at its
+full size. They are found by the label in the file, or by `FS3D` in the file
+name when a file has none. If depth looks inside out, **Swap eyes** in the
+adjust panel corrects it.
+
 A disc image, 2D or 3D, plays its main title (its longest playlist) with
 its chapters (under **⚙ › Chapters**) and its audio and subtitle languages.
 Menus, extras and other titles aren't offered.

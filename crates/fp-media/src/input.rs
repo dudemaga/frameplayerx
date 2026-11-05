@@ -3,11 +3,10 @@
 use crate::bluray::Title;
 use crate::decode::Packet;
 use crate::io::IoContext;
-use crate::nal::NalReader;
+use crate::nal::{NalReader, Packing};
 use crate::second_view::{BASE_PID, SECOND_PID, SecondView};
 use crate::{Result, check};
 use fp_core::ByteSource;
-use fp_core::format::StereoLayout;
 use fp_ffmpeg_sys as ff;
 use std::collections::VecDeque;
 use std::ffi::{CString, c_int, c_void};
@@ -25,8 +24,8 @@ pub struct Input {
     /// H.264 streams whose packets carry MVC's second view (3D Blu-ray)
     /// though their configuration doesn't say so.
     mvc_in_band: Vec<usize>,
-    /// The 3D layout streams state in their first packets, by stream.
-    frame_packing: Vec<(usize, (StereoLayout, bool))>,
+    /// How streams say their eyes are packed in their first packets.
+    frame_packing: Vec<(usize, (Packing, bool))>,
     /// 3D Blu-ray's second view in a stream of its own (SSIF files, and
     /// transport streams holding both views), added to the base view's
     /// packets.
@@ -335,9 +334,9 @@ impl Input {
         }
     }
 
-    /// The 3D layout stream `index` states in its first packets, and whether
-    /// the right eye comes first.
-    pub(crate) fn frame_packing(&self, index: usize) -> Option<(StereoLayout, bool)> {
+    /// How stream `index` says its eyes are packed in its first packets, and
+    /// whether the right eye comes first.
+    pub(crate) fn frame_packing(&self, index: usize) -> Option<(Packing, bool)> {
         self.frame_packing
             .iter()
             .find(|&&(i, _)| i == index)
