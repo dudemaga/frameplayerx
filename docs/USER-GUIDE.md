@@ -489,6 +489,11 @@ The same at the bottom of the adjust panel's Position tab changes it for
 the video that is playing, and **Save for this video** keeps it with the
 rest of its adjustments. Your room replaces it while it shows.
 
+A flat screen's **Distance**, **Width** and **Curvature** are on the adjust
+panel's Position tab too. Its size is its width, so zooming a flat screen
+with the controller makes it wider or narrower, and **Zoom** shows only for
+180°, 360° and fisheye videos.
+
 3D Blu-rays play as full 3D, each eye at full 1080p, on the Frame's
 hardware decoder: disc images (`.iso`), MKV rips (MakeMKV), and from a
 BDMV folder the film's `.ssif` file in `BDMV/STREAM/SSIF` (the `.m2ts` of
@@ -499,17 +504,29 @@ line in the video's info says "3D Blu-ray as 2D".
 Frame sequential 3D files, whose eyes take turns frame by frame at twice the
 film's frame rate, play as full 3D at the film's own rate, each eye at its
 full size. They are found by the label in the file, or by `FS3D` in the file
-name when a file has none. If depth looks inside out, **Swap eyes** in the
-adjust panel corrects it.
+name when a file has none. If depth looks inside out, **Swap eyes** under
+the format list corrects it. A file nothing labels can be set to
+**3D FS** (frame sequential) in the format list, and a mislabelled one to any other
+format.
 
 A disc image, 2D or 3D, plays its main title (its longest playlist) with
 its chapters (under **⚙ › Chapters**) and its audio and subtitle languages.
 Menus, extras and other titles aren't offered.
 
 To change it: open the video, press **⚙** on the control bar, **Format**.
-Overrides are remembered per video. The same panel has position, zoom,
-IPD/depth, stereo alignment, picture controls, subtitle depth and
-keyframes (adjustments that change smoothly along the video).
+The format list has a row for each kind of picture (flat screen, 180°,
+360°, fisheye and YouTube 360°) and the format playing is lit in it. Its
+buttons use the tags VR files carry in their names: 2D, 3D SBS (side by
+side), 3D TB (top/bottom), 3D HSBS and 3D HTB (their half-size versions)
+and 3D FS (frame sequential); point at one to see its full name.
+**Automatic** goes back to the detected format. A choice is remembered for
+that video, and a video's details in your library have the same list.
+Choosing frame sequential, or leaving it, opens the video again where it
+was, since it decodes differently. For a 3D format, **Swap eyes** under the
+list shows each eye the other picture, for a file whose depth looks inside
+out. The same panel has position, size, IPD/depth, stereo alignment,
+picture controls, subtitle depth and keyframes (adjustments that change
+smoothly along the video).
 
 Codecs: H.264, HEVC (8/10-bit, HDR10/HLG tone-mapped), AV1, VP9, VP8,
 VC-1, MPEG-4, MPEG-2, ProRes. Audio: AAC, AC-3/E-AC-3, Opus, Vorbis, FLAC,
@@ -519,16 +536,25 @@ Subtitles: SRT, ASS/SSA, WebVTT, and embedded text or picture subtitles.
 
 ### Fisheye lenses
 
-The fisheye presets (190° for the Canon RF 5.2 mm, 200° and 220° for
-`_MKX200` and `_MKX220` files) suit most videos. If one still looks wrong,
-for example if straight lines bend as you look around or the eyes stop
-lining up towards the edges, open **⚙ › Format** and use the sliders under
-**Fisheye lens**:
+A fisheye format shows **Fisheye lens** under the format list. Its presets
+set the field of view: 180°, 190° (the Canon RF 5.2 mm), and 200° and 220°
+(the MKX200 and MKX220 that `_MKX200` and `_MKX220` files come from). A
+preset is lit only while the field of view is its angle. When the slider
+sits on an angle that isn't a preset, a **+** button with that angle adds it
+to the presets, up to eight; Settings › Playback › **Fisheye presets**
+removes them, and **Reset** there puts the four back. Under them,
+**Fisheye starts at** picks the preset a video gets when you pick Fisheye
+for it, and a Fisheye default format. It is 180° to begin with; if you
+remove the preset it was, the one nearest 180° takes its place. Files
+tagged just `_FISHEYE` stay 180°, as the tag means. If the picture still
+looks wrong, for example if straight lines bend as you look around or the
+eyes stop lining up towards the edges, use the sliders:
 
 - **Field of view**: the lens's angle, 120° to 300°. The image circle fills
   the shorter side of each eye's image.
-- **Lens k1** and **Lens k2**: correct a lens that doesn't keep to an even
-  fisheye spread towards its edge.
+- **Edge stretch** and **Rim stretch**: for a lens that doesn't spread its
+  view evenly. Edge stretch stretches or squeezes the outer part of the
+  circle, Rim stretch mostly its very edge.
 - **Lens centre**: where each image circle's centre is, if it isn't in the
   middle of its half of the frame. This is common in footage straight from
   a camera. In 3D, each image has its own.
@@ -628,9 +654,9 @@ frameplayerx.log says why. A video whose pictures the hardware decoder
 reads as broken, picture after picture, plays in software instead.
 
 The pill next to the format on the control bar says which decoder plays
-the video: HW, or SW in amber, with the codec and bit depth. Hover it, or
-open Adjust → Format → Video stream, to see why a video isn't decoded in
-hardware.
+the video: HW, or SW in amber, with the codec and bit depth. Point at it
+to see the decoder, the format and the resolution, and why a video isn't
+decoded in hardware.
 
 To check a file: `ffprobe -v error -select_streams v:0 -show_entries
 stream=codec_name,profile,pix_fmt video.mp4` (`yuv422p` or `yuv422p10le`
@@ -757,7 +783,7 @@ moves the same way, with grip, and stays where you leave it. To put them all bac
 of the adjust panel's Position tab: a flat screen, the control bar, the
 adjust panel and the browse panel return (a 180° or 360° picture keeps
 its turn; the panel's **Reset** puts the picture's own adjustments back). The format on the control bar
-(for example 180° SBS) opens the adjust panel's Format tab.
+(for example 180° 3D) opens the adjust panel's Format tab.
 
 ### Watching lying down
 

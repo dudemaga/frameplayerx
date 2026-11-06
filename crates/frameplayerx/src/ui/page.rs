@@ -198,7 +198,10 @@ pub fn shuffle_again(ui: &mut egui::Ui) -> bool {
 /// Height of the browse panel's navigation, over the page.
 pub const NAV_HEIGHT: f32 = 76.0;
 /// Width of the filters drawer.
-const DRAWER_WIDTH: f32 = 470.0;
+pub const FILTERS_WIDTH: f32 = 470.0;
+/// What a drawer's width takes beyond what it shows: its sides and the
+/// scroll bar's room.
+pub const DRAWER_MARGIN: f32 = 64.0;
 /// Corners of the browse panel's body (see [`widgets::panel_slab`]).
 const PANEL_RADIUS: u8 = 28;
 
@@ -250,24 +253,61 @@ pub fn active_filters(ui: &mut egui::Ui, labels: &[String]) -> Option<FilterEdit
     edit
 }
 
-/// The filters drawer, over the right of the browse panel with the page
-/// dimmed beside it; a press there, ✕ or Done closes it. `count` says how
-/// many the filters keep, `add` draws its sections ([`filter_section`]).
-/// True when Clear all was pressed.
+/// The filters drawer ([`drawer`]): `count` says how many the filters keep,
+/// `add` draws its sections ([`filter_section`]). True when Clear all was
+/// pressed.
 pub fn filter_drawer(
     ui: &egui::Ui,
     open: &mut bool,
     count: &str,
     add: impl FnOnce(&mut egui::Ui),
 ) -> bool {
+    let mut clear = false;
+    drawer(
+        ui,
+        "filters",
+        FILTERS_WIDTH,
+        open,
+        tr!("filters"),
+        |ui| {
+            if widgets::button_sized(
+                ui,
+                None,
+                tr!("filters-clear-all"),
+                widgets::Kind::Ghost,
+                40.0,
+            )
+            .clicked()
+            {
+                clear = true;
+            }
+        },
+        add,
+        count,
+    );
+    clear
+}
+
+/// A drawer `width` wide over the right of the browse panel, with the page
+/// dimmed beside it; a press there, ✕ or Done closes it. Its `title` has
+/// `actions` beside ✕, `add` draws what scrolls under it, and `note` sits
+/// beside Done at its foot.
+#[allow(clippy::too_many_arguments)]
+pub fn drawer(
+    ui: &egui::Ui,
+    id: &str,
+    width: f32,
+    open: &mut bool,
+    title: &str,
+    actions: impl FnOnce(&mut egui::Ui),
+    add: impl FnOnce(&mut egui::Ui),
+    note: &str,
+) {
     let ctx = ui.ctx().clone();
     let body = ctx.screen_rect() - widgets::SHADOW_ROOM;
     let page = egui::Rect::from_min_max(egui::pos2(body.left(), body.top() + NAV_HEIGHT), body.max);
-    let drawer = egui::Rect::from_min_max(
-        egui::pos2(body.right() - DRAWER_WIDTH, page.top()),
-        body.max,
-    );
-    egui::Area::new(egui::Id::new("filters-scrim"))
+    let drawer = egui::Rect::from_min_max(egui::pos2(body.right() - width, page.top()), body.max);
+    egui::Area::new(egui::Id::new(id).with("scrim"))
         .order(egui::Order::Middle)
         .fixed_pos(page.min)
         .show(&ctx, |ui| {
@@ -283,8 +323,7 @@ pub fn filter_drawer(
                 *open = false;
             }
         });
-    let mut clear = false;
-    egui::Area::new(egui::Id::new("filters"))
+    egui::Area::new(egui::Id::new(id))
         .order(egui::Order::Foreground)
         .fixed_pos(drawer.min)
         .show(&ctx, |ui| {
@@ -308,13 +347,13 @@ pub fn filter_drawer(
             );
             p.rect_filled(drawer, corners, theme::SURFACE);
             let inner = drawer.shrink2(Vec2::new(24.0, 18.0));
-            let title = egui::Rect::from_min_size(inner.min, Vec2::new(inner.width(), 48.0));
+            let head = egui::Rect::from_min_size(inner.min, Vec2::new(inner.width(), 48.0));
             let footer = egui::Rect::from_min_max(
                 egui::pos2(inner.left(), inner.bottom() - 52.0),
                 inner.max,
             );
             let sections = egui::Rect::from_min_max(
-                egui::pos2(inner.left(), title.bottom() + 6.0),
+                egui::pos2(inner.left(), head.bottom() + 6.0),
                 egui::pos2(inner.right(), footer.top() - 10.0),
             );
             p.hline(
@@ -329,9 +368,9 @@ pub fn filter_drawer(
                         .layout(Layout::top_down(Align::Min)),
                 )
             };
-            part(title).horizontal(|ui| {
+            part(head).horizontal(|ui| {
                 ui.label(
-                    RichText::new(tr!("filters"))
+                    RichText::new(title)
                         .font(theme::font(Weight::Bold, 24.0))
                         .color(theme::TEXT),
                 );
@@ -342,21 +381,11 @@ pub fn filter_drawer(
                     {
                         *open = false;
                     }
-                    if widgets::button_sized(
-                        ui,
-                        None,
-                        tr!("filters-clear-all"),
-                        widgets::Kind::Ghost,
-                        40.0,
-                    )
-                    .clicked()
-                    {
-                        clear = true;
-                    }
+                    actions(ui);
                 });
             });
             egui::ScrollArea::vertical()
-                .id_salt("filters")
+                .id_salt(id)
                 .max_height(sections.height())
                 .auto_shrink([false, false])
                 .show_list(&mut part(sections), |ui| {
@@ -367,7 +396,7 @@ pub fn filter_drawer(
             part(footer).horizontal(|ui| {
                 ui.set_height(footer.height());
                 ui.label(
-                    RichText::new(count)
+                    RichText::new(note)
                         .font(theme::font(Weight::Medium, 16.0))
                         .color(theme::TEXT_2),
                 );
@@ -386,7 +415,6 @@ pub fn filter_drawer(
                 });
             });
         });
-    clear
 }
 
 /// A section of the filters drawer: its title over its choices, which wrap.

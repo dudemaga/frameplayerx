@@ -78,12 +78,25 @@ impl App {
             }
             Action::ClosePlayback => self.close_playback(),
             Action::SetFormat(f) => {
+                let mut reopen = false;
                 if let Some(p) = &mut self.playback {
                     let was_flat = p.format.projection == Projection::Flat;
                     p.set_format(&self.services.library, f);
                     if !was_flat {
                         p.place_flat(self.offsets.main[0]);
                     }
+                    // Frame sequential video decodes differently.
+                    let paired = p
+                        .player
+                        .info()
+                        .video_stream()
+                        .is_some_and(|v| v.frame_sequential);
+                    reopen = p.record_id.is_some()
+                        && paired
+                            != (p.format.stereo == fp_core::format::StereoLayout::FrameSequential);
+                }
+                if reopen {
+                    self.reopen();
                 }
                 self.ui.invalidate();
             }

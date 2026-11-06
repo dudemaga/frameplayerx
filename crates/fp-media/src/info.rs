@@ -357,21 +357,26 @@ pub fn read_info(input: &Input) -> MediaInfo {
                     hints.stereo = Some(StereoLayout::SideBySide);
                     hints.eyes_swapped =
                         dict_get(st.metadata, "stereo_mode").as_deref() == Some("block_rl");
-                } else if let Some(sequence) = crate::frame_seq::stream(input, index) {
-                    s.frame_sequential = true;
-                    s.width *= 2;
-                    s.fps /= 2.0;
-                    hints.stereo = Some(StereoLayout::SideBySide);
-                    hints.eyes_swapped = sequence.right_first;
-                } else if hints.stereo.is_none()
-                    && let Some((stereo, swapped)) =
-                        stereo3d(par, st.metadata).or_else(|| match input.frame_packing(index) {
-                            Some((Packing::Layout(layout), swapped)) => Some((layout, swapped)),
-                            _ => None,
+                } else {
+                    if crate::frame_seq::stream(input, index).is_some() {
+                        s.frame_sequential = true;
+                        s.width *= 2;
+                        s.fps /= 2.0;
+                    }
+                    if let Some(right_first) = crate::frame_seq::labelled(input, index) {
+                        hints.stereo = Some(StereoLayout::FrameSequential);
+                        hints.eyes_swapped = right_first;
+                    } else if hints.stereo.is_none()
+                        && let Some((stereo, swapped)) = stereo3d(par, st.metadata).or_else(|| {
+                            match input.frame_packing(index) {
+                                Some((Packing::Layout(layout), swapped)) => Some((layout, swapped)),
+                                _ => None,
+                            }
                         })
-                {
-                    hints.stereo = Some(stereo);
-                    hints.eyes_swapped = swapped;
+                    {
+                        hints.stereo = Some(stereo);
+                        hints.eyes_swapped = swapped;
+                    }
                 }
             }
             StreamKind::Audio => {

@@ -291,7 +291,10 @@ clips one after another, their timestamps moved onto the title's clock;
 **Frame sequential 3D.** `fp-media/src/frame_seq.rs` wraps an ordinary
 decoder and puts each left frame and the right frame after it side by side,
 the same step 3D Blu-ray ends with. `StreamInfo` then reports what comes out:
-twice the width, half the frame rate, full side by side. A frame's eye comes
+twice the width and half the frame rate, and its format is
+`StereoLayout::FrameSequential`, drawn as full side by side. A viewer who picks
+another format, or frame sequential for an unlabelled file, reopens the video
+with `PlayerConfig::frame_sequential` set. A frame's eye comes
 from its timestamp, not a count, so a seek or a lost frame can't leave later
 frames on the wrong eye. An odd gap in a file's timestamps would swap them,
 which no file tried has.

@@ -714,6 +714,9 @@ fn history(ui: &mut egui::Ui, v: &mut View) {
     v.state.history = g;
 }
 
+/// The size of a video's picture on its details page.
+const DETAILS_PICTURE: Vec2 = Vec2::new(512.0, 288.0);
+
 fn details(ui: &mut egui::Ui, v: &mut View, id: fp_library::MediaId) {
     let Some(r) = v.services.library.get(id).ok().flatten() else {
         v.state.details = None;
@@ -731,7 +734,7 @@ fn details(ui: &mut egui::Ui, v: &mut View, id: fp_library::MediaId) {
             ui.add_space(12.0);
             ui.horizontal_top(|ui| {
                 ui.spacing_mut().item_spacing.x = 28.0;
-                let (rect, _) = ui.allocate_exact_size(Vec2::new(512.0, 288.0), Sense::hover());
+                let (rect, _) = ui.allocate_exact_size(DETAILS_PICTURE, Sense::hover());
                 widgets::shadow(ui.painter(), rect, 16, 0.6);
                 let key = r.picture();
                 page::picture(ui, v.thumbs, key.as_deref(), rect, 16, icons::FILM_STRIP);
@@ -746,45 +749,28 @@ fn details(ui: &mut egui::Ui, v: &mut View, id: fp_library::MediaId) {
                 );
             }
             ui.add_space(28.0);
-            widgets::section_label(ui, tr!("adjust-format"));
-            ui.add_space(2.0);
-            let fmt = shown_format(&r, v.settings.default_format);
-            ui.label(
-                RichText::new(tr!(
-                    "adjust-detected",
-                    format = super::format_label(&fmt.format),
-                    evidence = super::evidence_label(fmt.evidence)
-                ))
-                .color(theme::TEXT_2),
+            let shown = shown_format(&r, v.settings.default_format);
+            let format = tr!(
+                "library-format-value",
+                format = super::format_label(&shown.format),
+                evidence = super::evidence_label(shown.evidence)
             );
-            ui.add_space(6.0);
-            ui.horizontal_wrapped(|ui| {
-                ui.spacing_mut().item_spacing = Vec2::new(8.0, 8.0);
-                let current = r.user_format;
-                if widgets::chip_icon(
-                    ui,
-                    Some(icons::MAGIC_WAND),
-                    tr!("adjust-format-automatic"),
-                    current.is_none(),
-                )
-                .clicked()
-                {
-                    v.actions.push(Action::SetUserFormat(r.id, None));
-                }
-                for f in super::player::format_choices() {
-                    if widgets::chip(ui, f.0, current == Some(f.1)).clicked() {
-                        v.actions.push(Action::SetUserFormat(r.id, Some(f.1)));
+            let location = crate::libraries::display_location(&r.location);
+            widgets::rows(ui, |rows| {
+                rows.row(tr!("adjust-format"), Some(&format), |ui| {
+                    if widgets::button(
+                        ui,
+                        Some(icons::SLIDERS_HORIZONTAL),
+                        tr!("common-change"),
+                        Kind::Secondary,
+                    )
+                    .clicked()
+                    {
+                        v.state.format_drawer = Some(r.id);
                     }
-                }
+                });
+                rows.row(tr!("library-file"), Some(&location), |_| {});
             });
-            ui.add_space(26.0);
-            widgets::section_label(ui, tr!("library-file"));
-            ui.add_space(2.0);
-            ui.label(
-                RichText::new(crate::libraries::display_location(&r.location))
-                    .font(theme::font(Weight::Regular, 15.0))
-                    .color(theme::TEXT_3),
-            );
             if r.last_played.is_some() {
                 ui.add_space(12.0);
                 if widgets::button(
@@ -801,6 +787,39 @@ fn details(ui: &mut egui::Ui, v: &mut View, id: fp_library::MediaId) {
             }
             ui.add_space(24.0);
         });
+    let mut open = v.state.format_drawer == Some(r.id);
+    if open {
+        // Wide enough for each row of formats on one line.
+        let width = super::player::format_list_width(ui, true) + page::DRAWER_MARGIN;
+        page::drawer(
+            ui,
+            "format",
+            width,
+            &mut open,
+            tr!("adjust-format"),
+            |_| {},
+            |ui| {
+                ui.add_space(8.0);
+                // As detected, whatever was picked: what Automatic plays.
+                let mut detected = r.detected;
+                if detected.evidence == Evidence::Default {
+                    detected.format = v.settings.default_format;
+                }
+                if super::player::automatic_row(ui, Some(r.user_format.is_none()), &detected) {
+                    v.actions.push(Action::SetUserFormat(r.id, None));
+                }
+                let current = r.user_format.unwrap_or(detected.format);
+                let fisheye = v.settings.fisheye_start;
+                if let Some(f) = super::player::format_list(ui, &current, true, fisheye) {
+                    v.actions.push(Action::SetUserFormat(r.id, Some(f)));
+                }
+            },
+            "",
+        );
+        if !open {
+            v.state.format_drawer = None;
+        }
+    }
 }
 
 /// Title, facts, actions and rating beside the details thumbnail.

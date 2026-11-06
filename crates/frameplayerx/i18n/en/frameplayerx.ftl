@@ -102,6 +102,10 @@ settings-auto-hide = Hide controls after
 settings-auto-hide-desc = While playing, without moving the pointer.
 settings-default-format = Default format
 settings-default-format-desc = For videos whose file, name and shape say nothing about their format. 16:9, 4:3 and scope movies start flat on their own.
+settings-fisheye-presets = Fisheye presets
+settings-fisheye-presets-desc = The angles offered under Fisheye lens. Add one from a fisheye video's Fisheye lens settings; press one here to remove it.
+# Before the fisheye presets: the angle a video gets when Fisheye is picked for it.
+settings-fisheye-start = Fisheye starts at
 settings-video-position-desc = Where videos start. A video you adjust in the player keeps its own.
 settings-flat-videos = Flat videos
 settings-screen-distance = Screen distance
@@ -305,15 +309,10 @@ language-cy = Welsh
 
 ## The player: control bar, adjust panel, audio and subtitles
 
-# A video format: keep 2D, 3D, SBS and TB as they are.
-format-flat-2d = Flat 2D
-format-flat-3d-half-sbs = Flat 3D Half SBS
-format-flat-3d-sbs = Flat 3D SBS
-format-flat-3d-half-tb = Flat 3D Half TB
-format-flat-3d-tb = Flat 3D TB
-format-fisheye-190 = Fisheye 190° SBS
-format-fisheye-200 = Fisheye 200° SBS
-format-fisheye-220 = Fisheye 220° SBS
+# A row of the format list: videos on a flat screen.
+format-group-flat = Flat screen
+# A row of the format list: fisheye videos.
+format-group-fisheye = Fisheye
 # A tooltip.
 player-change-format = Change the format
 # A tooltip.
@@ -360,20 +359,22 @@ adjust-format = Format
 adjust-passthrough-desc = This video's settings, saved with its adjustments.
 adjust-fisheye-lens = Fisheye lens
 adjust-field-of-view = Field of view
-# A lens distortion setting: keep k1 as it is.
-adjust-lens-k1 = Lens k1
-# A lens distortion setting: keep k2 as it is.
-adjust-lens-k2 = Lens k2
+adjust-field-of-view-hint = A preset sets this. For any other angle, slide it, then + adds that angle to the presets.
+# Short: before buttons that set a fisheye lens's field of view.
+adjust-lens-presets = Presets
+adjust-lens-add-preset = Add to the presets
+adjust-edge-stretch = Edge stretch
+adjust-edge-stretch-desc = For a lens that doesn't spread its view evenly: straight lines bend as you look around.
+adjust-rim-stretch = Rim stretch
+adjust-rim-stretch-desc = Like Edge stretch, but mostly at the very edge of the circle.
 adjust-lens-centre = Lens centre
 adjust-lens-centre-desc = Where each image circle's centre is, if not in the middle. Point at a slider and push the thumbstick left or right for fine steps.
 adjust-screen = Screen
 adjust-distance = Distance
 adjust-width = Width
 adjust-curvature = Curvature
-adjust-video-stream = Video stream
 adjust-decoder = Decoder
 adjust-resolution = Resolution
-adjust-pixel-format = Pixel format
 adjust-placement = Screen and panels
 adjust-placement-desc = Where a flat screen, the control bar, this panel, the browse panel and the performance overlay start.
 adjust-put-back = Put back
@@ -392,6 +393,7 @@ adjust-vertical-align = Vertical align
 adjust-rotation-align = Rotation align
 adjust-swap-eyes = Swap eyes
 adjust-swap-eyes-desc = For left/right swapped files.
+adjust-format-3d-blu-ray = A 3D Blu-ray's two eyes are decoded together, so it plays in the format the disc gives.
 adjust-brightness = Brightness
 adjust-contrast = Contrast
 adjust-saturation = Saturation
@@ -855,6 +857,8 @@ library-browse-sources = Browse sources
 common-back = Back
 # A heading: the video's file.
 library-file = File
+# A video's format, and where it came from (your choice, from the file name…).
+library-format-value = { $format } ({ $evidence })
 library-remove-from-history = Remove from history
 # What a controller button does: nothing.
 action-nothing = Nothing
@@ -1280,11 +1284,13 @@ open-no-source = no source can open this location
 # $projection is Flat, 180°, Fisheye 190° and so on; $stereo the layout.
 format-label = { $projection } { $stereo }
 format-flat = Flat
-format-mono = mono
-format-sbs = Side by side
-format-half-sbs = Half side by side
-format-tb = Top/bottom
-format-half-tb = Half top/bottom
+format-2d = 2D
+format-3d = 3D
+format-3d-sbs = 3D side by side
+format-3d-half-sbs = 3D half side by side
+format-3d-tb = 3D top/bottom
+format-3d-half-tb = 3D half top/bottom
+format-3d-frame-sequential = 3D frame sequential
 # Where a video's format came from, after it in brackets.
 evidence-user = your choice
 evidence-metadata = from file metadata

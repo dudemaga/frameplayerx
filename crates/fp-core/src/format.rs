@@ -41,21 +41,6 @@ impl Projection {
             Projection::Eac { h_fov } => format!("EAC {}°", h_fov.round()),
         }
     }
-
-    /// Projections offered in the UI, in display order.
-    pub fn presets() -> Vec<(&'static str, Projection)> {
-        vec![
-            ("Flat screen", Projection::Flat),
-            ("180°", Projection::EQUIRECT_180),
-            ("360°", Projection::EQUIRECT_360),
-            ("Fisheye 180°", Projection::fisheye(180.0)),
-            ("Fisheye 190° (Canon RF 5.2)", Projection::fisheye(190.0)),
-            ("Fisheye 200° (MKX200)", Projection::fisheye(200.0)),
-            ("Fisheye 220° (MKX220/VRCA220)", Projection::fisheye(220.0)),
-            ("EAC 360° (YouTube)", Projection::Eac { h_fov: 360.0 }),
-            ("EAC 180°", Projection::Eac { h_fov: 180.0 }),
-        ]
-    }
 }
 
 /// How the two eyes are packed in each frame.
@@ -72,6 +57,9 @@ pub enum StereoLayout {
     TopBottom,
     /// Left eye on the top half, squeezed vertically to half height (e.g. 16:9 container).
     HalfTopBottom,
+    /// The eyes take turns, frame after frame, left first. Each pair is
+    /// decoded into one picture twice as wide, so it shows as side by side.
+    FrameSequential,
 }
 
 impl StereoLayout {
@@ -82,6 +70,7 @@ impl StereoLayout {
             StereoLayout::HalfSideBySide => "Half side by side",
             StereoLayout::TopBottom => "Top/bottom",
             StereoLayout::HalfTopBottom => "Half top/bottom",
+            StereoLayout::FrameSequential => "Frame sequential",
         }
     }
 
@@ -90,11 +79,11 @@ impl StereoLayout {
         *self != StereoLayout::Mono
     }
 
-    /// True if the eye views are side-by-side (full or half).
+    /// True if the eye views are side-by-side (full or half), as decoded.
     pub fn is_side_by_side(&self) -> bool {
         matches!(
             self,
-            StereoLayout::SideBySide | StereoLayout::HalfSideBySide
+            StereoLayout::SideBySide | StereoLayout::HalfSideBySide | StereoLayout::FrameSequential
         )
     }
 
@@ -179,14 +168,6 @@ impl VideoFormat {
     /// be read (the packing is only defined for side-by-side frames).
     pub fn alpha_pack_scale(&self) -> Option<f32> {
         (self.alpha_packed && self.stereo.is_side_by_side()).then_some(ALPHA_PACK_SCALE)
-    }
-
-    /// Same projection, stereo layout and eye order (the alpha mask aside).
-    pub fn same_layout(&self, other: &VideoFormat) -> bool {
-        VideoFormat {
-            alpha_packed: other.alpha_packed,
-            ..*self
-        } == *other
     }
 }
 
@@ -643,9 +624,6 @@ mod tests {
                 .format
                 .alpha_packed
         );
-        let plain = VideoFormat::new(P::fisheye(190.0), S::SideBySide);
-        assert!(f.same_layout(&plain) && plain.same_layout(&f));
-        assert!(!f.same_layout(&VideoFormat::new(P::EQUIRECT_180, S::SideBySide)));
     }
 
     #[test]

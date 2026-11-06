@@ -26,6 +26,9 @@ pub struct Input {
     mvc_in_band: Vec<usize>,
     /// How streams say their eyes are packed in their first packets.
     frame_packing: Vec<(usize, (Packing, bool))>,
+    /// Whether the viewer says the video is frame sequential 3D; None goes
+    /// by its labels.
+    frame_sequential: Option<bool>,
     /// 3D Blu-ray's second view in a stream of its own (SSIF files, and
     /// transport streams holding both views), added to the base view's
     /// packets.
@@ -163,6 +166,7 @@ impl Input {
                 peeked: VecDeque::new(),
                 mvc_in_band: Vec::new(),
                 frame_packing: Vec::new(),
+                frame_sequential: None,
                 pair: None,
                 title: None,
             };
@@ -347,6 +351,17 @@ impl Input {
     /// configured or not.
     pub(crate) fn mvc_in_band(&self, index: usize) -> bool {
         self.mvc_in_band.contains(&index)
+    }
+
+    /// Plays the video as frame sequential 3D or not, whatever its labels
+    /// say (None: as they say). Read when its info is read and its video
+    /// decoder opened.
+    pub(crate) fn set_frame_sequential(&mut self, choice: Option<bool>) {
+        self.frame_sequential = choice;
+    }
+
+    pub(crate) fn frame_sequential(&self) -> Option<bool> {
+        self.frame_sequential
     }
 
     /// Best stream of a media type, as FFmpeg chooses it.

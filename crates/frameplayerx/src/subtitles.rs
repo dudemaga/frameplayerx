@@ -361,7 +361,7 @@ impl StereoSubs {
         let (w, h) = self.canvas;
         match self.layout {
             StereoLayout::Mono => ((w, h), (1.0, 1.0)),
-            StereoLayout::SideBySide => ((w / 2, h), (1.0, 1.0)),
+            StereoLayout::SideBySide | StereoLayout::FrameSequential => ((w / 2, h), (1.0, 1.0)),
             StereoLayout::HalfSideBySide => ((w / 2, h), (2.0, 1.0)),
             StereoLayout::TopBottom => ((w, h / 2), (1.0, 1.0)),
             StereoLayout::HalfTopBottom => ((w, h / 2), (1.0, 2.0)),
@@ -374,7 +374,9 @@ impl StereoSubs {
         let ((hw, hh), _) = self.half();
         let half = (eye ^ self.swap_eyes as usize) as i32;
         let (x0, y0) = match self.layout {
-            StereoLayout::SideBySide | StereoLayout::HalfSideBySide => (half * hw as i32, 0),
+            StereoLayout::SideBySide
+            | StereoLayout::HalfSideBySide
+            | StereoLayout::FrameSequential => (half * hw as i32, 0),
             StereoLayout::TopBottom | StereoLayout::HalfTopBottom => (0, half * hh as i32),
             StereoLayout::Mono => (0, 0),
         };
