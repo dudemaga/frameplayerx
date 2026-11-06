@@ -14,33 +14,50 @@ use crate::nal::Packing;
 use crate::{Result, q2d};
 use fp_ffmpeg_sys as ff;
 
-/// A frame sequential stream's timing, and which eye comes first.
+/// A frame sequential stream's timing.
 #[derive(Clone, Copy, Debug)]
 pub(crate) struct Stream {
-    pub(crate) right_first: bool,
     /// The first frame's time, in the stream's time base.
     first: i64,
     /// How long each frame lasts, in the same units.
     frame: f64,
 }
 
-/// How stream `index` is frame sequential, if it is: a label in the
-/// container, else in the video stream, else `FS3D` in the file name. Stays
+/// Whether stream `index` is labelled frame sequential, and if so whether
+/// the right eye comes first: by a label in the container, else in the video
+/// stream, else `FS3D` in the file name.
+pub(crate) fn labelled(input: &Input, index: usize) -> Option<bool> {
+    let st = *input.streams().get(index)?;
+    // SAFETY: the stream and its parameters live as long as the input.
+    let par = unsafe { &*(*st).codecpar };
+    match (
+        crate::info::stereo3d_side_data(par),
+        input.frame_packing(index),
+    ) {
+        (Some(s), _) if s.type_ == ff::AV_STEREO3D_FRAMESEQUENCE => {
+            Some(s.flags & ff::AV_STEREO3D_FLAG_INVERT as i32 != 0)
+        }
+        (None, Some((Packing::FrameSequential, right_first))) => Some(right_first),
+        (None, None) if fp_core::format::names_frame_sequential(&input.name) => Some(false),
+        _ => None,
+    }
+}
+
+/// How stream `index` decodes as frame sequential, if it does: as labelled,
+/// unless the viewer said otherwise ([`Input::set_frame_sequential`]). Stays
 /// None for a stream that doesn't say how fast its frames come, as its eyes
 /// can't then be told apart.
 pub(crate) fn stream(input: &Input, index: usize) -> Option<Stream> {
-    let st = *input.streams().get(index)?;
-    // SAFETY: the stream and its parameters live as long as the input.
-    let (st, par) = unsafe { (&*st, &*(*st).codecpar) };
-    let label = crate::info::stereo3d_side_data(par);
-    let right_first = match (label, input.frame_packing(index)) {
-        (Some(s), _) if s.type_ == ff::AV_STEREO3D_FRAMESEQUENCE => {
-            s.flags & ff::AV_STEREO3D_FLAG_INVERT as i32 != 0
+    match input.frame_sequential() {
+        Some(false) => return None,
+        Some(true) => {}
+        None => {
+            labelled(input, index)?;
         }
-        (None, Some((Packing::FrameSequential, right_first))) => right_first,
-        (None, None) if fp_core::format::names_frame_sequential(&input.name) => false,
-        _ => return None,
-    };
+    }
+    let st = *input.streams().get(index)?;
+    // SAFETY: the stream lives as long as the input.
+    let st = unsafe { &*st };
     let rate = [st.r_frame_rate, st.avg_frame_rate]
         .map(q2d)
         .into_iter()
@@ -51,11 +68,7 @@ pub(crate) fn stream(input: &Input, index: usize) -> Option<Stream> {
     } else {
         st.start_time
     };
-    Some(Stream {
-        right_first,
-        first,
-        frame,
-    })
+    Some(Stream { first, frame })
 }
 
 impl Stream {
@@ -178,7 +191,11 @@ mod tests {
             assert!(v.frame_sequential, "{name}");
             assert_eq!((v.width, v.height), (128, 36), "{name}");
             assert!((v.fps - 24.0).abs() < 0.01, "{name}: {}", v.fps);
-            assert_eq!(info.hints.stereo, Some(StereoLayout::SideBySide), "{name}");
+            assert_eq!(
+                info.hints.stereo,
+                Some(StereoLayout::FrameSequential),
+                "{name}"
+            );
             assert!(!info.hints.eyes_swapped, "{name}");
         }
         assert!(read_info(&open("fs3d_block_rl.mkv")).hints.eyes_swapped);
@@ -199,6 +216,25 @@ mod tests {
     }
 
     #[test]
+    fn the_viewer_can_say_whether_a_file_is_frame_sequential() {
+        let mut labelled = open("fs3d_block_lr.mkv");
+        labelled.set_frame_sequential(Some(false));
+        let info = read_info(&labelled);
+        let v = info.video_stream().unwrap();
+        assert!(!v.frame_sequential);
+        assert_eq!(v.width, 64);
+        // What its label says is still what it's detected as.
+        assert_eq!(info.hints.stereo, Some(StereoLayout::FrameSequential));
+
+        let mut plain = open("vp9.webm");
+        plain.set_frame_sequential(Some(true));
+        let vi = read_info(&plain).video_stream().unwrap().index;
+        assert!(read_info(&plain).video_stream().unwrap().frame_sequential);
+        let dec = Decoder::open(&plain, vi, HwDecode::Off).unwrap();
+        assert!(dec.name.contains("frame sequential"), "{}", dec.name);
+    }
+
+    #[test]
     fn a_plain_3d_file_is_not_frame_sequential() {
         let info = read_info(&open("h264_sei_sbs.mp4"));
         assert!(!info.video_stream().unwrap().frame_sequential);
@@ -207,7 +243,6 @@ mod tests {
     #[test]
     fn eyes_come_from_timestamps() {
         let s = Stream {
-            right_first: false,
             first: 1000,
             frame: 1000.0 / 48.0,
         };

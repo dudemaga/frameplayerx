@@ -753,6 +753,19 @@ impl App {
         }
     }
 
+    /// Opens the video playing again from where it is.
+    pub(super) fn reopen(&mut self) {
+        let Some(p) = &self.playback else {
+            return;
+        };
+        let req = OpenRequest {
+            start_at: Some(p.player.position()),
+            paused: p.player.is_paused(),
+            ..p.request.clone()
+        };
+        self.open_request(req);
+    }
+
     /// Opens the video playing again from where it is, as `quality`.
     pub(super) fn play_quality(&mut self, quality: playback::Quality) {
         let Some(p) = &self.playback else {

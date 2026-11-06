@@ -518,6 +518,16 @@ pub fn chip(ui: &mut Ui, label: &str, selected: bool) -> Response {
     chip_icon(ui, None, label, selected)
 }
 
+/// How wide a chip without an icon is.
+pub fn chip_width(ui: &Ui, label: &str) -> f32 {
+    let text = ui.painter().layout_no_wrap(
+        label.to_string(),
+        theme::font(Weight::Medium, 16.0),
+        Color32::WHITE,
+    );
+    (text.size().x + 32.0).max(40.0)
+}
+
 pub fn chip_icon(ui: &mut Ui, icon: Option<&str>, label: &str, selected: bool) -> Response {
     let h = 40.0;
     let text = ui.painter().layout_no_wrap(
@@ -1533,6 +1543,7 @@ pub fn format_short(f: &fp_core::format::VideoFormat) -> String {
             let fov = format!("{}", fov.round());
             tr!("format-short-fisheye", fov = fov)
         }
+        Projection::Eac { h_fov } if h_fov >= 360.0 => "YouTube 360°".to_string(),
         Projection::Eac { h_fov } => format!("EAC {}°", h_fov.round()),
     };
     if stereo { format!("{p} 3D") } else { p }

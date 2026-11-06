@@ -148,7 +148,9 @@ pub(crate) fn build(
     };
     let stereo = match video.format.stereo {
         StereoLayout::Mono => 0u32,
-        StereoLayout::SideBySide | StereoLayout::HalfSideBySide => 1,
+        StereoLayout::SideBySide | StereoLayout::HalfSideBySide | StereoLayout::FrameSequential => {
+            1
+        }
         StereoLayout::TopBottom | StereoLayout::HalfTopBottom => 2,
     };
     let swap = (video.format.eyes_swapped ^ s.swap_eyes) as u32;
@@ -179,7 +181,7 @@ pub(crate) fn build(
     let (pw, ph) = if turns % 2 == 1 { (ph, pw) } else { (pw, ph) };
     // Per-eye aspect for flat screens.
     let (ew, eh) = match video.format.stereo {
-        StereoLayout::SideBySide => (pw / 2.0, ph),
+        StereoLayout::SideBySide | StereoLayout::FrameSequential => (pw / 2.0, ph),
         StereoLayout::TopBottom => (pw, ph / 2.0),
         StereoLayout::HalfSideBySide | StereoLayout::HalfTopBottom | StereoLayout::Mono => (pw, ph),
     };
@@ -189,7 +191,7 @@ pub(crate) fn build(
     let [c0, c1] = s.lens_centre;
     // The screen's width setting is its longer side, so a portrait video
     // stands as tall as a landscape one is wide.
-    let long = s.screen_width * s.zoom;
+    let long = s.screen_width;
     let (screen_w, screen_h) = if ew >= eh {
         (long, long * eh / ew.max(1e-3))
     } else {

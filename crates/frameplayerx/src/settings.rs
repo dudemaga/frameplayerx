@@ -74,6 +74,12 @@ pub struct Settings {
     /// The format a video starts in when nothing identifies it (no
     /// metadata, file name tag or telling shape).
     pub default_format: fp_core::format::VideoFormat,
+    /// The fisheye lens angles offered as presets, in degrees, smallest
+    /// first.
+    pub fisheye_presets: Vec<f32>,
+    /// The angle a video gets when Fisheye is picked for it, and a Fisheye
+    /// default format: one of the presets (180° with none).
+    pub fisheye_start: f32,
     /// Seconds of inactivity before the playback UI hides.
     pub auto_hide_secs: f32,
     /// Thumbstick seek step in seconds.
@@ -133,6 +139,54 @@ pub struct PanelOffsets {
     pub perf: [f32; 2],
 }
 
+/// The fisheye presets to start with: a plain 180° lens, the Canon RF 5.2 mm,
+/// the MKX200 and the MKX220.
+pub const FISHEYE_PRESETS: [f32; 4] = [180.0, 190.0, 200.0, 220.0];
+/// As many fisheye presets as fit on one line.
+pub const MAX_FISHEYE_PRESETS: usize = 8;
+/// The angle Fisheye starts at to begin with, a plain fisheye lens's.
+pub const FISHEYE_START: f32 = 180.0;
+
+/// Adds `angle`, in whole degrees, to `presets`, kept in order, unless it is
+/// there or they are full.
+pub fn add_fisheye_preset(presets: &mut Vec<f32>, angle: f32) {
+    let angle = angle.round();
+    if presets.len() < MAX_FISHEYE_PRESETS && !presets.contains(&angle) {
+        presets.push(angle);
+        presets.sort_by(f32::total_cmp);
+    }
+}
+
+impl Settings {
+    /// Takes the fisheye preset at `index` out. If Fisheye started at it,
+    /// it starts at the preset nearest 180° instead (the smaller of two as
+    /// near), or 180° with none left.
+    pub fn remove_fisheye_preset(&mut self, index: usize) {
+        if index < self.fisheye_presets.len()
+            && self.fisheye_presets.remove(index) == self.fisheye_start
+        {
+            let off = |angle: &f32| (angle - FISHEYE_START).abs();
+            self.fisheye_start = self
+                .fisheye_presets
+                .iter()
+                .copied()
+                .min_by(|a, b| off(a).total_cmp(&off(b)))
+                .unwrap_or(FISHEYE_START);
+        }
+    }
+
+    /// The fisheye presets and where Fisheye starts, as they began.
+    pub fn reset_fisheye_presets(&mut self) {
+        self.fisheye_presets = FISHEYE_PRESETS.to_vec();
+        self.fisheye_start = FISHEYE_START;
+    }
+
+    /// Whether the fisheye presets or where Fisheye starts were changed.
+    pub fn fisheye_presets_changed(&self) -> bool {
+        self.fisheye_presets != FISHEYE_PRESETS || self.fisheye_start != FISHEYE_START
+    }
+}
+
 impl Default for Settings {
     fn default() -> Self {
         Settings {
@@ -149,6 +203,8 @@ impl Default for Settings {
             passthrough: false,
             resume: true,
             default_format: fp_core::format::VideoFormat::FALLBACK,
+            fisheye_presets: FISHEYE_PRESETS.to_vec(),
+            fisheye_start: FISHEYE_START,
             auto_hide_secs: 4.0,
             seek_step: 10.0,
             remote: RemoteConfig::default(),
@@ -282,6 +338,8 @@ mod tests {
         assert_eq!(p.seek_step, 10.0);
         assert!(!p.haptics_enabled, "haptics stay off until turned on");
         assert_eq!(p.default_format, fp_core::format::VideoFormat::FALLBACK);
+        assert_eq!(p.fisheye_presets, FISHEYE_PRESETS);
+        assert_eq!(p.fisheye_start, FISHEYE_START);
         // Saved before the global chroma key: the old green default goes.
         std::fs::write(
             &path,
@@ -306,5 +364,42 @@ mod tests {
         std::fs::write(&path, "garbage").unwrap();
         assert_eq!(Settings::load(&path).volume, 1.0);
         std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
+    fn fisheye_presets_stay_in_order_without_repeats() {
+        let mut presets = FISHEYE_PRESETS.to_vec();
+        add_fisheye_preset(&mut presets, 129.6);
+        add_fisheye_preset(&mut presets, 190.2);
+        assert_eq!(presets, [130.0, 180.0, 190.0, 200.0, 220.0]);
+        for angle in [140.0, 150.0, 160.0, 170.0, 250.0] {
+            add_fisheye_preset(&mut presets, angle);
+        }
+        assert_eq!(presets.len(), MAX_FISHEYE_PRESETS);
+        assert!(!presets.contains(&250.0), "full: {presets:?}");
+    }
+
+    #[test]
+    fn removing_the_preset_fisheye_starts_at_moves_it_nearest_180() {
+        let mut s = Settings {
+            fisheye_start: 200.0,
+            ..Settings::default()
+        };
+        s.remove_fisheye_preset(1); // 190°: not where it starts
+        assert_eq!((s.fisheye_start, s.fisheye_presets.len()), (200.0, 3));
+        s.remove_fisheye_preset(1); // 200°
+        assert_eq!(s.fisheye_start, 180.0);
+        s.remove_fisheye_preset(0); // 180°, leaving 220°
+        assert_eq!(s.fisheye_start, 220.0);
+        s.remove_fisheye_preset(0);
+        assert_eq!(s.fisheye_start, FISHEYE_START, "none left");
+        assert!(s.fisheye_presets_changed());
+        s.reset_fisheye_presets();
+        assert!(!s.fisheye_presets_changed());
+
+        // Two as near: the smaller.
+        s.fisheye_presets = vec![170.0, 180.0, 190.0];
+        s.remove_fisheye_preset(1);
+        assert_eq!(s.fisheye_start, 170.0);
     }
 }

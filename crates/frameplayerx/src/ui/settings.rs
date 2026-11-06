@@ -395,14 +395,41 @@ fn playback(ui: &mut egui::Ui, v: &mut View) {
     heading(ui, tr!("settings-default-format"));
     note(ui, tr!("settings-default-format-desc"));
     ui.add_space(6.0);
+    if let Some(f) = super::player::format_list(ui, &s.default_format, false, s.fisheye_start) {
+        s.default_format = f;
+    }
+    heading(ui, tr!("settings-fisheye-presets"));
+    note(ui, tr!("settings-fisheye-presets-desc"));
+    ui.add_space(6.0);
     ui.horizontal_wrapped(|ui| {
         ui.spacing_mut().item_spacing = Vec2::new(8.0, 8.0);
-        for (label, f) in super::player::format_choices() {
-            if widgets::chip(ui, label, s.default_format == f).clicked() {
-                s.default_format = f;
+        let mut remove = None;
+        for (i, angle) in s.fisheye_presets.iter().enumerate() {
+            if widgets::chip(ui, &format!("{angle}°  {}", icons::X), false).clicked() {
+                remove = Some(i);
             }
         }
+        if let Some(i) = remove {
+            s.remove_fisheye_preset(i);
+        }
+        if s.fisheye_presets_changed()
+            && widgets::button_sized(ui, None, tr!("adjust-reset"), Kind::Ghost, 40.0).clicked()
+        {
+            s.reset_fisheye_presets();
+        }
     });
+    if !s.fisheye_presets.is_empty() {
+        ui.add_space(4.0);
+        ui.horizontal_wrapped(|ui| {
+            ui.spacing_mut().item_spacing = Vec2::new(8.0, 8.0);
+            ui.label(RichText::new(tr!("settings-fisheye-start")).color(theme::TEXT_2));
+            for &angle in &s.fisheye_presets {
+                if widgets::chip(ui, &format!("{angle}°"), s.fisheye_start == angle).clicked() {
+                    s.fisheye_start = angle;
+                }
+            }
+        });
+    }
 }
 
 /// Where videos start: the defaults for a video with no adjustments saved.

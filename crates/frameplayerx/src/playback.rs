@@ -381,6 +381,11 @@ pub fn open(
             src.transcode_targets(&video)
         })
         .unwrap_or_default();
+    // Frame sequential or not as the viewer last said, else by the labels.
+    let frame_sequential = record
+        .as_ref()
+        .and_then(|r| r.user_format)
+        .map(|f| f.stereo == format::StereoLayout::FrameSequential);
     let duration = entry
         .as_ref()
         .and_then(|e| e.duration)
@@ -400,7 +405,7 @@ pub fn open(
                 duration,
                 restart: t.seekable.then_some(restart),
             }),
-            ..player_config(settings, 0.0)
+            ..player_config(settings, 0.0, frame_sequential)
         };
         open_player(stream, config).map_err(|e| fail(crate::ui::errors::media(&e)))
     };
@@ -435,7 +440,9 @@ pub fn open(
                     .map(Some),
             }
             .map_err(failed)?;
-            match src.map(|src| open_player(src, player_config(settings, start_at))) {
+            match src
+                .map(|src| open_player(src, player_config(settings, start_at, frame_sequential)))
+            {
                 Some(Ok((p, pick))) => (p, pick, None),
                 Some(Err(e))
                     if e.cannot_play_here()
@@ -594,7 +601,11 @@ fn restart_at(
     })
 }
 
-fn player_config(settings: &Settings, start_at: f64) -> PlayerConfig {
+fn player_config(
+    settings: &Settings,
+    start_at: f64,
+    frame_sequential: Option<bool>,
+) -> PlayerConfig {
     PlayerConfig {
         hw_decode: if settings.hardware_decoding {
             fp_media::HwDecode::Auto
@@ -607,6 +618,7 @@ fn player_config(settings: &Settings, start_at: f64) -> PlayerConfig {
         },
         start_at,
         volume: settings.volume,
+        frame_sequential,
         ..Default::default()
     }
 }

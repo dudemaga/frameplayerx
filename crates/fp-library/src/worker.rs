@@ -58,7 +58,7 @@ impl ThumbnailCrop {
     /// The crop for a format: SBS → left half, TB → top half, mono → full.
     pub fn for_format(format: &VideoFormat) -> ThumbnailCrop {
         match format.stereo {
-            StereoLayout::SideBySide => ThumbnailCrop::LeftEye,
+            StereoLayout::SideBySide | StereoLayout::FrameSequential => ThumbnailCrop::LeftEye,
             StereoLayout::HalfSideBySide => ThumbnailCrop::LeftEyeStretched,
             StereoLayout::TopBottom => ThumbnailCrop::TopEye,
             StereoLayout::HalfTopBottom => ThumbnailCrop::TopEyeStretched,

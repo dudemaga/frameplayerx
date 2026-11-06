@@ -77,6 +77,9 @@ pub struct PlayerConfig {
     /// Set for a stream a server transcodes; [`Self::start_at`] is then
     /// ignored.
     pub timeline: Option<Timeline>,
+    /// Whether the viewer says the video is frame sequential 3D; None goes
+    /// by its labels.
+    pub frame_sequential: Option<bool>,
 }
 
 impl Default for PlayerConfig {
@@ -92,6 +95,7 @@ impl Default for PlayerConfig {
             start_paused: false,
             volume: 1.0,
             timeline: None,
+            frame_sequential: None,
         }
     }
 }
@@ -296,6 +300,7 @@ impl Player {
         let net = src.net();
         let quit = Arc::new(AtomicBool::new(false));
         let mut input = Input::open(src, name, quit.clone())?;
+        input.set_frame_sequential(config.frame_sequential);
         if let Some(tl) = &config.timeline {
             input.start_at(tl.start);
         }
@@ -997,6 +1002,7 @@ fn demux_thread(
 fn reopen(restart: &Restart, current: &Input, at: f64, quit: Arc<AtomicBool>) -> Result<Input> {
     let src = restart(at).map_err(Error::Unsupported)?;
     let mut next = Input::open(src, &current.name, quit)?;
+    next.set_frame_sequential(current.frame_sequential());
     next.start_at(at);
     if next.streams().len() != current.streams().len() {
         return Err(Error::Unsupported(format!(

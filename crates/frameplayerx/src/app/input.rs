@@ -139,7 +139,13 @@ impl App {
             }
             Cmd::Zoom(d) => {
                 if let Some(p) = &mut self.playback {
-                    p.settings.zoom = (p.settings.zoom + d).clamp(0.5, 2.5);
+                    // A flat screen's size is its width.
+                    if p.format.projection == Projection::Flat {
+                        p.settings.screen_width =
+                            (p.settings.screen_width * (1.0 + d)).clamp(0.5, 30.0);
+                    } else {
+                        p.settings.zoom = (p.settings.zoom + d).clamp(0.5, 2.5);
+                    }
                     p.settings_dirty = true;
                 }
             }
@@ -167,6 +173,9 @@ impl App {
                         p.settings.height,
                         p.settings.forward,
                     ) = (d.yaw, d.pitch, d.roll, d.zoom, d.height, d.forward);
+                    if p.format.projection == Projection::Flat {
+                        p.settings.screen_width = d.screen_width;
+                    }
                     p.settings_dirty = true;
                     self.ui.toast(tr!("toast-view-reset"));
                 }
