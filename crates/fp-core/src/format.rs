@@ -41,21 +41,6 @@ impl Projection {
             Projection::Eac { h_fov } => format!("EAC {}°", h_fov.round()),
         }
     }
-
-    /// Projections offered in the UI, in display order.
-    pub fn presets() -> Vec<(&'static str, Projection)> {
-        vec![
-            ("Flat screen", Projection::Flat),
-            ("180°", Projection::EQUIRECT_180),
-            ("360°", Projection::EQUIRECT_360),
-            ("Fisheye 180°", Projection::fisheye(180.0)),
-            ("Fisheye 190° (Canon RF 5.2)", Projection::fisheye(190.0)),
-            ("Fisheye 200° (MKX200)", Projection::fisheye(200.0)),
-            ("Fisheye 220° (MKX220/VRCA220)", Projection::fisheye(220.0)),
-            ("EAC 360° (YouTube)", Projection::Eac { h_fov: 360.0 }),
-            ("EAC 180°", Projection::Eac { h_fov: 180.0 }),
-        ]
-    }
 }
 
 /// How the two eyes are packed in each frame.
@@ -72,6 +57,9 @@ pub enum StereoLayout {
     TopBottom,
     /// Left eye on the top half, squeezed vertically to half height (e.g. 16:9 container).
     HalfTopBottom,
+    /// The eyes take turns, frame after frame, left first. Each pair is
+    /// decoded into one picture twice as wide, so it shows as side by side.
+    FrameSequential,
 }
 
 impl StereoLayout {
@@ -82,6 +70,7 @@ impl StereoLayout {
             StereoLayout::HalfSideBySide => "Half side by side",
             StereoLayout::TopBottom => "Top/bottom",
             StereoLayout::HalfTopBottom => "Half top/bottom",
+            StereoLayout::FrameSequential => "Frame sequential",
         }
     }
 
@@ -90,17 +79,29 @@ impl StereoLayout {
         *self != StereoLayout::Mono
     }
 
-    /// True if the eye views are side-by-side (full or half).
+    /// True if the eye views are side-by-side (full or half), as decoded.
     pub fn is_side_by_side(&self) -> bool {
         matches!(
             self,
-            StereoLayout::SideBySide | StereoLayout::HalfSideBySide
+            StereoLayout::SideBySide | StereoLayout::HalfSideBySide | StereoLayout::FrameSequential
         )
     }
 
     /// True if the eye views are top-and-bottom (full or half).
     pub fn is_top_bottom(&self) -> bool {
         matches!(self, StereoLayout::TopBottom | StereoLayout::HalfTopBottom)
+    }
+
+    /// The pixel aspect each eye is shown with, of a video whose pixels are
+    /// `pixel_aspect` times as wide as tall. Some full side-by-side
+    /// re-encodes are marked 1:2, the packing itself, so a 2D player shows
+    /// the whole frame at one eye's shape: their eyes' pixels are square.
+    pub fn eye_pixel_aspect(&self, pixel_aspect: f64) -> f64 {
+        if *self == StereoLayout::SideBySide && (pixel_aspect - 0.5).abs() < 0.01 {
+            1.0
+        } else {
+            pixel_aspect
+        }
     }
 }
 
@@ -168,14 +169,6 @@ impl VideoFormat {
     pub fn alpha_pack_scale(&self) -> Option<f32> {
         (self.alpha_packed && self.stereo.is_side_by_side()).then_some(ALPHA_PACK_SCALE)
     }
-
-    /// Same projection, stereo layout and eye order (the alpha mask aside).
-    pub fn same_layout(&self, other: &VideoFormat) -> bool {
-        VideoFormat {
-            alpha_packed: other.alpha_packed,
-            ..*self
-        } == *other
-    }
 }
 
 /// Where a detected format came from, strongest first.
@@ -227,10 +220,16 @@ fn tokens(name: &str) -> Vec<String> {
         .collect()
 }
 
+/// Whether a file name calls the video frame sequential 3D, its eyes taking
+/// turns frame by frame.
+pub fn names_frame_sequential(name: &str) -> bool {
+    tokens(name).iter().any(|t| t == "FS3D")
+}
+
 /// Detects projection and stereo layout from a file name.
 ///
 /// Follows the conventions DeoVR and HereSphere document: `_LR`/`_SBS`/`_3DH`
-/// for side by side, `_TB`/`_OU`/`_3DV` for top/bottom, `_180`/`_360`,
+/// for side by side, `_TB`/`_OU`/`_TAB`/`_3DV` for top/bottom, `_180`/`_360`,
 /// `_FISHEYE`, `_FISHEYE190`, `_MKX200`, `_MKX220`, `_RF52`, `_VRCA220`,
 /// `_EAC`, `_FLAT`/`_2D`/`_MONO`, and `_ALPHA` for a packed passthrough
 /// mask. Returns `None` when the name says nothing about the layout.
@@ -254,10 +253,14 @@ pub fn detect_from_name(name: &str) -> Option<VideoFormat> {
                 stereo = Some(StereoLayout::HalfSideBySide);
                 swapped = true;
             }
-            "TB" | "OU" | "3DV" | "FOU" | "FTB" | "OVERUNDER" | "TOPBOTTOM" => {
+            "TB" | "OU" | "3DV" | "FOU" | "FTB" | "FTAB" | "OVERUNDER" | "TOPBOTTOM" => {
                 stereo = Some(StereoLayout::TopBottom);
             }
-            "HOU" | "HTB" => stereo = Some(StereoLayout::HalfTopBottom),
+            "HOU" | "HTB" | "HTAB" => stereo = Some(StereoLayout::HalfTopBottom),
+            // On its own it could be a word in a title ("Bar Tab").
+            "TAB" if ["3D", "H", "F", "HALF", "FULL"].iter().any(|t| has(t)) => {
+                stereo = Some(StereoLayout::TopBottom);
+            }
             "BT" | "FBT" => {
                 stereo = Some(StereoLayout::TopBottom);
                 swapped = true;
@@ -409,7 +412,7 @@ fn refine_flat_stereo(format: &mut VideoFormat, name: &str, width: u32, height: 
     let toks = tokens(name);
     let is_explicit_full = toks
         .iter()
-        .any(|t| t == "FSBS" || t == "FOU" || t == "FTB" || t == "FULL");
+        .any(|t| t == "FSBS" || t == "FOU" || t == "FTB" || t == "FTAB" || t == "FULL");
     if is_explicit_full {
         return;
     }
@@ -490,6 +493,44 @@ mod tests {
 
     fn d(name: &str) -> Option<(P, S, bool)> {
         detect_from_name(name).map(|f| (f.projection, f.stereo, f.eyes_swapped))
+    }
+
+    #[test]
+    fn tab_means_top_and_bottom_unless_it_could_be_a_word() {
+        let flat = |s| Some((P::Flat, s, false));
+        assert_eq!(d("Clip.HTAB.mkv"), flat(S::HalfTopBottom));
+        assert_eq!(d("HTAB-3D.mkv"), flat(S::HalfTopBottom));
+        assert_eq!(d("Clip.FTAB.mkv"), flat(S::TopBottom));
+        assert_eq!(d("Movie.3D.TAB.1080p.mkv"), flat(S::TopBottom));
+        assert_eq!(d("Movie.H-TAB.mkv"), flat(S::TopBottom));
+        assert_eq!(d("Movie.Half-TAB.mkv"), flat(S::HalfTopBottom));
+        for name in ["Bar Tab.mkv", "Tab Hunter 2015.mkv", "Clip.TAB.mkv"] {
+            assert_eq!(d(name), None, "{name}");
+        }
+        let halves = resolve(
+            None,
+            ContainerHints::default(),
+            "Movie.H-TAB.mkv",
+            1920,
+            1080,
+        );
+        assert_eq!(halves.format.stereo, S::HalfTopBottom, "by its shape");
+        let full = resolve(
+            None,
+            ContainerHints::default(),
+            "Movie.FTAB.mkv",
+            1920,
+            1080,
+        );
+        assert_eq!(full.format.stereo, S::TopBottom, "named full");
+    }
+
+    #[test]
+    fn frame_sequential_names() {
+        assert!(names_frame_sequential("(FS3D) Toy Story 5 Trailer 1.mkv"));
+        assert!(names_frame_sequential("/films/Film.2023.fs3d.mkv"));
+        assert!(!names_frame_sequential("FS3D/Film.mkv"));
+        assert!(!names_frame_sequential("Film FS 3D.mkv"));
     }
 
     #[test]
@@ -583,9 +624,6 @@ mod tests {
                 .format
                 .alpha_packed
         );
-        let plain = VideoFormat::new(P::fisheye(190.0), S::SideBySide);
-        assert!(f.same_layout(&plain) && plain.same_layout(&f));
-        assert!(!f.same_layout(&VideoFormat::new(P::EQUIRECT_180, S::SideBySide)));
     }
 
     #[test]
@@ -798,5 +836,23 @@ mod tests {
         let j = serde_json::to_string(&f).unwrap();
         assert_eq!(serde_json::from_str::<VideoFormat>(&j).unwrap(), f);
         assert!(j.contains("\"kind\":\"fisheye\""), "{j}");
+    }
+
+    #[test]
+    fn full_side_by_side_marked_1_2_has_square_eyes() {
+        use StereoLayout::*;
+        assert_eq!(SideBySide.eye_pixel_aspect(0.5), 1.0);
+        // Anything else is the eyes' own: 1:2 in other layouts, 2:1 top/bottom
+        // (also real 2x anamorphic), DVD pixels.
+        for (layout, pa) in [
+            (Mono, 0.5),
+            (HalfSideBySide, 0.5),
+            (HalfTopBottom, 0.5),
+            (TopBottom, 2.0),
+            (HalfSideBySide, 2.0),
+            (SideBySide, 32.0 / 27.0),
+        ] {
+            assert_eq!(layout.eye_pixel_aspect(pa), pa, "{layout:?} {pa}");
+        }
     }
 }

@@ -288,6 +288,17 @@ reader (`udf.rs`, 2.50 metadata partitions included), the playlists
 clips one after another, their timestamps moved onto the title's clock;
 3D titles read each clip's SSIF straight out of the image.
 
+**Frame sequential 3D.** `fp-media/src/frame_seq.rs` wraps an ordinary
+decoder and puts each left frame and the right frame after it side by side,
+the same step 3D Blu-ray ends with. `StreamInfo` then reports what comes out:
+twice the width and half the frame rate, and its format is
+`StereoLayout::FrameSequential`, drawn as full side by side. A viewer who picks
+another format, or frame sequential for an unlabelled file, reopens the video
+with `PlayerConfig::frame_sequential` set. A frame's eye comes
+from its timestamp, not a count, so a seek or a lost frame can't leave later
+frames on the wrong eye. An odd gap in a file's timestamps would swap them,
+which no file tried has.
+
 **Pictures.** A card shows `MediaRecord::picture`: the frame where a partly
 watched video was left off, else its server's picture, else a thumbnail the
 metadata worker made (`fp-library/src/worker.rs`; only for videos whose
@@ -394,7 +405,18 @@ VK_ICD_FILENAMES=/usr/share/vulkan/icd.d/lvp_icd.json \
 |---|---|
 | `frameplayerx --info FILE` | Prints what FramePlayerX detects about a video: format, streams, HDR |
 | `frameplayerx --decode-bench FILE [--sw]` | Decodes without displaying and prints the decoder and frame rate |
-| `frameplayerx --seek-test FILE\|URL` | Skips through a video headless, checking buffering and that hardware decoders are given back |
+| `frameplayerx --seek-test FILE\|URL` | Skips through a video headless, checking buffering and that hardware decoders are given back, and measures reads |
+
+### Measuring stream reads
+
+`--seek-test` reports what the demuxer read by each first picture and skip, and ends with medians. `--play SECONDS` plays first, reporting every 10 s. `--trace-reads` prints every read's offset and length, and each jump with how much was read in order before it. `--read-test SECONDS` plays nothing and just reads from the start as fast as the source delivers. `--read-ahead SECONDS` replaces the player's buffer of video read ahead.
+
+```bash
+frameplayerx --seek-test URL --rounds 1 --play 60 --seeks 8 --step 120   # playback and skips
+frameplayerx --seek-test URL --rounds 5 --seeks 0 --play 0               # first picture
+```
+
+A skip slower than 2 s counts as a failure, so a slow route ends in `FAIL`; the numbers are still good. "Read speed while the buffer fills" counts only bursts of at least 16 MiB with no gap over 5 ms, so time the demuxer spends waiting with a full queue doesn't lower it, and reads served from the block cache don't raise it. A link's speed can swing 2x between runs, so compare builds in one session, on medians.
 
 ## On the headset
 
@@ -441,9 +463,11 @@ What the code relies on about the platform:
   OpenXR, which is why the launcher sets the refresh rate and resolution
   there.
 - The hardware decoder is a V4L2 stateful decoder for 4:2:0 H.264 (8-bit)
-  and HEVC (8- and 10-bit). It's shared with Steam's own streaming, so it
-  can be busy. It writes 10-bit pictures correctly only as Q10C: asked for
-  NV12, it clamps the samples to 8 bits.
+  and HEVC (8- and 10-bit). One session takes at most 8192×4320. Every
+  session open on the driver lowers that, idle ones and encoders too, so
+  Steam's recording and browser can leave it busy. `/proc` shows who holds
+  it. It writes 10-bit pictures correctly only as Q10C: asked for NV12, it
+  clamps the samples to 8 bits.
 - Turnip has no TP10 images, though the GPU reads TP10. A TP10 texture
   reads wrongly past 2^24 samples, so 10-bit planes are read in bands.
 - SteamOS only mounts ext4 microSD cards itself, and no USB drives;

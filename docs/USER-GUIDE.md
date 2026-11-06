@@ -184,6 +184,9 @@ Its title is always the source's name, with where you are in it underneath.
 Sources locked with a PIN stay off Home until unlocked; the padlock on a
 tile locks it (or, without a PIN yet, asks for one).
 
+Point at a title that is cut short, here or on the control bar, to read it
+whole.
+
 On a video's card the picture plays it and the title under it opens its
 details: your rating and favorite, its format, *Play next*, *Add to queue*
 and *Add to playlist*, and what its server says about it (Jellyfin's story,
@@ -347,6 +350,10 @@ A PIN locks that one source only. Another source on the same server, or
 with the same folder, stays open: lock it too, with the same PIN or its
 own, if it shows the same videos.
 
+### Parallel downloads
+
+A server's form has a **Parallel downloads** switch, off by default. On, FramePlayerX downloads several parts of a video at once over separate connections while it plays, the way some download managers do. This helps if the server limits the speed of each connection. If it doesn't, the switch may gain nothing, and a server on hard drives can get slower, because the drives have to jump between parts of the file. SMB shares and DLNA servers don't have the switch.
+
 ### Editing a source
 
 The pencil next to a source under **Sources** opens its details: rename it,
@@ -459,7 +466,7 @@ videos onto it and put it in the Frame. exFAT has no 4 GB file limit, so
 The format is picked automatically from, in order: your own choice for that
 file, the file's spherical/stereo metadata, the file name, and the picture's
 shape. File-name tags understood include `_180`, `_360`, `_LR`/`_SBS`,
-`_TB`/`_OU`, `_RL`, `_FISHEYE190`, `_MKX200`, `_MKX220`, `_VRCA220`,
+`_TB`/`_OU`/`_HTAB`, `_RL`, `_FISHEYE190`, `_MKX200`, `_MKX220`, `_VRCA220`,
 `_EAC`, `_2D`, `_3D`.
 
 Movie shapes (16:9, 4:3, 1.85, scope) and portrait phone clips play on a
@@ -469,7 +476,9 @@ side; Settings › Playback › **Default format** picks another.
 
 Videos are shown as their file says: a phone clip stored sideways stands
 upright, and anamorphic video (DVDs, anamorphic lenses) is widened to its
-real shape. A portrait video's screen is as tall as **Screen width**.
+real shape. A full side-by-side file marked to show at one eye's shape in
+2D players (a 1:2 pixel aspect) still shows each eye at its own shape. A
+portrait video's screen is as tall as **Screen width**.
 When a 3D file's metadata says the right eye comes first, the eyes are
 swapped to match.
 
@@ -480,6 +489,11 @@ The same at the bottom of the adjust panel's Position tab changes it for
 the video that is playing, and **Save for this video** keeps it with the
 rest of its adjustments. Your room replaces it while it shows.
 
+A flat screen's **Distance**, **Width** and **Curvature** are on the adjust
+panel's Position tab too. Its size is its width, so zooming a flat screen
+with the controller makes it wider or narrower, and **Zoom** shows only for
+180°, 360° and fisheye videos.
+
 3D Blu-rays play as full 3D, each eye at full 1080p, on the Frame's
 hardware decoder: disc images (`.iso`), MKV rips (MakeMKV), and from a
 BDMV folder the film's `.ssif` file in `BDMV/STREAM/SSIF` (the `.m2ts` of
@@ -487,14 +501,32 @@ the same name holds the left eye alone). The few streams it can't take
 that way (none of the discs tried) play their left eye in 2D; the decoder
 line in the video's info says "3D Blu-ray as 2D".
 
+Frame sequential 3D files, whose eyes take turns frame by frame at twice the
+film's frame rate, play as full 3D at the film's own rate, each eye at its
+full size. They are found by the label in the file, or by `FS3D` in the file
+name when a file has none. If depth looks inside out, **Swap eyes** under
+the format list corrects it. A file nothing labels can be set to
+**3D FS** (frame sequential) in the format list, and a mislabelled one to any other
+format.
+
 A disc image, 2D or 3D, plays its main title (its longest playlist) with
 its chapters (under **⚙ › Chapters**) and its audio and subtitle languages.
 Menus, extras and other titles aren't offered.
 
 To change it: open the video, press **⚙** on the control bar, **Format**.
-Overrides are remembered per video. The same panel has position, zoom,
-IPD/depth, stereo alignment, picture controls, subtitle depth and
-keyframes (adjustments that change smoothly along the video).
+The format list has a row for each kind of picture (flat screen, 180°,
+360°, fisheye and YouTube 360°) and the format playing is lit in it. Its
+buttons use the tags VR files carry in their names: 2D, 3D SBS (side by
+side), 3D TB (top/bottom), 3D HSBS and 3D HTB (their half-size versions)
+and 3D FS (frame sequential); point at one to see its full name.
+**Automatic** goes back to the detected format. A choice is remembered for
+that video, and a video's details in your library have the same list.
+Choosing frame sequential, or leaving it, opens the video again where it
+was, since it decodes differently. For a 3D format, **Swap eyes** under the
+list shows each eye the other picture, for a file whose depth looks inside
+out. The same panel has position, size, IPD/depth, stereo alignment,
+picture controls, subtitle depth and keyframes (adjustments that change
+smoothly along the video).
 
 Codecs: H.264, HEVC (8/10-bit, HDR10/HLG tone-mapped), AV1, VP9, VP8,
 VC-1, MPEG-4, MPEG-2, ProRes. Audio: AAC, AC-3/E-AC-3, Opus, Vorbis, FLAC,
@@ -504,16 +536,25 @@ Subtitles: SRT, ASS/SSA, WebVTT, and embedded text or picture subtitles.
 
 ### Fisheye lenses
 
-The fisheye presets (190° for the Canon RF 5.2 mm, 200° and 220° for
-`_MKX200` and `_MKX220` files) suit most videos. If one still looks wrong,
-for example if straight lines bend as you look around or the eyes stop
-lining up towards the edges, open **⚙ › Format** and use the sliders under
-**Fisheye lens**:
+A fisheye format shows **Fisheye lens** under the format list. Its presets
+set the field of view: 180°, 190° (the Canon RF 5.2 mm), and 200° and 220°
+(the MKX200 and MKX220 that `_MKX200` and `_MKX220` files come from). A
+preset is lit only while the field of view is its angle. When the slider
+sits on an angle that isn't a preset, a **+** button with that angle adds it
+to the presets, up to eight; Settings › Playback › **Fisheye presets**
+removes them, and **Reset** there puts the four back. Under them,
+**Fisheye starts at** picks the preset a video gets when you pick Fisheye
+for it, and a Fisheye default format. It is 180° to begin with; if you
+remove the preset it was, the one nearest 180° takes its place. Files
+tagged just `_FISHEYE` stay 180°, as the tag means. If the picture still
+looks wrong, for example if straight lines bend as you look around or the
+eyes stop lining up towards the edges, use the sliders:
 
 - **Field of view**: the lens's angle, 120° to 300°. The image circle fills
   the shorter side of each eye's image.
-- **Lens k1** and **Lens k2**: correct a lens that doesn't keep to an even
-  fisheye spread towards its edge.
+- **Edge stretch** and **Rim stretch**: for a lens that doesn't spread its
+  view evenly. Edge stretch stretches or squeezes the outer part of the
+  circle, Rim stretch mostly its very edge.
 - **Lens centre**: where each image circle's centre is, if it isn't in the
   middle of its half of the frame. This is common in footage straight from
   a camera. In 3D, each image has its own.
@@ -572,23 +613,50 @@ the characters it had no font for.
 The Frame's hardware decoder plays 4:2:0 HEVC (H.265, 8- and 10-bit) and
 H.264 (8-bit), up to 8K. AV1, 4:2:2 or 4:4:4 colour and 10-bit H.264 have
 no hardware path on the Frame, so they decode on the CPU, which can't keep
-up with VR resolutions: they stutter or stop to buffer, and the control bar
-says why ("No hardware decoding for AV1", "… for 4:2:2 HEVC"). Convert them
-to 4:2:0 HEVC once on a PC and they play smoothly.
+up with VR resolutions: they stutter or stop to buffer, and a warning pill
+appears on the control bar. Point at it to read why ("No hardware decoding
+for AV1", "… for 4:2:2 HEVC"). Convert them to 4:2:0 HEVC once on a PC and
+they play smoothly. VP9 also decodes on the CPU: it keeps up at lower
+resolutions, but can stutter at 8K.
 
-"Hardware decoder busy" means the file is fine but the decoder had no room
-for it: Steam's own streaming holds a session too, and beside it the
-decoder takes at most about 8192×4080 pixels a frame. 8K UHD (7680×4320),
-5760×5760 and 8-bit 8192×4096 HEVC play in hardware; 10-bit 8192×4096
-HEVC, 8192×4096 H.264, 6144×6144 and larger only fit when nothing else is
-decoding. The pill's tip says how much room was left. "The hardware
-decoder can't play this HEVC" means it tried and refused the file;
-frameplayerx.log says why.
+"Too big for hardware" means the file can't fit even with nothing else
+open: the decoder takes at most 8192×4320 pixels a frame. 8192×4320 and
+5760×5760 fit; 6144×6144, 7200×7200, 8192×8192 and larger always decode on
+the CPU, so convert them to a smaller size.
+
+"Decoder busy" means the file fits, but other video sessions leave it too
+little room. Every session counts, idle or not, recording as well as
+playing:
+
+| Other sessions open | Tallest video 8192 wide |
+|---|---|
+| None | 4320 |
+| 1 | 4064 |
+| 2 | 2720 |
+| 3 | 2016 |
+
+Beside one other session, 8K UHD (7680×4320), 5760×5760 and 8-bit 8192×4096
+HEVC still play in hardware; 10-bit 8192×4096 HEVC, 8192×4096 H.264 and
+8192×4320 need nothing else open. The warning pill's tip names who holds the
+decoder, and the decoder pill's tip also says how much room was left.
+
+Recording in the background in Steam holds a session while an app is
+running. When turning it off would make room, the warning pill's tip says so:
+choose **Recording Off** in Steam Settings › Game Recording and open the video
+again, which works at once.
+
+Steam's browser holds a session after Steam starts, and normally lets go of it
+once you start using the headset. If a video stays busy, restart the headset
+and open the video again.
+
+"Decoder refused it" means the decoder tried and refused the file;
+frameplayerx.log says why. A video whose pictures the hardware decoder
+reads as broken, picture after picture, plays in software instead.
 
 The pill next to the format on the control bar says which decoder plays
-the video: HW, or SW in amber, with the codec and bit depth. Hover it, or
-open Adjust → Format → Video stream, to see why a video isn't decoded in
-hardware.
+the video: HW, or SW in amber, with the codec and bit depth. Point at it
+to see the decoder, the format and the resolution, and why a video isn't
+decoded in hardware.
 
 To check a file: `ffprobe -v error -select_streams v:0 -show_entries
 stream=codec_name,profile,pix_fmt video.mp4` (`yuv422p` or `yuv422p10le`
@@ -690,7 +758,9 @@ picture. Play/pause and seeking are under either thumb.
 | Trigger | Click; on empty space, show or hide the controls | The same |
 
 On the control bar, point at the speaker for the volume slider above it;
-press the speaker to mute.
+press the speaker to mute. What a controller shortcut changes, such as the
+volume or a minute's skip, shows for a moment in a small message above where
+the control bar sits.
 
 To recenter, hold the Steam button, as in any game (both grips together, or
 the left Menu button, do it too). The picture and the panels come to where
@@ -713,7 +783,7 @@ moves the same way, with grip, and stays where you leave it. To put them all bac
 of the adjust panel's Position tab: a flat screen, the control bar, the
 adjust panel and the browse panel return (a 180° or 360° picture keeps
 its turn; the panel's **Reset** puts the picture's own adjustments back). The format on the control bar
-(for example 180° SBS) opens the adjust panel's Format tab.
+(for example 180° 3D) opens the adjust panel's Format tab.
 
 ### Watching lying down
 
@@ -819,9 +889,26 @@ The translations started as machine drafts. If one reads wrong, the
 ## Troubleshooting
 
 - When a video stutters, turn on Settings › General › **Performance
-  overlay**. Low in your view, it shows how long each frame takes to draw
-  (amber when longer than the display allows), the video's frame rate and
-  dropped frames, its decoder, how busy the CPU and GPU are, and memory.
+  overlay**. It starts to your left. Squeeze a grip on it to move it, and it
+  stays where you leave it, next time too. Amber marks trouble.
+  - **Display**: frames drawn against the display's rate, and how long the
+    app's work on each one typically takes. Low means the headset can't draw
+    fast enough.
+  - **Video**: frames shown against the film's own rate, and frames dropped
+    and stalls since it opened.
+  - **Decoder**: hardware or software, and the format.
+  - **Buffer**: seconds of video read ahead, against how many it's aiming for.
+    Falling means the source isn't keeping up.
+  - **Network**: how fast data is arriving, and how many requests have failed.
+    With a full buffer it only reads what the film uses, or nothing, so that
+    isn't your connection's limit.
+  - **Last skip**: how long the last skip took to show a picture, and how long
+    its first read of the file took. It says **Opened** until you skip.
+  - **CPU** and **GPU**: how busy and how hot they are, amber when the headset
+    is slowing them for heat, and the GPU's clock.
+  - **Memory**: how much is in use.
+
+  Without a video open, it shows only Display, CPU, GPU and Memory.
 - After a crash, the next start asks whether to send a crash report to
   FramePlayerX's developers, as a private issue on GitHub. It contains the
   versions of FramePlayerX and the headset's system, what went wrong, and

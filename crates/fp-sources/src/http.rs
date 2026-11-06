@@ -2,7 +2,8 @@
 //! [`ByteSource`] over HTTP Range requests.
 //!
 //! - Ranges are fetched in blocks through the shared block cache, with
-//!   background read-ahead when reading sequentially.
+//!   background read-ahead when reading sequentially: one block at a time at
+//!   first, then one growing request cut into blocks as it arrives.
 //! - One `ureq` agent per client keeps connections alive between requests.
 //! - Transient failures (connection errors, timeouts, 408/429/5xx) are
 //!   retried with exponential backoff.
@@ -13,7 +14,7 @@
 //!   however long a stream has been running.
 //! - TLS is rustls with the ring provider and webpki roots.
 
-use crate::cache::{CacheOptions, CacheStats, CachedSource, RangeFetch};
+use crate::cache::{CacheOptions, CacheStats, CachedSource, RangeBody, RangeFetch};
 use crate::config::Credentials;
 use crate::error::{Error, Result};
 use crate::urlutil::{basic_auth_value, redact, same_origin, split_credentials};
@@ -1043,24 +1044,73 @@ impl HttpFetcher {
                         .map(|d| (d, false))
                         .map_err(io_retry)
                 }
-                200 => Err(Failure::Fatal(Error::Unsupported(format!(
-                    "{} stopped honouring range requests",
-                    self.display()
-                )))),
-                s if is_transient_status(s) => Err(Failure::Retry(
-                    Error::HttpStatus {
-                        status: s,
-                        url: self.display(),
-                    },
-                    after,
-                )),
-                s => Err(Failure::Fatal(status_error(s, &self.url).unwrap_or(
-                    Error::HttpStatus {
-                        status: s,
-                        url: self.display(),
-                    },
-                ))),
+                s => Err(self.refused(s, after)),
             }
+        })
+    }
+
+    /// What a range request's status means when it isn't the data asked for.
+    fn refused(&self, status: u16, after: Option<Duration>) -> Failure {
+        match status {
+            200 => Failure::Fatal(Error::Unsupported(format!(
+                "{} stopped honouring range requests",
+                self.display()
+            ))),
+            s if is_transient_status(s) => Failure::Retry(
+                Error::HttpStatus {
+                    status: s,
+                    url: self.display(),
+                },
+                after,
+            ),
+            s => Failure::Fatal(status_error(s, &self.url).unwrap_or(Error::HttpStatus {
+                status: s,
+                url: self.display(),
+            })),
+        }
+    }
+
+    /// Starts one request for `len` bytes at `offset`, with no overall
+    /// deadline on its body: it can run long, or sit unread while the cache
+    /// is full. A server that stops sending still fails it at the read
+    /// timeout.
+    fn open_long_range(&self, offset: u64, len: u64) -> Result<RangeBody> {
+        let size = self
+            .size
+            .ok_or_else(|| Error::Unsupported(format!("{}: size unknown", self.display())))?;
+        let end = (offset + len - 1).min(size.saturating_sub(1));
+        let range = format!("bytes={offset}-{end}");
+        self.client.retrying(&self.url, || {
+            let resp = self.client.send_once(
+                "GET",
+                &self.url,
+                &[("Range", range.as_str())],
+                None,
+                true,
+            )?;
+            let status = resp.status().as_u16();
+            if status != 206 {
+                return Err(self.refused(status, retry_after(&resp)));
+            }
+            let served = resp
+                .headers()
+                .get("content-range")
+                .and_then(|v| v.to_str().ok())
+                .and_then(parse_content_range)
+                .and_then(|c| c.range);
+            if let Some((start, _)) = served
+                && start != offset
+            {
+                return Err(Failure::Fatal(Error::Http {
+                    url: self.display(),
+                    message: format!("asked for {range}, server sent bytes from {start}"),
+                }));
+            }
+            let last = served.map_or(end, |(_, last)| last.min(end));
+            Ok(RangeBody {
+                reader: Box::new(resp.into_body().into_reader()),
+                len: last + 1 - offset,
+            })
         })
     }
 
@@ -1171,6 +1221,14 @@ impl RangeFetch for HttpFetcher {
 
     fn sequential_only(&self) -> bool {
         !self.ranges
+    }
+
+    fn long_ranges(&self) -> bool {
+        self.ranges && self.size.is_some()
+    }
+
+    fn open_range(&self, offset: u64, len: u64) -> io::Result<RangeBody> {
+        self.open_long_range(offset, len).map_err(io::Error::from)
     }
 }
 
@@ -1314,13 +1372,21 @@ impl HttpFile {
         self.src.stats()
     }
 
-    /// Bytes per cache block (and per range request).
+    /// Bytes per cache block.
     pub fn block_size(&self) -> u64 {
         self.src.block_size()
     }
 }
 
 impl ByteSource for HttpFile {
+    fn remote(&self) -> bool {
+        true
+    }
+
+    fn net(&self) -> Option<std::sync::Arc<fp_core::NetCounters>> {
+        self.src.net()
+    }
+
     fn size(&self) -> Option<u64> {
         self.src.size()
     }

@@ -8,6 +8,7 @@
 //! - `v4l2`: the native V4L2 stateful decoder for H.264/HEVC (10-bit HEVC as
 //!   Q10C), with the Steam Frame's admission-check workaround.
 //! - `mvc`: 3D Blu-ray video (H.264 MVC) on a plain H.264 decoder;
+//! - `frame_seq`: frame sequential 3D, its eyes paired into one picture;
 //!   `second_view`: its second view read from transport streams.
 //! - `bluray`: Blu-ray disc images, their main title played clip after clip.
 //! - [`frame`]: decoded video frames in GPU-uploadable layouts.
@@ -21,6 +22,7 @@ pub(crate) mod bluray;
 pub mod clock;
 pub(crate) mod decode;
 pub mod frame;
+pub(crate) mod frame_seq;
 pub mod info;
 pub(crate) mod input;
 pub(crate) mod io;
@@ -37,7 +39,7 @@ pub(crate) mod v4l2;
 pub use decode::{HwDecode, hardware_sessions, hevc_10bit_hardware, set_hevc_10bit_hardware};
 pub use frame::{ColorInfo, PixelLayout, Q10cPicture, VideoFrame};
 pub use info::{MediaInfo, StreamInfo, StreamKind};
-pub use player::{Player, PlayerConfig, PlayerState, Restart, Stats, Timeline, Tracks};
+pub use player::{LastJump, Player, PlayerConfig, PlayerState, Restart, Stats, Timeline, Tracks};
 pub use subtitle::Cue;
 
 use fp_ffmpeg_sys as ff;
@@ -59,9 +61,13 @@ pub enum Error {
     #[error("disc image: {0}")]
     Disc(String),
     /// The hardware decoder has no room for the stream beside the other
-    /// video sessions open (Steam's streaming holds one).
+    /// video sessions open, encoders' too (Steam's recording holds one).
     #[error("hardware decoder busy: {0}")]
-    HardwareBusy(String),
+    HardwareBusy(String, SessionHolders),
+    /// The stream is more than the hardware decoder takes for one session,
+    /// even with nothing else open.
+    #[error("too big for the hardware decoder: {0}")]
+    HardwareTooBig(String),
     #[error("audio output: {0}")]
     Audio(String),
     #[error("I/O: {0}")]
@@ -77,7 +83,10 @@ impl Error {
     /// transcoding it may play where it didn't; a read that failed may not.
     pub fn cannot_play_here(&self) -> bool {
         match self {
-            Error::NoStream(_) | Error::Unsupported(_) | Error::HardwareBusy(_) => true,
+            Error::NoStream(_)
+            | Error::Unsupported(_)
+            | Error::HardwareBusy(..)
+            | Error::HardwareTooBig(_) => true,
             Error::Ffmpeg { code, .. } => {
                 *code == ff::AVERROR_INVALIDDATA_
                     || *code == ff::AVERROR_DECODER_NOT_FOUND_
@@ -89,6 +98,17 @@ impl Error {
 }
 
 pub type Result<T> = std::result::Result<T, Error>;
+
+/// Who else had sessions on the hardware decoder's driver when it found no
+/// room for a stream.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct SessionHolders {
+    /// The other programs with sessions open, as far as `/proc` shows.
+    pub programs: Vec<String>,
+    /// Steam holds the encoder to record or stream, and the stream would fit
+    /// without it.
+    pub recording_blocks: bool,
+}
 
 /// Turns a negative FFmpeg return code into an [`Error`].
 pub(crate) fn check(code: i32, context: &'static str) -> Result<i32> {

@@ -62,6 +62,7 @@ impl HttpDirSource {
         let (url, creds) = clean_url_and_credentials(&config.url, config.credentials.as_ref())?;
         let opts = HttpOptions {
             insecure_tls: config.insecure_tls,
+            cache: crate::cache::CacheOptions::for_downloads(config.parallel_downloads),
             ..HttpOptions::default()
         };
         Ok(HttpDirSource {
@@ -474,6 +475,7 @@ mod tests {
             url: "http://bob:hunter2@nas/vr".into(),
             credentials: None,
             insecure_tls: false,
+            parallel_downloads: false,
         })
         .unwrap();
         assert_eq!(s.root(), "http://nas/vr/");
@@ -486,6 +488,7 @@ mod tests {
                 url: "ftp://nas/".into(),
                 credentials: None,
                 insecure_tls: false,
+                parallel_downloads: false,
             })
             .is_err()
         );

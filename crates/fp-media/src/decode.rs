@@ -126,14 +126,12 @@ pub enum HwDecode {
     Stills,
 }
 
-/// Hardware (V4L2 stateful) decoder name for a codec, if FFmpeg has one.
+/// FFmpeg's V4L2 decoder for a codec. The Frame's decoder also takes VP9, but
+/// its VP9 sessions can bring the firmware down (ValveSoftware/SteamOS#2865).
 fn v4l2_name(codec: ff::AVCodecID) -> Option<&'static CStr> {
     match codec {
         ff::AV_CODEC_ID_HEVC => Some(c"hevc_v4l2m2m"),
         ff::AV_CODEC_ID_H264 => Some(c"h264_v4l2m2m"),
-        ff::AV_CODEC_ID_VP9 => Some(c"vp9_v4l2m2m"),
-        ff::AV_CODEC_ID_VP8 => Some(c"vp8_v4l2m2m"),
-        ff::AV_CODEC_ID_MPEG4 => Some(c"mpeg4_v4l2m2m"),
         _ => None,
     }
 }
@@ -293,21 +291,42 @@ pub struct Decoder {
     native: Option<Box<Native>>,
     /// Packets to feed the FFmpeg decoder before new ones (after a fallback).
     replay: std::collections::VecDeque<Packet>,
+    /// End of stream goes in after `replay`, from `receive`: the fallback
+    /// came after it was sent, so nothing more will be.
+    replay_end: bool,
     pub name: String,
     pub hardware: bool,
     /// Why a hardware decoder that was tried is not the one decoding: its
     /// open failed, or it failed once running.
     pub hardware_error: Option<String>,
+    /// Who held the driver when it found no room for this stream.
+    pub hardware_holders: crate::SessionHolders,
     pub time_base: ff::AVRational,
     /// The input's [`Input::origin`], taken off every time.
     pub(crate) origin: f64,
     /// Reads H.264 and HEVC packets' NAL units.
     nal: Option<NalReader>,
     skip: Option<Skip>,
-    /// 3D Blu-ray video (MVC), decoded by the H.264 decoder it holds.
-    mvc: Option<Box<crate::mvc::MvcDecoder>>,
+    /// 3D video decoded by the decoder this holds, its eyes paired.
+    paired: Option<Paired>,
     /// Packets precise seeks left out.
     pub(crate) left_out: u64,
+}
+
+/// The ways of decoding 3D through another decoder, pairing its pictures.
+enum Paired {
+    /// 3D Blu-ray (MVC).
+    Mvc(Box<crate::mvc::MvcDecoder>),
+    FrameSequential(Box<crate::frame_seq::FrameSeqDecoder>),
+}
+
+impl Paired {
+    fn inner(&mut self) -> &mut Decoder {
+        match self {
+            Paired::Mvc(m) => &mut m.inner,
+            Paired::FrameSequential(f) => &mut f.inner,
+        }
+    }
 }
 
 /// What a precise seek leaves out: frames shown mostly before its target.
@@ -378,7 +397,43 @@ impl Decoder {
             };
             NalReader::new(p.codec_id, extradata)
         };
+        if let Some(stream) = crate::frame_seq::stream(input, index) {
+            return Ok(Self::open_frame_sequential(
+                dec,
+                stream,
+                hw == HwDecode::Stills,
+            ));
+        }
         Ok(dec)
+    }
+
+    /// A decoder pairing a frame sequential stream's eyes, around `inner`.
+    fn open_frame_sequential(
+        inner: Decoder,
+        stream: crate::frame_seq::Stream,
+        stills: bool,
+    ) -> Decoder {
+        let mut dec = Decoder {
+            ctx: std::ptr::null_mut(),
+            #[cfg(target_os = "linux")]
+            native: None,
+            replay: Default::default(),
+            replay_end: false,
+            name: String::new(),
+            hardware: false,
+            hardware_error: None,
+            hardware_holders: Default::default(),
+            time_base: inner.time_base,
+            origin: inner.origin,
+            nal: None,
+            skip: None,
+            paired: Some(Paired::FrameSequential(Box::new(
+                crate::frame_seq::FrameSeqDecoder::new(inner, stream, stills),
+            ))),
+            left_out: 0,
+        };
+        dec.follow_paired();
+        dec
     }
 
     /// A decoder of 3D Blu-ray video (MVC): an H.264 decoder of the stream
@@ -412,34 +467,36 @@ impl Decoder {
             #[cfg(target_os = "linux")]
             native: None,
             replay: Default::default(),
+            replay_end: false,
             name: String::new(),
             hardware: false,
             hardware_error: None,
+            hardware_holders: Default::default(),
             time_base,
             origin: 0.0,
             nal: None,
             skip: None,
-            mvc: Some(Box::new(mvc)),
+            paired: Some(Paired::Mvc(Box::new(mvc))),
             left_out: 0,
         };
-        dec.follow_mvc();
+        dec.follow_paired();
         Ok(dec)
     }
 
-    /// Takes the MVC decoder's inner decoder's name and hardware state
+    /// Takes the pairing decoder's inner decoder's name and hardware state
     /// (which change when the hardware decoder fails and software takes
     /// over).
-    fn follow_mvc(&mut self) {
-        if let Some(m) = &self.mvc {
-            let what = if m.two_d.is_some() {
-                "3D Blu-ray as 2D"
-            } else {
-                "3D Blu-ray"
-            };
-            self.name = format!("{} ({what})", m.inner.name);
-            self.hardware = m.inner.hardware;
-            self.hardware_error = m.inner.hardware_error.clone();
-        }
+    fn follow_paired(&mut self) {
+        let (inner, what) = match &self.paired {
+            None => return,
+            Some(Paired::Mvc(m)) if m.two_d.is_some() => (&m.inner, "3D Blu-ray as 2D"),
+            Some(Paired::Mvc(m)) => (&m.inner, "3D Blu-ray"),
+            Some(Paired::FrameSequential(f)) => (&f.inner, "frame sequential 3D"),
+        };
+        self.name = format!("{} ({what})", inner.name);
+        self.hardware = inner.hardware;
+        self.hardware_error = inner.hardware_error.clone();
+        self.hardware_holders = inner.hardware_holders.clone();
     }
 
     pub(crate) fn open_with(
@@ -453,6 +510,7 @@ impl Decoder {
             unsafe { ((*par).codec_id, (*par).codec_type, (*par).format) };
         let mut last_err = Error::Unsupported(format!("no decoder for codec id {codec_id}"));
         let mut hardware_error = None;
+        let mut hardware_holders = crate::SessionHolders::default();
         let video = kind == ff::AVMEDIA_TYPE_VIDEO;
         for cand in candidates(video, codec_id, format, hw, native, hevc_10bit_hardware()) {
             let hardware = matches!(cand, Candidate::NativeV4l2 | Candidate::Named(_, true));
@@ -479,6 +537,7 @@ impl Decoder {
                 Ok(mut d) => {
                     if !d.hardware {
                         d.hardware_error = hardware_error;
+                        d.hardware_holders = hardware_holders;
                     }
                     return Ok(d);
                 }
@@ -488,6 +547,9 @@ impl Decoder {
                     // tried next fails the same way, less clearly).
                     if hardware && hardware_error.is_none() {
                         hardware_error = Some(e.to_string());
+                        if let Error::HardwareBusy(_, holders) = &e {
+                            hardware_holders = holders.clone();
+                        }
                     }
                     last_err = e;
                 }
@@ -522,14 +584,16 @@ impl Decoder {
                 startup: Some(Vec::new()),
             })),
             replay: Default::default(),
+            replay_end: false,
             name,
             hardware: true,
             hardware_error: None,
+            hardware_holders: Default::default(),
             time_base,
             origin: 0.0,
             nal: None,
             skip: None,
-            mvc: None,
+            paired: None,
             left_out: 0,
         })
     }
@@ -562,14 +626,16 @@ impl Decoder {
                 #[cfg(target_os = "linux")]
                 native: None,
                 replay: Default::default(),
+                replay_end: false,
                 name,
                 hardware,
                 hardware_error: None,
+                hardware_holders: Default::default(),
                 time_base,
                 origin: 0.0,
                 nal: None,
                 skip: None,
-                mvc: None,
+                paired: None,
                 left_out: 0,
             };
             if hardware {
@@ -644,7 +710,13 @@ impl Decoder {
             }
         );
         let startup = native.startup.take().unwrap_or_default();
-        let hw = native.hw;
+        // FFmpeg's V4L2 wrapper feeds the device the same way, so a stream
+        // the hardware flags as broken goes straight to software.
+        let hw = if native.dec.pictures_broken() {
+            HwDecode::Off
+        } else {
+            native.hw
+        };
         // Close the failed device session before opening the next decoder:
         // FFmpeg's V4L2 wrapper needs a session of its own, and the driver
         // refuses one more while Steam holds others, so it went to software.
@@ -674,9 +746,13 @@ impl Decoder {
     /// Sends a packet (or end of stream when `pkt` is null). Returns false if
     /// the decoder is full and frames must be received first.
     pub(crate) fn send(&mut self, pkt: *const ff::AVPacket) -> Result<bool> {
-        if let Some(m) = self.mvc.as_mut() {
-            let r = m.send(pkt);
-            self.follow_mvc();
+        let sent = match self.paired.as_mut() {
+            Some(Paired::Mvc(m)) => Some(m.send(pkt)),
+            Some(Paired::FrameSequential(f)) => Some(f.inner.send(pkt)),
+            None => None,
+        };
+        if let Some(r) = sent {
+            self.follow_paired();
             return r;
         }
         if self.leaves_out(pkt) {
@@ -735,9 +811,13 @@ impl Decoder {
     /// Receives a frame. `Ok(None)` means more input is needed, `Ok(Some(false))`
     /// means the decoder is fully drained.
     pub fn receive(&mut self, frame: &mut Frame) -> Result<Option<bool>> {
-        if let Some(m) = self.mvc.as_mut() {
-            let r = m.receive(frame);
-            self.follow_mvc();
+        let received = match self.paired.as_mut() {
+            Some(Paired::Mvc(m)) => Some(m.receive(frame)),
+            Some(Paired::FrameSequential(f)) => Some(f.receive(frame)),
+            None => None,
+        };
+        if let Some(r) = received {
+            self.follow_paired();
             return r;
         }
         #[cfg(target_os = "linux")]
@@ -754,8 +834,12 @@ impl Decoder {
                     return Ok(r);
                 }
                 Err(e) => {
+                    let ended = n.dec.ended();
                     self.fall_back(&e)?;
-                    return Ok(None);
+                    if !ended {
+                        return Ok(None);
+                    }
+                    self.replay_end = true;
                 }
             }
         }
@@ -766,6 +850,12 @@ impl Decoder {
             // SAFETY: ctx is open; frame valid.
             let r = unsafe { ff::avcodec_receive_frame(self.ctx, frame.0) };
             if r == ff::AVERROR_EAGAIN {
+                if self.replay_end {
+                    if self.send(std::ptr::null())? {
+                        self.replay_end = false;
+                    }
+                    continue;
+                }
                 return Ok(None);
             }
             if r == ff::AVERROR_EOF_ {
@@ -803,8 +893,16 @@ impl Decoder {
             frame_duration: frame_duration / tb,
             start: self.origin / tb,
         });
-        if let Some(m) = self.mvc.as_mut() {
-            m.skip = self.skip.take();
+        match self.paired.as_mut() {
+            Some(Paired::Mvc(m)) => m.skip = self.skip.take(),
+            // Half a picture early: the pair showing the target starts with
+            // a frame that may be mostly before it.
+            Some(Paired::FrameSequential(f)) => {
+                self.skip = None;
+                f.inner
+                    .skip_before(target - frame_duration / 2.0, frame_duration);
+            }
+            None => {}
         }
     }
 
@@ -830,8 +928,8 @@ impl Decoder {
     /// A flag that, once set, cuts the native decoder's waits for the
     /// device short (the player sets it when closing).
     pub(crate) fn set_interrupt(&mut self, flag: Arc<AtomicBool>) {
-        if let Some(m) = self.mvc.as_mut() {
-            m.inner.set_interrupt(flag);
+        if let Some(p) = self.paired.as_mut() {
+            p.inner().set_interrupt(flag);
             return;
         }
         #[cfg(target_os = "linux")]
@@ -844,9 +942,10 @@ impl Decoder {
 
     pub fn flush(&mut self) {
         self.skip = None;
-        if let Some(m) = self.mvc.as_mut() {
-            m.flush();
-            return;
+        match self.paired.as_mut() {
+            Some(Paired::Mvc(m)) => return m.flush(),
+            Some(Paired::FrameSequential(f)) => return f.flush(),
+            None => {}
         }
         #[cfg(target_os = "linux")]
         if let Some(n) = self.native.as_mut() {
@@ -857,6 +956,7 @@ impl Decoder {
             return;
         }
         self.replay.clear();
+        self.replay_end = false;
         if !self.ctx.is_null() {
             // SAFETY: ctx is open.
             unsafe { ff::avcodec_flush_buffers(self.ctx) };
@@ -1092,11 +1192,17 @@ mod tests {
             candidates(true, hevc, yuv420, HwDecode::Off, true, false),
             vec![Default]
         );
-        // Codecs the native decoder does not handle go to FFmpeg directly.
-        assert_eq!(
-            candidates(true, ff::AV_CODEC_ID_VP9, yuv420, auto, true, false),
-            vec![Named(c"vp9_v4l2m2m", true), Default]
-        );
+        // Only HEVC and H.264 have a hardware path.
+        for codec in [
+            ff::AV_CODEC_ID_VP9,
+            ff::AV_CODEC_ID_VP8,
+            ff::AV_CODEC_ID_MPEG4,
+        ] {
+            assert_eq!(
+                candidates(true, codec, yuv420, auto, true, false),
+                vec![Default]
+            );
+        }
         assert_eq!(
             candidates(true, ff::AV_CODEC_ID_AV1, yuv420, auto, true, false),
             vec![Named(c"libdav1d", false), Default]

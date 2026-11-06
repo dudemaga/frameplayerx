@@ -95,14 +95,24 @@ const ADJUST: usize = 2;
 const KEYBOARD: usize = 3;
 /// The audio and subtitles picker, above the control bar.
 const TRACKS: usize = 4;
+/// A toast over the video, above where the control bar sits. Nothing to point
+/// at, so the rays pass through it and don't show for it.
+const TOAST: usize = 5;
+/// How long a toast stays over the video.
+const VIDEO_TOAST_SECS: f32 = 3.0;
 /// The control bar's body in pixels.
 const BAR_PX: [u32; 2] = [1400, 268];
 /// Metres per pixel of the control bar and of the picker on it.
 const BAR_M_PER_PX: f32 = 1.2 / 1400.0;
 /// The performance overlay's quad layer (the panels' are their indices).
 const PERF_LAYER: u64 = 8;
-/// Where the performance overlay sits from the eyes: low and to the left.
-const PERF_OFFSET: Vec3 = Vec3::new(-0.3, -0.12, -0.85);
+/// The performance overlay's place when routing input: after the panels that
+/// take it, which the toast doesn't.
+const PERF: usize = TOAST;
+/// Metres away: far enough to sit beside the picture rather than fill the view,
+/// and just nearer than the library panel, so it shows over that.
+const PERF_DISTANCE: f32 = 1.45;
+const PERF_WIDTH_M: f32 = 0.47;
 /// How far below where you face the browse panel sits, degrees: what is in
 /// front of you is a little below eye level (the panel's top bar, Quit
 /// among it, is then about level with your eyes). It stands upright there,
@@ -128,14 +138,14 @@ pub struct App {
     services: Services,
     pub ui: UiState,
     thumbs: ui::thumbs::Thumbs,
-    panels: [Panel; 5],
+    panels: [Panel; 6],
     subs: Panel,
-    /// The performance overlay, its sampler while it shows, the last
-    /// second of frame times, and the video's counters at its last paint.
+    /// The performance overlay, its sampler and readings while it shows, and
+    /// what it last showed.
     perf: Panel,
     perf_monitor: Option<crate::perf::Monitor>,
-    frame_times: std::collections::VecDeque<f32>,
-    perf_video: Option<(Instant, u64, u64)>,
+    perf_readings: Option<crate::perf::Readings>,
+    perf_shown: ui::perf::Overlay,
     sub_key: String,
     sub_textures: Vec<egui::TextureHandle>,
     /// The subtitle panel holds a 3D video's pictures, an eye's on each half.
@@ -163,7 +173,7 @@ pub struct App {
     /// Where the adjust panel was placed from when the trigger went down on
     /// it (see `place_panels`).
     adjust_hold: Option<Mat4>,
-    /// Where the library and adjust panels sit now (saved when let go).
+    /// Where the panels that move sit now (saved when let go).
     offsets: crate::settings::PanelOffsets,
     /// The list the open video came from, for next/previous.
     /// Up next.
@@ -221,6 +231,15 @@ fn growing_panel(px: [u32; 2], width_m: f32, ppp: f32) -> Panel {
     floating_panel(px, width_m, ppp * s).growing()
 }
 
+/// Fine enough for the largest interface size, like the control bar.
+fn perf_panel() -> Panel {
+    let finest = *UI_SCALES.end();
+    let px = ui::perf::PANEL_PTS.map(|n| (n as f32 * finest).round() as u32);
+    let mut perf = panel(px, PERF_WIDTH_M, finest).growing();
+    perf.display_only = true;
+    perf
+}
+
 fn floating_panel(px: [u32; 2], width_m: f32, ppp: f32) -> Panel {
     let room = ui::widgets::SHADOW_ROOM;
     let extra = [
@@ -243,16 +262,15 @@ impl App {
             growing_panel([1200, 456], 1.0, 1.25),
             // As fine as the bar it sits on, and growing with it.
             growing_panel([850, 560], 850.0 * BAR_M_PER_PX, 1.25),
+            growing_panel([1100, 90], 1100.0 * BAR_M_PER_PX, 1.25),
         ];
         panels[BAR].refresh = Some(Duration::from_millis(250));
         panels[ADJUST].refresh = Some(Duration::from_millis(1000));
         panels[TRACKS].refresh = Some(Duration::from_millis(1000));
+        panels[TOAST].refresh = Some(Duration::from_millis(100));
         panels[MAIN].refresh = Some(Duration::from_millis(1000));
         let subs = panel([1600, 320], 1.6, 1.0);
-        let mut perf = panel([640, 300], 0.4, 1.0);
-        perf.ctx
-            .style_mut(|s| s.visuals.panel_fill = egui::Color32::TRANSPARENT);
-        perf.refresh = Some(Duration::from_millis(500));
+        let perf = perf_panel();
         subs.ctx
             .style_mut(|s| s.visuals.panel_fill = egui::Color32::TRANSPARENT);
         let sub_fonts = Jobs::new();
@@ -269,8 +287,8 @@ impl App {
             subs,
             perf,
             perf_monitor: None,
-            frame_times: Default::default(),
-            perf_video: None,
+            perf_readings: None,
+            perf_shown: Default::default(),
             sub_key: String::new(),
             sub_textures: Vec::new(),
             subs_split: false,
@@ -332,6 +350,7 @@ impl App {
         for p in self.panels.iter_mut() {
             p.set_scale(scale);
         }
+        self.perf.set_scale(scale);
     }
 
     pub fn set_about(&mut self, about: Vec<(String, String)>) {
@@ -378,6 +397,7 @@ impl App {
             "adjust" => ADJUST,
             "keyboard" => KEYBOARD,
             "tracks" => TRACKS,
+            "toast" => TOAST,
             _ => return None,
         })
     }
@@ -393,14 +413,17 @@ impl App {
     pub fn panel_id(&self, name: &str) -> Option<fp_render::PanelId> {
         let p = match name {
             "subs" => &self.subs,
+            "perf" => &self.perf,
             _ => &self.panels[Self::panel_index(name)?],
         };
         p.visible.then_some(p.id).flatten()
     }
 
     pub fn panel_point(&self, name: &str, x: f32, y: f32) -> Option<Vec3> {
-        let i = Self::panel_index(name)?;
-        let p = &self.panels[i];
+        let p = match name {
+            "perf" => &self.perf,
+            _ => &self.panels[Self::panel_index(name)?],
+        };
         if !p.visible {
             return None;
         }

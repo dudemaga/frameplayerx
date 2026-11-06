@@ -917,6 +917,11 @@ fn server_form(
                     Some(tr!("source-self-signed-desc")),
                     &mut f.insecure_tls,
                 );
+                r.switch(
+                    tr!("source-parallel-downloads"),
+                    Some(tr!("source-parallel-downloads-desc")),
+                    &mut f.parallel_downloads,
+                );
             }
         }
     });
@@ -1146,11 +1151,13 @@ pub fn edit_form(cfg: &SourceConfig) -> SourceForm {
             creds(&c.credentials);
             f.address = c.url.clone();
             f.insecure_tls = c.insecure_tls;
+            f.parallel_downloads = c.parallel_downloads;
         }
         SourceConfig::Dlna(c) => f.address = c.location.clone(),
         SourceConfig::Plex(c) => {
             f.address = c.url.clone();
             f.insecure_tls = c.insecure_tls;
+            f.parallel_downloads = c.parallel_downloads;
             f.plex.manual = c.auth.is_none();
             f.plex.token = c.access_token.clone();
             f.plex.connection = super::plex::ConnectionMode::from_config(c);
@@ -1161,6 +1168,7 @@ pub fn edit_form(cfg: &SourceConfig) -> SourceForm {
             creds(&c.credentials);
             f.address = c.url.clone();
             f.insecure_tls = c.insecure_tls;
+            f.parallel_downloads = c.parallel_downloads;
         }
         SourceConfig::Smb(c) => {
             creds(&c.credentials);
@@ -1170,6 +1178,7 @@ pub fn edit_form(cfg: &SourceConfig) -> SourceForm {
             creds(&c.credentials);
             f.address = c.url.clone();
             f.insecure_tls = c.insecure_tls;
+            f.parallel_downloads = c.parallel_downloads;
             // Signed in with Quick Connect: kept until cleared.
             if c.credentials.is_none() {
                 f.use_quick_connect = true;
@@ -1266,6 +1275,7 @@ pub fn build_config(f: &SourceForm, id: String) -> Result<SourceConfig, String> 
                 url: http_url(&address)?,
                 credentials,
                 insecure_tls: f.insecure_tls,
+                parallel_downloads: f.parallel_downloads,
             };
             if f.kind == SourceKind::Http {
                 SourceConfig::Http(c)
@@ -1280,6 +1290,7 @@ pub fn build_config(f: &SourceForm, id: String) -> Result<SourceConfig, String> 
                 url: http_url(&address)?,
                 credentials,
                 insecure_tls: f.insecure_tls,
+                parallel_downloads: f.parallel_downloads,
                 max_height: None,
             };
             if f.kind == SourceKind::DeoVr {
@@ -1348,6 +1359,7 @@ pub fn build_config(f: &SourceForm, id: String) -> Result<SourceConfig, String> 
                 url: http_url(&address)?,
                 credentials,
                 insecure_tls: f.insecure_tls,
+                parallel_downloads: f.parallel_downloads,
                 max_height: None,
                 access_token,
                 user_id,
@@ -1437,6 +1449,7 @@ mod tests {
                 "linked-client".into(),
             )),
             insecure_tls: false,
+            parallel_downloads: false,
             max_height: None,
             local_only: false,
             allow_relay: true,
@@ -1570,6 +1583,7 @@ mod tests {
                 url: "https://nas/dav".into(),
                 credentials: creds.clone(),
                 insecure_tls: true,
+                parallel_downloads: false,
             }),
             SourceConfig::DeoVr(FeedConfig {
                 id: "d".into(),
@@ -1577,6 +1591,7 @@ mod tests {
                 url: "http://x:9999/deovr".into(),
                 credentials: None,
                 insecure_tls: false,
+                parallel_downloads: false,
                 max_height: Some(2160),
             }),
             SourceConfig::MediaBrowser(MediaBrowserConfig {
@@ -1585,6 +1600,7 @@ mod tests {
                 url: "http://jf:8096".into(),
                 credentials: None,
                 insecure_tls: false,
+                parallel_downloads: false,
                 max_height: None,
                 access_token: Some("tok".into()),
                 user_id: Some("u".into()),

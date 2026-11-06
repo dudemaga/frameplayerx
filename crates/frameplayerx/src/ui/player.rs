@@ -10,53 +10,219 @@ use fp_core::format::{Projection, StereoLayout, VideoFormat};
 use fp_core::view::ViewSettings;
 use fp_media::PlayerState;
 
-/// Format presets offered for overrides.
-pub fn format_choices() -> Vec<(&'static str, VideoFormat)> {
+/// Width of the projection names beside the format list's rows.
+const GROUP_WIDTH: f32 = 130.0;
+
+/// The formats the format list offers, a row for each projection, always in
+/// the same order: 2D, side by side, top and bottom, then a flat screen's
+/// half sizes. `frame_sequential` offers flat frame sequential 3D, which
+/// reopens a playing video; fisheye formats are `fisheye` degrees.
+pub fn format_groups(
+    frame_sequential: bool,
+    fisheye: f32,
+) -> Vec<(&'static str, Vec<VideoFormat>)> {
     use StereoLayout::*;
-    let f = |p, s| VideoFormat::new(p, s);
+    let each = |projection, layouts: &[StereoLayout]| {
+        layouts
+            .iter()
+            .map(|&stereo| VideoFormat::new(projection, stereo))
+            .collect::<Vec<_>>()
+    };
+    let common = [Mono, SideBySide, TopBottom];
+    let mut flat = each(Projection::Flat, &common);
+    flat.extend(each(Projection::Flat, &[HalfSideBySide, HalfTopBottom]));
+    if frame_sequential {
+        flat.extend(each(Projection::Flat, &[FrameSequential]));
+    }
     vec![
-        (tr!("format-flat-2d"), f(Projection::Flat, Mono)),
+        (tr!("format-group-flat"), flat),
+        ("180°", each(Projection::EQUIRECT_180, &common)),
+        ("360°", each(Projection::EQUIRECT_360, &common)),
         (
-            tr!("format-flat-3d-half-sbs"),
-            f(Projection::Flat, HalfSideBySide),
-        ),
-        (tr!("format-flat-3d-sbs"), f(Projection::Flat, SideBySide)),
-        (
-            tr!("format-flat-3d-half-tb"),
-            f(Projection::Flat, HalfTopBottom),
-        ),
-        (tr!("format-flat-3d-tb"), f(Projection::Flat, TopBottom)),
-        ("180° SBS", f(Projection::EQUIRECT_180, SideBySide)),
-        ("180° TB", f(Projection::EQUIRECT_180, TopBottom)),
-        ("180° 2D", f(Projection::EQUIRECT_180, Mono)),
-        ("360° 2D", f(Projection::EQUIRECT_360, Mono)),
-        ("360° TB", f(Projection::EQUIRECT_360, TopBottom)),
-        ("360° SBS", f(Projection::EQUIRECT_360, SideBySide)),
-        (
-            tr!("format-fisheye-190"),
-            f(Projection::fisheye(190.0), SideBySide),
+            tr!("format-group-fisheye"),
+            each(Projection::fisheye(fisheye), &common),
         ),
         (
-            tr!("format-fisheye-200"),
-            f(Projection::fisheye(200.0), SideBySide),
-        ),
-        (
-            tr!("format-fisheye-220"),
-            f(Projection::fisheye(220.0), SideBySide),
-        ),
-        (
-            "EAC 360° (YouTube)",
-            f(Projection::Eac { h_fov: 360.0 }, Mono),
-        ),
-        (
-            "EAC 360° TB",
-            f(Projection::Eac { h_fov: 360.0 }, TopBottom),
-        ),
-        (
-            "EAC 180° SBS",
-            f(Projection::Eac { h_fov: 180.0 }, SideBySide),
+            "YouTube 360°",
+            each(Projection::Eac { h_fov: 360.0 }, &[Mono, TopBottom]),
         ),
     ]
+}
+
+/// A format's button: its layout's short name, the tag VR files carry
+/// ("3D SBS"), and for 3D its full name to show on pointing at it.
+fn button_label(f: &VideoFormat) -> (&'static str, Option<&'static str>) {
+    let short = match f.stereo {
+        StereoLayout::Mono => return (tr!("format-2d"), None),
+        _ if matches!(f.projection, Projection::Eac { .. }) => tr!("format-3d"),
+        StereoLayout::SideBySide => "3D SBS",
+        StereoLayout::TopBottom => "3D TB",
+        StereoLayout::HalfSideBySide => "3D HSBS",
+        StereoLayout::HalfTopBottom => "3D HTB",
+        StereoLayout::FrameSequential => "3D FS",
+    };
+    (short, Some(super::layout_name(f.stereo)))
+}
+
+/// Whether `choice`'s button stands for `current`: any fisheye lens does,
+/// and on a sphere half and full packing look the same.
+fn shows(choice: &VideoFormat, current: &VideoFormat) -> bool {
+    let projection = match (choice.projection, current.projection) {
+        (Projection::Fisheye { .. }, Projection::Fisheye { .. }) => true,
+        (a, b) => a == b,
+    };
+    let flat = current.projection == Projection::Flat;
+    let full = |stereo| match stereo {
+        StereoLayout::HalfSideBySide if !flat => StereoLayout::SideBySide,
+        StereoLayout::HalfTopBottom if !flat => StereoLayout::TopBottom,
+        stereo => stereo,
+    };
+    projection && full(choice.stereo) == full(current.stereo)
+}
+
+/// `choice` picked in place of `current`: the eye order, a packed mask and
+/// a fisheye lens stay.
+fn picked(choice: VideoFormat, current: &VideoFormat) -> VideoFormat {
+    let projection = match (choice.projection, current.projection) {
+        (Projection::Fisheye { .. }, Projection::Fisheye { fov }) => Projection::Fisheye { fov },
+        (projection, _) => projection,
+    };
+    VideoFormat {
+        projection,
+        eyes_swapped: current.eyes_swapped,
+        alpha_packed: current.alpha_packed,
+        ..choice
+    }
+}
+
+/// Automatic, lit when `automatic` says so (None: no button), beside the
+/// format detection gives. True when it is pressed.
+pub fn automatic_row(
+    ui: &mut egui::Ui,
+    automatic: Option<bool>,
+    detected: &fp_core::format::DetectedFormat,
+) -> bool {
+    let mut pressed = false;
+    ui.horizontal(|ui| {
+        ui.spacing_mut().item_spacing = Vec2::new(12.0, 8.0);
+        if let Some(lit) = automatic {
+            pressed = widgets::chip_icon(
+                ui,
+                Some(icons::MAGIC_WAND),
+                tr!("adjust-format-automatic"),
+                lit,
+            )
+            .clicked();
+        }
+        // Wrapping beside Automatic, not under it.
+        ui.add(
+            egui::Label::new(
+                RichText::new(tr!(
+                    "adjust-detected",
+                    format = super::format_label(&detected.format),
+                    evidence = super::evidence_label(detected.evidence)
+                ))
+                .color(theme::TEXT_2),
+            )
+            .wrap(),
+        );
+    });
+    pressed
+}
+
+/// How wide the format list is with each row on one line.
+pub fn format_list_width(ui: &egui::Ui, frame_sequential: bool) -> f32 {
+    format_groups(frame_sequential, crate::settings::FISHEYE_START)
+        .iter()
+        .map(|(_, formats)| row_width(ui, formats))
+        .fold(0.0, f32::max)
+}
+
+/// The format list: a row of buttons for each projection, with the button
+/// for `current` lit. Where there is room, the flat screen's row stands
+/// alone and the other four go in pairs. Fisheye starts at `fisheye`
+/// degrees. Returns the format picked.
+pub fn format_list(
+    ui: &mut egui::Ui,
+    current: &VideoFormat,
+    frame_sequential: bool,
+    fisheye: f32,
+) -> Option<VideoFormat> {
+    const GAP: f32 = 40.0;
+    let groups = format_groups(frame_sequential, fisheye);
+    let ((flat, flat_formats), rest) = groups.split_first()?;
+    let mut chosen = format_row(ui, flat, flat_formats, current);
+    let cell = rest
+        .iter()
+        .map(|(_, formats)| row_width(ui, formats))
+        .fold(0.0, f32::max);
+    if ui.available_width() >= 2.0 * cell + GAP {
+        for pair in rest.chunks(2) {
+            ui.horizontal_top(|ui| {
+                ui.spacing_mut().item_spacing.x = GAP;
+                for (group, formats) in pair {
+                    ui.allocate_ui_with_layout(
+                        Vec2::new(cell, 40.0),
+                        Layout::top_down(Align::Min),
+                        |ui| {
+                            ui.set_min_width(cell);
+                            chosen = format_row(ui, group, formats, current).or(chosen);
+                        },
+                    );
+                }
+            });
+        }
+    } else {
+        for (group, formats) in rest {
+            chosen = format_row(ui, group, formats, current).or(chosen);
+        }
+    }
+    chosen
+}
+
+/// How wide a row of the format list is on one line.
+fn row_width(ui: &egui::Ui, formats: &[VideoFormat]) -> f32 {
+    let buttons: f32 = formats
+        .iter()
+        .map(|f| widgets::chip_width(ui, button_label(f).0))
+        .sum();
+    GROUP_WIDTH + buttons + 8.0 * formats.len().saturating_sub(1) as f32 + 8.0
+}
+
+/// One projection's row of the format list. Returns the format picked.
+fn format_row(
+    ui: &mut egui::Ui,
+    group: &str,
+    formats: &[VideoFormat],
+    current: &VideoFormat,
+) -> Option<VideoFormat> {
+    let mut chosen = None;
+    ui.horizontal_top(|ui| {
+        // As [`row_width`] measures it, whatever the row sits in.
+        ui.spacing_mut().item_spacing = Vec2::new(8.0, 8.0);
+        ui.allocate_ui_with_layout(
+            Vec2::new(GROUP_WIDTH, 40.0),
+            Layout::left_to_right(Align::Center),
+            |ui| {
+                ui.set_min_width(GROUP_WIDTH);
+                ui.label(RichText::new(group).color(theme::TEXT_2));
+            },
+        );
+        ui.horizontal_wrapped(|ui| {
+            ui.spacing_mut().item_spacing = Vec2::new(8.0, 8.0);
+            for f in formats {
+                let (label, full) = button_label(f);
+                let mut button = widgets::chip(ui, label, shows(f, current));
+                if let Some(full) = full {
+                    button = button.tip(full);
+                }
+                if button.clicked() {
+                    chosen = Some(picked(*f, current));
+                }
+            }
+        });
+    });
+    chosen
 }
 
 /// The floating transport bar: title and format, the seek bar, and three
@@ -119,8 +285,7 @@ pub fn control_bar(ctx: &egui::Context, v: &mut View) {
 /// with the end of what is inside it.
 pub const BAR_MARGIN: i8 = 28;
 
-/// The format and stream pills open the adjust panel's Format tab (again
-/// closes it).
+/// The format pill opens the adjust panel's Format tab (again closes it).
 fn toggle_format_tab(state: &mut super::UiState) {
     let showing = state.adjust_open && state.adjust_tab == 0;
     state.adjust_open = !showing;
@@ -147,12 +312,7 @@ fn title_row(
             if let Some(video) = pb.player.info().video_stream() {
                 let st = pb.player.stats();
                 let (badge_text, tooltip) = stream_info_labels(video, &st, hardware_decoding);
-                if stream_pill(ui, &badge_text, st.hardware)
-                    .tip(&tooltip)
-                    .clicked()
-                {
-                    toggle_format_tab(state);
-                }
+                stream_pill(ui, &badge_text, st.hardware).tip(&tooltip);
             }
             if let Some(label) = tracks_label(pb, language)
                 && tracks_pill(ui, &label, state.tracks_open)
@@ -161,48 +321,68 @@ fn title_row(
             {
                 state.tracks_open = !state.tracks_open;
             }
+            match (pb.player.error(), &pb.notice) {
+                (Some(e), _) => {
+                    warning_pill(ui, tr!("player-error-pill"), theme::ERROR).tip(&e);
+                }
+                (None, Some(n)) => {
+                    warning_pill(ui, &n.label, theme::WARN).tip(&n.detail);
+                }
+                (None, None) => {}
+            }
             ui.with_layout(Layout::left_to_right(Align::Center), |ui| {
-                let message = match pb.player.error() {
-                    Some(e) => Some((e, theme::ERROR)),
-                    None => pb.notice.clone().map(|n| (n, theme::WARN)),
-                };
-                // With a message, the title leaves it most of the row;
-                // both truncate rather than run under the format pill.
-                let title_width = if message.is_some() {
-                    ui.available_width() * 0.35
-                } else {
-                    ui.available_width()
-                };
-                ui.scope(|ui| {
-                    ui.set_max_width(title_width);
-                    ui.add(
-                        egui::Label::new(
-                            RichText::new(widgets::display_title(&pb.title))
-                                .font(theme::font(Weight::SemiBold, 21.0))
-                                .color(theme::TEXT),
-                        )
-                        .truncate(),
-                    );
-                });
+                let buffering = pb.player.state() == PlayerState::Buffering;
+                let room = ui.available_width() - if buffering { 28.0 } else { 0.0 };
+                widgets::title_line(
+                    ui,
+                    &widgets::display_title(&pb.title),
+                    theme::font(Weight::SemiBold, 21.0),
+                    theme::TEXT,
+                    room,
+                );
                 // Sized to fit the 30-point row: the default spinner
                 // (44) grew the row, so every stutter bounced the seek
                 // bar and buttons up and down.
-                if pb.player.state() == PlayerState::Buffering {
+                if buffering {
                     ui.add(egui::Spinner::new().size(20.0));
-                }
-                if let Some((text, color)) = message {
-                    ui.add(
-                        egui::Label::new(
-                            RichText::new(text)
-                                .font(theme::font(Weight::Regular, 15.0))
-                                .color(color),
-                        )
-                        .truncate(),
-                    );
                 }
             });
         });
     });
+}
+
+/// The latest toast, on its own panel over the video.
+pub fn toast_panel(ctx: &egui::Context, v: &mut View) {
+    if let Some((text, _)) = &v.state.toast {
+        widgets::status_pill(ctx, egui::Align2::CENTER_CENTER, Vec2::ZERO, |ui| {
+            widgets::toast_line(ui, text);
+        });
+    }
+}
+
+/// A warning on the title row: a symbol and a few words, the rest in its tip.
+fn warning_pill(ui: &mut egui::Ui, label: &str, color: Color32) -> egui::Response {
+    let painter = ui.painter();
+    let icon = painter.layout_no_wrap(icons::WARNING.to_string(), theme::icon(16.0), color);
+    let text = painter.layout_no_wrap(
+        label.to_string(),
+        theme::font(Weight::SemiBold, 14.0),
+        color,
+    );
+    const GAP: f32 = 6.0;
+    let width = icon.size().x + GAP + text.size().x;
+    let (rect, resp) = ui.allocate_exact_size(
+        Vec2::new(width, text.size().y) + Vec2::new(20.0, 10.0),
+        Sense::hover(),
+    );
+    pill_face(ui, &resp, false);
+    let left = rect.center().x - width / 2.0;
+    let top = |height: f32| rect.center().y - height / 2.0;
+    let text_at = egui::pos2(left + icon.size().x + GAP, top(text.size().y));
+    let icon_at = egui::pos2(left, top(icon.size().y));
+    ui.painter().galley(icon_at, icon, color);
+    ui.painter().galley(text_at, text, color);
+    resp
 }
 
 /// Times either side of the seek bar.
@@ -667,7 +847,7 @@ pub(crate) fn stream_info_labels(
     } else {
         format!("{} ({}-bit {chroma})", v.pixel_format, v.bit_depth)
     };
-    let size = if v.mvc {
+    let size = if v.mvc || v.frame_sequential {
         let (w, h) = (v.width / 2, v.height);
         tr!("player-size-per-eye", width = w, height = h)
     } else {
@@ -713,7 +893,7 @@ fn stream_pill(ui: &mut egui::Ui, text: &str, hardware: bool) -> egui::Response 
         theme::font(Weight::SemiBold, 14.0),
         text_color,
     );
-    let (rect, resp) = ui.allocate_exact_size(g.size() + Vec2::new(20.0, 10.0), Sense::click());
+    let (rect, resp) = ui.allocate_exact_size(g.size() + Vec2::new(20.0, 10.0), Sense::hover());
     let t = pill_face(ui, &resp, false);
     let fg = text_color.lerp_to_gamma(theme::TEXT, t);
     ui.painter().galley(rect.center() - g.size() / 2.0, g, fg);
@@ -951,12 +1131,12 @@ pub fn adjust_panel(ctx: &egui::Context, v: &mut View) {
                 ui.spacing_mut().item_spacing.y = 10.0;
                 let before = pb.settings;
                 match v.state.adjust_tab {
-                    0 => format_tab(ui, pb, v.settings.hardware_decoding, v.actions),
+                    0 => format_tab(ui, pb, v.settings, v.actions),
                     1 => {
                         let flat = pb.format.projection == Projection::Flat;
                         let moved = v.settings.panel_offsets != Default::default()
                             || (flat && (pb.settings.yaw, pb.settings.pitch) != (0.0, 0.0));
-                        position_tab(ui, &mut pb.settings, moved, v.actions);
+                        position_tab(ui, &mut pb.settings, flat, moved, v.actions);
                     }
                     2 => stereo_tab(ui, &mut pb.settings),
                     3 => picture_tab(ui, &mut pb.settings),
@@ -988,56 +1168,66 @@ pub fn adjust_panel(ctx: &egui::Context, v: &mut View) {
     });
 }
 
-/// Format tab: the detected format and overrides, lens or screen, and
-/// what is decoding the video.
+/// Format tab: the format list, the eye order, and a fisheye's lens with
+/// the presets (which it can add to).
 fn format_tab(
     ui: &mut egui::Ui,
     pb: &mut crate::playback::Playback,
-    hardware_decoding: bool,
+    settings: &mut crate::settings::Settings,
     actions: &mut Vec<Action>,
 ) {
+    let fisheye_start = settings.fisheye_start;
+    let presets = &mut settings.fisheye_presets;
     let s = &mut pb.settings;
-    let d = ViewSettings::default();
     let user = pb.evidence == fp_core::format::Evidence::User;
+    let blu_ray = pb.player.info().video_stream().is_some_and(|v| v.mvc);
     widgets::section_label(ui, tr!("adjust-format"));
-    ui.label(
-        RichText::new(tr!(
-            "adjust-detected",
-            format = super::format_label(&pb.detected.format),
-            evidence = super::evidence_label(pb.detected.evidence)
-        ))
-        .color(theme::TEXT_2),
-    );
-    ui.horizontal_wrapped(|ui| {
-        ui.spacing_mut().item_spacing = Vec2::new(8.0, 8.0);
-        if widgets::chip_icon(
-            ui,
-            Some(icons::MAGIC_WAND),
-            tr!("adjust-format-automatic"),
-            !user,
-        )
-        .clicked()
-        {
-            actions.push(Action::SetFormat(None));
-        }
-        for (label, f) in format_choices() {
-            // The chips set the layout; a packed mask stays.
-            if widgets::chip(ui, label, user && pb.format.same_layout(&f)).clicked() {
-                actions.push(Action::SetFormat(Some(VideoFormat {
-                    alpha_packed: pb.format.alpha_packed,
-                    ..f
-                })));
-            }
-        }
-    });
+    if automatic_row(ui, (!blu_ray).then_some(!user), &pb.detected) {
+        actions.push(Action::SetFormat(None));
+    }
+    if blu_ray {
+        ui.label(RichText::new(tr!("adjust-format-3d-blu-ray")).color(theme::TEXT_2));
+    } else if let Some(f) = format_list(ui, &pb.format, pb.record_id.is_some(), fisheye_start) {
+        actions.push(Action::SetFormat(Some(f)));
+    }
+    if pb.format.stereo.is_stereo() {
+        widgets::rows(ui, |r| {
+            r.switch(
+                tr!("adjust-swap-eyes"),
+                Some(tr!("adjust-swap-eyes-desc")),
+                &mut s.swap_eyes,
+            );
+        });
+    }
     if let Projection::Fisheye { fov } = pb.format.projection {
         ui.add_space(6.0);
         widgets::section_label(ui, tr!("adjust-fisheye-lens"));
+        ui.horizontal_wrapped(|ui| {
+            ui.spacing_mut().item_spacing = Vec2::new(8.0, 8.0);
+            ui.label(RichText::new(tr!("adjust-lens-presets")).color(theme::TEXT_2));
+            for &preset in presets.iter() {
+                if widgets::chip(ui, &format!("{preset}°"), fov.round() == preset).clicked() {
+                    actions.push(Action::SetFormat(Some(VideoFormat {
+                        projection: Projection::fisheye(preset),
+                        ..pb.format
+                    })));
+                }
+            }
+            let angle = fov.round();
+            if !presets.contains(&angle)
+                && presets.len() < crate::settings::MAX_FISHEYE_PRESETS
+                && widgets::chip_icon(ui, Some(icons::PLUS), &format!("{angle}°"), false)
+                    .tip(tr!("adjust-lens-add-preset"))
+                    .clicked()
+            {
+                crate::settings::add_fisheye_preset(presets, angle);
+            }
+        });
         widgets::rows(ui, |r| {
             let mut f = fov;
             if r.slider(
                 tr!("adjust-field-of-view"),
-                None,
+                Some(tr!("adjust-field-of-view-hint")),
                 &mut f,
                 120.0..=300.0,
                 fov,
@@ -1050,8 +1240,8 @@ fn format_tab(
                 })));
             }
             r.slider(
-                tr!("adjust-lens-k1"),
-                None,
+                tr!("adjust-edge-stretch"),
+                Some(tr!("adjust-edge-stretch-desc")),
                 &mut s.lens_k1,
                 -0.5..=0.5,
                 0.0,
@@ -1059,8 +1249,8 @@ fn format_tab(
                 2,
             );
             r.slider(
-                tr!("adjust-lens-k2"),
-                None,
+                tr!("adjust-rim-stretch"),
+                Some(tr!("adjust-rim-stretch-desc")),
                 &mut s.lens_k2,
                 -0.5..=0.5,
                 0.0,
@@ -1072,7 +1262,9 @@ fn format_tab(
         widgets::section_label(ui, tr!("adjust-lens-centre"));
         let images: Vec<[&str; 2]> = match pb.format.stereo {
             StereoLayout::Mono => vec![[tr!("lens-across"), tr!("lens-up")]],
-            StereoLayout::SideBySide | StereoLayout::HalfSideBySide => vec![
+            StereoLayout::SideBySide
+            | StereoLayout::HalfSideBySide
+            | StereoLayout::FrameSequential => vec![
                 [tr!("lens-left-across"), tr!("lens-left-up")],
                 [tr!("lens-right-across"), tr!("lens-right-up")],
             ],
@@ -1094,85 +1286,16 @@ fn format_tab(
         });
         ui.label(RichText::new(tr!("adjust-lens-centre-desc")).color(theme::TEXT_3));
     }
-    if pb.format.projection == Projection::Flat {
-        ui.add_space(6.0);
-        widgets::section_label(ui, tr!("adjust-screen"));
-        widgets::rows(ui, |r| {
-            r.slider(
-                tr!("adjust-distance"),
-                None,
-                &mut s.screen_distance,
-                1.0..=20.0,
-                d.screen_distance,
-                " m",
-                1,
-            );
-            r.slider(
-                tr!("adjust-width"),
-                Some(tr!("settings-screen-width-desc")),
-                &mut s.screen_width,
-                0.5..=30.0,
-                d.screen_width,
-                " m",
-                1,
-            );
-            r.slider(
-                tr!("adjust-curvature"),
-                None,
-                &mut s.screen_curvature,
-                0.0..=1.0,
-                0.0,
-                "",
-                2,
-            );
-        });
-    }
-    if let Some(video) = pb.player.info().video_stream() {
-        ui.add_space(6.0);
-        widgets::section_label(ui, tr!("adjust-video-stream"));
-        widgets::rows(ui, |r| {
-            let st = pb.player.stats();
-            let decoder = decoder_text(video, &st, hardware_decoding);
-            let color = if st.hardware {
-                theme::TEXT
-            } else {
-                theme::WARN
-            };
-            r.info_colored(tr!("adjust-decoder"), &decoder, color);
-            let codec_name = match video.codec.as_str() {
-                "hevc" => "HEVC (H.265)".to_string(),
-                "h264" => "H.264 (AVC)".to_string(),
-                "av1" => "AV1".to_string(),
-                "vp9" => "VP9".to_string(),
-                c => c.to_uppercase(),
-            };
-            let format_desc = if video.bit_depth > 8 {
-                format!("{codec_name} {}-bit ({})", video.bit_depth, video.chroma())
-            } else {
-                format!("{codec_name} 8-bit ({})", video.chroma())
-            };
-            r.row(tr!("adjust-format"), None, |ui| {
-                ui.label(RichText::new(format_desc).color(theme::TEXT_2));
-            });
-            r.row(tr!("adjust-resolution"), None, |ui| {
-                ui.label(
-                    RichText::new(format!(
-                        "{} × {} @ {:.2} fps",
-                        video.width, video.height, video.fps
-                    ))
-                    .color(theme::TEXT_2),
-                );
-            });
-            if !video.pixel_format.is_empty() {
-                r.row(tr!("adjust-pixel-format"), None, |ui| {
-                    ui.label(RichText::new(&video.pixel_format).color(theme::TEXT_2));
-                });
-            }
-        });
-    }
 }
 
-fn position_tab(ui: &mut egui::Ui, s: &mut ViewSettings, moved: bool, actions: &mut Vec<Action>) {
+/// Position tab: where the picture is, and for a flat screen its size.
+fn position_tab(
+    ui: &mut egui::Ui,
+    s: &mut ViewSettings,
+    flat: bool,
+    moved: bool,
+    actions: &mut Vec<Action>,
+) {
     let d = ViewSettings::default();
     widgets::rows(ui, |r| {
         r.row(
@@ -1221,15 +1344,18 @@ fn position_tab(ui: &mut egui::Ui, s: &mut ViewSettings, moved: bool, actions: &
             "°",
             0,
         );
-        r.slider(
-            tr!("adjust-zoom"),
-            None,
-            &mut s.zoom,
-            0.5..=2.5,
-            1.0,
-            "×",
-            2,
-        );
+        // A flat screen's size is its width.
+        if !flat {
+            r.slider(
+                tr!("adjust-zoom"),
+                None,
+                &mut s.zoom,
+                0.5..=2.5,
+                1.0,
+                "×",
+                2,
+            );
+        }
         r.slider(
             tr!("settings-height"),
             Some(tr!("adjust-height-desc")),
@@ -1250,6 +1376,39 @@ fn position_tab(ui: &mut egui::Ui, s: &mut ViewSettings, moved: bool, actions: &
         );
     });
     ui.label(RichText::new(tr!("adjust-position-hint")).color(theme::TEXT_3));
+    if flat {
+        ui.add_space(6.0);
+        widgets::section_label(ui, tr!("adjust-screen"));
+        widgets::rows(ui, |r| {
+            r.slider(
+                tr!("adjust-distance"),
+                None,
+                &mut s.screen_distance,
+                1.0..=20.0,
+                d.screen_distance,
+                " m",
+                1,
+            );
+            r.slider(
+                tr!("adjust-width"),
+                Some(tr!("settings-screen-width-desc")),
+                &mut s.screen_width,
+                0.5..=30.0,
+                d.screen_width,
+                " m",
+                1,
+            );
+            r.slider(
+                tr!("adjust-curvature"),
+                None,
+                &mut s.screen_curvature,
+                0.0..=1.0,
+                0.0,
+                "",
+                2,
+            );
+        });
+    }
     ui.add_space(6.0);
     widgets::section_label(ui, tr!("settings-background"));
     background_controls(ui, &mut s.background);
@@ -1284,11 +1443,6 @@ fn stereo_tab(ui: &mut egui::Ui, s: &mut ViewSettings) {
             0.0,
             "°",
             1,
-        );
-        r.switch(
-            tr!("adjust-swap-eyes"),
-            Some(tr!("adjust-swap-eyes-desc")),
-            &mut s.swap_eyes,
         );
         r.slider(
             tr!("settings-subtitle-depth"),

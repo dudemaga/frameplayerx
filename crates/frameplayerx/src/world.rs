@@ -24,6 +24,12 @@ pub struct Panel {
     /// Centre and orientation; the panel faces +Z of this transform.
     pub pose: Mat4,
     pub visible: bool,
+    /// Nothing on it to press or scroll: a ray stops on it and a grip takes
+    /// it, but the trigger and stick act as if pointing at nothing.
+    pub display_only: bool,
+    /// The part of it that shows, in egui points, when that's less than all
+    /// of it: rays pass through the rest.
+    pub solid: Option<egui::Rect>,
     pub opacity: f32,
     /// 0 hidden → 1 shown, following `visible` over a short fade.
     fade: f32,
@@ -52,6 +58,8 @@ impl Panel {
             size,
             pose: Mat4::IDENTITY,
             visible: false,
+            display_only: false,
+            solid: None,
             opacity: 1.0,
             fade: 0.0,
             events: Vec::new(),
@@ -120,7 +128,11 @@ impl Panel {
         let u = p.x / self.size.x + 0.5;
         let v = 0.5 - p.y / self.size.y;
         let pts = self.points();
-        Some((t, Pos2::new(u * pts.x, v * pts.y)))
+        let pos = Pos2::new(u * pts.x, v * pts.y);
+        if self.solid.is_some_and(|s| !s.contains(pos)) {
+            return None;
+        }
+        Some((t, pos))
     }
 
     /// World position of a point given in egui points.
@@ -425,6 +437,11 @@ pub struct Pointer {
     /// The hand whose trigger made that press: only its let-go ends it.
     pressed_hand: Option<usize>,
     hovered_panel: Option<usize>,
+    /// That panel is display-only.
+    hovering_display_only: bool,
+    /// The rays are being drawn. A display-only panel shows where one lands
+    /// only then: it's up while you watch, with the rays hidden.
+    pub rays_shown: bool,
     pub aims: [Option<Aim>; 2],
 }
 
@@ -517,8 +534,11 @@ impl Pointer {
             self.let_go(panels, held);
         }
         let hit = aim.and_then(|a| a.hit);
+        let display_only = |panels: &[&mut Panel], h: &(usize, f32, Pos2)| panels[h.0].display_only;
         // Hover changes.
-        let target = hit.map(|h| h.0);
+        let hover = hit.filter(|h| self.rays_shown || !display_only(panels, h));
+        self.hovering_display_only = hover.is_some_and(|h| display_only(panels, &h));
+        let target = hover.map(|h| h.0);
         if self.hovered_panel != target {
             if let Some(old) = self.hovered_panel
                 && let Some(p) = panels.get_mut(old)
@@ -528,9 +548,9 @@ impl Pointer {
             }
             self.hovered_panel = target;
         }
-        if let Some((pi, _, pos)) = hit {
-            routed.over_ui = true;
+        if let Some((pi, _, pos)) = hover {
             let p = &mut panels[pi];
+            routed.over_ui = !p.display_only;
             p.hovered = true;
             // egui takes a press as a click until the pointer has been too
             // far from it; a list has taken this one.
@@ -539,7 +559,7 @@ impl Pointer {
             }
             p.push(Event::PointerMoved(pos));
             let stick = hands[self.active].stick;
-            if stick.y.abs() > 0.2 {
+            if stick.y.abs() > 0.2 && !p.display_only {
                 p.push(Event::MouseWheel {
                     unit: egui::MouseWheelUnit::Point,
                     delta: egui::vec2(0.0, stick.y * 900.0 * dt),
@@ -563,7 +583,7 @@ impl Pointer {
         match transitions[self.active] {
             Some(true) if gripping && hit.is_some() => {}
             Some(true) => {
-                if let Some((pi, _, pos)) = hit {
+                if let Some((pi, _, pos)) = hit.filter(|h| !display_only(panels, h)) {
                     panels[pi].push(Event::PointerButton {
                         pos,
                         button: PointerButton::Primary,
@@ -592,7 +612,7 @@ impl Pointer {
 
     /// The panel the active hand points at.
     pub fn hovered(&self) -> Option<usize> {
-        self.hovered_panel
+        self.hovered_panel.filter(|_| !self.hovering_display_only)
     }
 
     /// The panel the trigger is held on, from press to release.
@@ -1100,6 +1120,81 @@ mod tests {
         hands[1].trigger = 0.0;
         frame(&mut p, &mut ptr, &hands, &mut typed);
         assert_eq!(typed, vec!['A', 'B']);
+    }
+
+    #[test]
+    fn a_display_only_panel_stops_the_ray_and_takes_a_grip_and_nothing_else() {
+        let mut p = panel_in_front();
+        p.display_only = true;
+        let mut ptr = Pointer {
+            rays_shown: true,
+            ..Default::default()
+        };
+        let mut hands = [Hand::default(), Hand::default()];
+        hands[1].aim = Some((Vec3::ZERO, Quat::IDENTITY));
+        hands[1].stick = Vec2::new(0.0, 1.0);
+        let r = ptr.route(&mut [&mut p], &hands, 0.016);
+        assert!(ptr.aims[1].unwrap().hit.is_some(), "the ray stops on it");
+        assert!(p.hovered, "with its dot");
+        assert!(!r.over_ui, "the stick still seeks");
+        assert_eq!(ptr.hovered(), None, "nothing to page");
+        assert!(
+            !p.events
+                .iter()
+                .any(|e| matches!(e, Event::MouseWheel { .. }))
+        );
+
+        hands[1].trigger = 0.9;
+        let r = ptr.route(&mut [&mut p], &hands, 0.016);
+        assert!(r.click_outside, "the controls still come back");
+        assert_eq!(r.pressed, None);
+        assert_eq!(ptr.pressed(), None);
+        hands[1].trigger = 0.1;
+        ptr.route(&mut [&mut p], &hands, 0.016);
+        assert!(
+            !p.events
+                .iter()
+                .any(|e| matches!(e, Event::PointerButton { .. }))
+        );
+
+        hands[1].squeeze = 1.0;
+        let r = ptr.route(&mut [&mut p], &hands, 0.016);
+        assert_eq!(r.grab, Some((0, 1)));
+    }
+
+    #[test]
+    fn with_the_rays_hidden_a_display_only_panel_shows_no_dot_but_a_grip_still_takes_it() {
+        let mut p = panel_in_front();
+        p.display_only = true;
+        let mut ptr = Pointer::default();
+        let mut hands = [Hand::default(), Hand::default()];
+        hands[1].aim = Some((Vec3::ZERO, Quat::IDENTITY));
+        ptr.route(&mut [&mut p], &hands, 0.016);
+        assert!(!p.hovered);
+        assert!(
+            p.events.is_empty(),
+            "no repaint for every frame it's aimed at"
+        );
+        hands[1].squeeze = 1.0;
+        let r = ptr.route(&mut [&mut p], &hands, 0.016);
+        assert_eq!(r.grab, Some((0, 1)));
+    }
+
+    #[test]
+    fn rays_pass_through_the_part_of_a_panel_that_doesnt_show() {
+        let mut p = panel_in_front();
+        let pts = p.points();
+        assert!(p.hit(Vec3::ZERO, Vec3::NEG_Z).is_some());
+        p.solid = Some(egui::Rect::from_min_size(
+            Pos2::ZERO,
+            egui::vec2(pts.x, pts.y / 4.0),
+        ));
+        assert!(
+            p.hit(Vec3::ZERO, Vec3::NEG_Z).is_none(),
+            "the middle is empty"
+        );
+        let up = Vec3::new(0.0, p.size.y * 0.4, -p.pose.w_axis.truncate().length());
+        assert!(p.hit(Vec3::ZERO, up.normalize()).is_some(), "the top shows");
     }
 
     #[test]

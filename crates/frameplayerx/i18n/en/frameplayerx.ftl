@@ -77,7 +77,7 @@ settings-diagnostics = Diagnostics
 settings-hardware-decoding = Hardware video decoding
 settings-hardware-decoding-desc = Recommended: smooth 8K. Turn off only to rule out a decoder problem.
 settings-perf-overlay = Performance overlay
-settings-perf-overlay-desc = Frame time, the video's frame rate and decoder, CPU, GPU and memory, low in your view.
+settings-perf-panel-desc = Why a video might stutter: frames drawn and shown, the decoder, the buffer and network, CPU, GPU and memory. Squeeze a grip on it to move it.
 
 ## Settings: the other tabs
 
@@ -102,6 +102,10 @@ settings-auto-hide = Hide controls after
 settings-auto-hide-desc = While playing, without moving the pointer.
 settings-default-format = Default format
 settings-default-format-desc = For videos whose file, name and shape say nothing about their format. 16:9, 4:3 and scope movies start flat on their own.
+settings-fisheye-presets = Fisheye presets
+settings-fisheye-presets-desc = The angles offered under Fisheye lens. Add one from a fisheye video's Fisheye lens settings; press one here to remove it.
+# Before the fisheye presets: the angle a video gets when Fisheye is picked for it.
+settings-fisheye-start = Fisheye starts at
 settings-video-position-desc = Where videos start. A video you adjust in the player keeps its own.
 settings-flat-videos = Flat videos
 settings-screen-distance = Screen distance
@@ -305,15 +309,10 @@ language-cy = Welsh
 
 ## The player: control bar, adjust panel, audio and subtitles
 
-# A video format: keep 2D, 3D, SBS and TB as they are.
-format-flat-2d = Flat 2D
-format-flat-3d-half-sbs = Flat 3D Half SBS
-format-flat-3d-sbs = Flat 3D SBS
-format-flat-3d-half-tb = Flat 3D Half TB
-format-flat-3d-tb = Flat 3D TB
-format-fisheye-190 = Fisheye 190° SBS
-format-fisheye-200 = Fisheye 200° SBS
-format-fisheye-220 = Fisheye 220° SBS
+# A row of the format list: videos on a flat screen.
+format-group-flat = Flat screen
+# A row of the format list: fisheye videos.
+format-group-fisheye = Fisheye
 # A tooltip.
 player-change-format = Change the format
 # A tooltip.
@@ -360,22 +359,24 @@ adjust-format = Format
 adjust-passthrough-desc = This video's settings, saved with its adjustments.
 adjust-fisheye-lens = Fisheye lens
 adjust-field-of-view = Field of view
-# A lens distortion setting: keep k1 as it is.
-adjust-lens-k1 = Lens k1
-# A lens distortion setting: keep k2 as it is.
-adjust-lens-k2 = Lens k2
+adjust-field-of-view-hint = A preset sets this. For any other angle, slide it, then + adds that angle to the presets.
+# Short: before buttons that set a fisheye lens's field of view.
+adjust-lens-presets = Presets
+adjust-lens-add-preset = Add to the presets
+adjust-edge-stretch = Edge stretch
+adjust-edge-stretch-desc = For a lens that doesn't spread its view evenly: straight lines bend as you look around.
+adjust-rim-stretch = Rim stretch
+adjust-rim-stretch-desc = Like Edge stretch, but mostly at the very edge of the circle.
 adjust-lens-centre = Lens centre
 adjust-lens-centre-desc = Where each image circle's centre is, if not in the middle. Point at a slider and push the thumbstick left or right for fine steps.
 adjust-screen = Screen
 adjust-distance = Distance
 adjust-width = Width
 adjust-curvature = Curvature
-adjust-video-stream = Video stream
 adjust-decoder = Decoder
 adjust-resolution = Resolution
-adjust-pixel-format = Pixel format
 adjust-placement = Screen and panels
-adjust-placement-desc = Where a flat screen, the control bar, this panel and the browse panel start.
+adjust-placement-desc = Where a flat screen, the control bar, this panel, the browse panel and the performance overlay start.
 adjust-put-back = Put back
 # Turning left or right.
 adjust-yaw = Yaw
@@ -392,6 +393,7 @@ adjust-vertical-align = Vertical align
 adjust-rotation-align = Rotation align
 adjust-swap-eyes = Swap eyes
 adjust-swap-eyes-desc = For left/right swapped files.
+adjust-format-3d-blu-ray = A 3D Blu-ray's two eyes are decoded together, so it plays in the format the disc gives.
 adjust-brightness = Brightness
 adjust-contrast = Contrast
 adjust-saturation = Saturation
@@ -576,6 +578,9 @@ source-user-name = User name
 source-user-name-desc = If the server asks for one.
 source-self-signed = Accept self-signed certificates
 source-self-signed-desc = For HTTPS servers on your own network.
+# A switch on a server's form, with the description below it.
+source-parallel-downloads = Parallel downloads
+source-parallel-downloads-desc = Downloads several parts of a video at once over separate connections, like a download manager. This helps if the server limits the speed of each connection. If it doesn't, it may gain nothing, and a server on hard drives can get slower.
 source-passwords-note = Passwords are stored on this device only, in a file only you can read.
 quick-connect-code = Pairing code
 quick-connect-code-desc = Enter this code in your Jellyfin or Emby app under Quick Connect:
@@ -852,6 +857,8 @@ library-browse-sources = Browse sources
 common-back = Back
 # A heading: the video's file.
 library-file = File
+# A video's format, and where it came from (your choice, from the file name…).
+library-format-value = { $format } ({ $evidence })
 library-remove-from-history = Remove from history
 # What a controller button does: nothing.
 action-nothing = Nothing
@@ -1168,16 +1175,36 @@ library-error-name = The folder's name can't be read
 
 location-card-out = On a card that is not inserted
 location-on-card-out = { $path }, on a card that is not inserted
-# The performance overlay: keep ms, Hz, fps, CPU, GPU and GB.
-perf-frame = Frame
-# $hz is empty, or " · 90 Hz".
-perf-frame-value = { $typical } ms, longest { $longest }{ $hz }
+# The performance overlay: keep Hz, fps, CPU, GPU and GB. Short: these sit in one row.
+perf-display = Display
+# Frames drawn per second, of the display's rate.
+perf-display-value = { $drawn } of { $hz } Hz
 perf-video = Video
-perf-video-value = { $fps } fps · { $dropped } dropped/s
-perf-cpu-value = { $all }% · app { $app }%
+# Frames shown per second, of the film's own rate.
+perf-video-value = { $fps } of { $film } fps
+perf-video-paused = Paused
+perf-video-buffering = Buffering
+perf-video-ended = Ended
+perf-stutter = { $dropped } dropped · { $stalls ->
+    [one] { $stalls } stall
+   *[other] { $stalls } stalls
+}
+perf-buffer = Buffer
+# Seconds of video read ahead, of how many it's aiming for.
+perf-buffer-value = { $ahead } of { $target } s
+perf-network = Network
+# Nothing arriving because the buffer is full.
+perf-network-idle = Idle
+perf-retries = { $count ->
+    [one] { $count } retry
+   *[other] { $count } retries
+}
+perf-last-skip = Last skip
+perf-opened = Opened
+# Follows how long a skip took: how long its first read of the file took.
+perf-first-read = first read { $secs } s
 perf-memory = Memory
 perf-memory-value = { $used } of { $total } GB
-perf-memory-app = { $used } of { $total } GB · app { $app } GB
 notice-not-in-library = Adjustments apply until you close this video (it is not in the library).
 # $quality is like 1440p.
 transcode-cannot-play = This file can't play here: the server is transcoding it to { $quality }
@@ -1190,6 +1217,20 @@ decoder-why-untried = hardware decoder not tried
 decoder-notice-none = No hardware decoding for { $stream }, so it stutters. 8-bit 4:2:0 H.265 plays smoothly
 decoder-notice-off = { $stream } in software stutters: turn on hardware decoding in Settings
 decoder-notice-busy = Hardware decoder busy: { $stream } in software stutters
+# $holders is a list of programs, like Steam, Steam's browser.
+decoder-notice-held = Hardware decoder held by { $holders }, so { $stream } stutters in software. If it stays that way, restart the headset and open the video again
+decoder-notice-recording = Steam's recording or streaming leaves the hardware decoder too little room, so { $stream } stutters in software. Choose Recording Off in Steam Settings › Game Recording, then open the video again
+decoder-notice-too-big = This { $stream } ({ $size }) is too big for the hardware decoder, even with nothing else open, so it stutters in software
+decoder-holder-steam-browser = Steam's browser
+# The warning pill on the control bar: a few words. Its tip has the notice.
+decoder-pill-none = No hardware decoding
+decoder-pill-off = Hardware decoding off
+decoder-pill-busy = Decoder busy
+decoder-pill-too-big = Too big for hardware
+decoder-pill-refused = Decoder refused it
+notice-pill-transcoding = Transcoding
+notice-pill-not-saved = Not saved
+player-error-pill = Playback error
 decoder-notice-refused = The hardware decoder can't play this { $stream } ({ $size }), so it stutters in software
 open-not-inserted = This video is on a microSD card or USB drive that is not inserted.
 error-too-large = larger than { $mb } MB
@@ -1233,6 +1274,7 @@ error-no-audio = no audio stream
 error-no-stream = no { $kind } stream
 error-disc = disc image: { $error }
 error-hardware-busy = hardware decoder busy: { $error }
+error-hardware-too-big = too big for the hardware decoder: { $error }
 error-audio = audio output: { $error }
 error-interrupted = interrupted
 open-no-source = no source can open this location
@@ -1242,11 +1284,13 @@ open-no-source = no source can open this location
 # $projection is Flat, 180°, Fisheye 190° and so on; $stereo the layout.
 format-label = { $projection } { $stereo }
 format-flat = Flat
-format-mono = mono
-format-sbs = Side by side
-format-half-sbs = Half side by side
-format-tb = Top/bottom
-format-half-tb = Half top/bottom
+format-2d = 2D
+format-3d = 3D
+format-3d-sbs = 3D side by side
+format-3d-half-sbs = 3D half side by side
+format-3d-tb = 3D top/bottom
+format-3d-half-tb = 3D half top/bottom
+format-3d-frame-sequential = 3D frame sequential
 # Where a video's format came from, after it in brackets.
 evidence-user = your choice
 evidence-metadata = from file metadata

@@ -95,6 +95,7 @@ pub(crate) fn stereo_str(stereo: StereoLayout) -> &'static str {
         StereoLayout::HalfSideBySide => "half_side_by_side",
         StereoLayout::TopBottom => "top_bottom",
         StereoLayout::HalfTopBottom => "half_top_bottom",
+        StereoLayout::FrameSequential => "frame_sequential",
     }
 }
 

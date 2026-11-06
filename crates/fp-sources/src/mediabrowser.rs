@@ -494,6 +494,7 @@ pub struct MediaBrowserSource {
     base_url: String,
     credentials: Option<Credentials>,
     insecure_tls: bool,
+    parallel_downloads: bool,
     max_height: Option<u32>,
     auth: Mutex<Option<AuthState>>,
     parents: Mutex<HashMap<String, String>>,
@@ -609,6 +610,7 @@ impl MediaBrowserSource {
             let authed_header = mediabrowser_header(Some(token));
             let opts = HttpOptions {
                 insecure_tls: config.insecure_tls,
+                cache: crate::cache::CacheOptions::for_downloads(config.parallel_downloads),
                 ..HttpOptions::default()
             };
             let authed_client = HttpClient::new_with_header(opts, &authed_header, &base_url);
@@ -627,6 +629,7 @@ impl MediaBrowserSource {
             base_url,
             credentials: config.credentials.clone(),
             insecure_tls: config.insecure_tls,
+            parallel_downloads: config.parallel_downloads,
             max_height: config.max_height,
             auth: Mutex::new(auth),
             parents: Mutex::new(HashMap::new()),
@@ -697,6 +700,7 @@ impl MediaBrowserSource {
             .ok_or_else(|| Error::SignedOut(redact(&self.base_url)))?;
         let opts = HttpOptions {
             insecure_tls: self.insecure_tls,
+            cache: crate::cache::CacheOptions::for_downloads(self.parallel_downloads),
             ..HttpOptions::default()
         };
         let unauthed_client = HttpClient::new(opts.clone(), None);
@@ -831,6 +835,7 @@ impl MediaBrowserSource {
     pub fn quick_connect_enabled(&self) -> Result<bool> {
         let opts = HttpOptions {
             insecure_tls: self.insecure_tls,
+            cache: crate::cache::CacheOptions::for_downloads(self.parallel_downloads),
             ..HttpOptions::default()
         };
         let client = HttpClient::new(opts, None);
@@ -848,6 +853,7 @@ impl MediaBrowserSource {
     pub fn quick_connect_initiate(&self) -> Result<QuickConnectState> {
         let opts = HttpOptions {
             insecure_tls: self.insecure_tls,
+            cache: crate::cache::CacheOptions::for_downloads(self.parallel_downloads),
             ..HttpOptions::default()
         };
         let client = HttpClient::new(opts, None);
@@ -882,6 +888,7 @@ impl MediaBrowserSource {
     pub fn quick_connect_poll_auth(&self, secret: &str) -> Result<Option<(String, String)>> {
         let opts = HttpOptions {
             insecure_tls: self.insecure_tls,
+            cache: crate::cache::CacheOptions::for_downloads(self.parallel_downloads),
             ..HttpOptions::default()
         };
         let client = HttpClient::new(opts.clone(), None);
@@ -1324,6 +1331,7 @@ pub fn quick_connect_initiate_url(url: &str, insecure_tls: bool) -> Result<Quick
         url: url.into(),
         credentials: None,
         insecure_tls,
+        parallel_downloads: false,
         max_height: None,
         access_token: None,
         user_id: None,
@@ -1344,6 +1352,7 @@ pub fn quick_connect_poll_url(
         url: url.into(),
         credentials: None,
         insecure_tls,
+        parallel_downloads: false,
         max_height: None,
         access_token: None,
         user_id: None,
@@ -1798,6 +1807,7 @@ mod tests {
             url: "http://s".into(),
             credentials: None,
             insecure_tls: false,
+            parallel_downloads: false,
             max_height: None,
             access_token: None,
             user_id: None,

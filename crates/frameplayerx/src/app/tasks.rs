@@ -544,6 +544,9 @@ impl App {
                     h.load(o.scripts);
                 }
                 self.playback = Some(o.playback);
+                if let Some(r) = &mut self.perf_readings {
+                    r.new_video();
+                }
                 if let Some(p) = &mut self.playback {
                     p.place_flat(self.offsets.main[0]);
                 }
@@ -748,6 +751,19 @@ impl App {
             let loc = b.location.clone();
             self.browse(crate::services::REMOVABLE_SOURCE.into(), loc);
         }
+    }
+
+    /// Opens the video playing again from where it is.
+    pub(super) fn reopen(&mut self) {
+        let Some(p) = &self.playback else {
+            return;
+        };
+        let req = OpenRequest {
+            start_at: Some(p.player.position()),
+            paused: p.player.is_paused(),
+            ..p.request.clone()
+        };
+        self.open_request(req);
     }
 
     /// Opens the video playing again from where it is, as `quality`.

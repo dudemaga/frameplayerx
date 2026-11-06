@@ -19,14 +19,14 @@ use crate::info::{MediaInfo, read_info};
 use crate::input::Input;
 use crate::subtitle::{self, Cue};
 use crate::{Error, Result};
-use fp_core::ByteSource;
 use fp_core::sync::lock;
+use fp_core::{ByteSource, NetCounters};
 use fp_ffmpeg_sys as ff;
 use std::collections::VecDeque;
 use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
 use std::sync::{Arc, Condvar, Mutex, MutexGuard};
 use std::thread::JoinHandle;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 /// Asks the server to transcode again from a time (seconds into the video).
 pub type Restart =
@@ -62,8 +62,12 @@ pub struct PlayerConfig {
     pub audio: output::Backend,
     /// Decoded frames kept ahead of the display.
     pub video_queue: usize,
-    /// Demuxer read-ahead limit in seconds of video.
+    /// Demuxer read-ahead limit in seconds of video, after opening or a skip.
     pub read_ahead_secs: f64,
+    /// What that grows to as a video from a network source plays. A slow patch
+    /// comes without warning and a buffer can't fill during one, so this has
+    /// to be in hand beforehand, but reading this far at once slows opening.
+    pub remote_read_ahead_secs: f64,
     /// Demuxer read-ahead limit in bytes (network sources).
     pub read_ahead_bytes: usize,
     /// Start paused at this position instead of 0.
@@ -73,6 +77,9 @@ pub struct PlayerConfig {
     /// Set for a stream a server transcodes; [`Self::start_at`] is then
     /// ignored.
     pub timeline: Option<Timeline>,
+    /// Whether the viewer says the video is frame sequential 3D; None goes
+    /// by its labels.
+    pub frame_sequential: Option<bool>,
 }
 
 impl Default for PlayerConfig {
@@ -82,11 +89,13 @@ impl Default for PlayerConfig {
             audio: output::Backend::default(),
             video_queue: 8,
             read_ahead_secs: 4.0,
+            remote_read_ahead_secs: 15.0,
             read_ahead_bytes: 96 << 20,
             start_at: 0.0,
             start_paused: false,
             volume: 1.0,
             timeline: None,
+            frame_sequential: None,
         }
     }
 }
@@ -107,6 +116,8 @@ pub struct Stats {
     pub hardware: bool,
     /// Why hardware decoding was tried and is not decoding this video.
     pub hardware_error: Option<String>,
+    /// Who held the driver when it found no room for this video.
+    pub hardware_holders: crate::SessionHolders,
     pub audio_decoder: String,
     pub audio_sink: String,
     pub frames_shown: u64,
@@ -116,6 +127,25 @@ pub struct Stats {
     pub video_queue: usize,
     pub packets_queued: usize,
     pub bytes_queued: usize,
+    /// Changes with every seek.
+    pub serial: u64,
+    /// Seconds of video read ahead of the picture, and how far it's aiming.
+    pub read_ahead: (f64, f64),
+    /// The demuxer has read all it wants for now.
+    pub read_enough: bool,
+    /// The demuxer has reached the end of the file.
+    pub read_to_end: bool,
+    pub last_jump: Option<LastJump>,
+}
+
+/// What the last open or seek took, up to its picture.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct LastJump {
+    /// A seek rather than opening the file.
+    pub skip: bool,
+    pub picture: Duration,
+    /// Its first read at the new place, over the network.
+    pub first_read: Option<Duration>,
 }
 
 struct PacketQueue {
@@ -192,6 +222,14 @@ struct Shared {
     frames_cv: Condvar,
     current: Mutex<Option<Arc<VideoFrame>>>,
     serial: AtomicU64,
+    /// How far the demuxer has read and how far it's aiming, seconds
+    /// (`f64` bits), and whether it has read enough for now.
+    read_to: AtomicU64,
+    read_target: AtomicU64,
+    read_enough: AtomicBool,
+    /// When the open or seek waiting for its picture began, and if a seek.
+    jump: Mutex<Option<(Instant, bool)>>,
+    net: Option<Arc<NetCounters>>,
     /// Precise seek: frames before this time (in serial) are dropped.
     seek_floor: Mutex<Option<(u64, f64)>>,
     /// Waiting for the first frame after open/seek before the clock runs.
@@ -257,8 +295,12 @@ impl Player {
         config: PlayerConfig,
         tracks: impl FnOnce(&MediaInfo) -> Tracks,
     ) -> Result<Player> {
+        let started = Instant::now();
+        let config = config.for_source(&*src);
+        let net = src.net();
         let quit = Arc::new(AtomicBool::new(false));
         let mut input = Input::open(src, name, quit.clone())?;
+        input.set_frame_sequential(config.frame_sequential);
         if let Some(tl) = &config.timeline {
             input.start_at(tl.start);
         }
@@ -291,6 +333,11 @@ impl Player {
             frames_cv: Condvar::new(),
             current: Mutex::new(None),
             serial: AtomicU64::new(1),
+            read_to: AtomicU64::new(0f64.to_bits()),
+            read_target: AtomicU64::new(config.read_ahead_secs.to_bits()),
+            read_enough: AtomicBool::new(false),
+            jump: Mutex::new(Some((started, false))),
+            net,
             seek_floor: Mutex::new(None),
             buffering: AtomicBool::new(true),
             demux_eof: AtomicBool::new(false),
@@ -325,6 +372,7 @@ impl Player {
             st.video_decoder = d.name.clone();
             st.hardware = d.hardware;
             st.hardware_error = d.hardware_error.clone();
+            st.hardware_holders = d.hardware_holders.clone();
         }
         let mut audio_decoders = Vec::new();
         for i in info.audio_streams().map(|s| s.index) {
@@ -465,6 +513,10 @@ impl Player {
         } else {
             target.max(0.0)
         };
+        *lock(&s.jump) = Some((Instant::now(), true));
+        if let Some(net) = &s.net {
+            net.expect_first_read();
+        }
         s.ctl().seek = Some(SeekRequest { target, precise });
         // Reflect the new position immediately in the UI.
         s.clock.set(target);
@@ -568,7 +620,18 @@ impl Player {
         st.packets_queued = s.vpkts.len() + s.apkts.len();
         st.bytes_queued =
             s.vpkts.bytes.load(Ordering::Relaxed) + s.apkts.bytes.load(Ordering::Relaxed);
+        st.serial = s.serial();
+        let read_to = f64::from_bits(s.read_to.load(Ordering::Relaxed));
+        let target = f64::from_bits(s.read_target.load(Ordering::Relaxed));
+        st.read_ahead = ((read_to - s.clock.now()).max(0.0), target);
+        st.read_enough = s.read_enough.load(Ordering::Relaxed);
+        st.read_to_end = s.demux_eof.load(Ordering::Acquire);
         st
+    }
+
+    /// How reading the file over the network is going, when it is.
+    pub fn net(&self) -> Option<Arc<NetCounters>> {
+        self.shared.net.clone()
     }
 
     /// The frame to display now. Call once per display frame: it advances the
@@ -592,7 +655,20 @@ impl Player {
                     // Start the clock exactly at the first frame shown.
                     s.clock.set(f.pts);
                     *lock(&s.current) = Some(f);
-                    s.stats().frames_shown += 1;
+                    let mut st = s.stats();
+                    st.frames_shown += 1;
+                    if let Some((at, skip)) = lock(&s.jump).take() {
+                        st.last_jump = Some(LastJump {
+                            skip,
+                            picture: at.elapsed(),
+                            first_read: s
+                                .net
+                                .as_ref()
+                                .filter(|_| skip)
+                                .and_then(|n| n.first_read()),
+                        });
+                    }
+                    drop(st);
                     s.frames_cv.notify_all();
                 }
                 s.buffering.store(false, Ordering::Release);
@@ -669,16 +745,41 @@ impl Drop for Player {
     }
 }
 
-/// Whether the demuxer has read far enough ahead for now: `ahead` seconds
-/// and `bytes` of packets queued, `video_packets` of them video.
+/// Seconds played after opening or a skip before the read-ahead grows, so
+/// neither has to compete with a burst of reading.
+const READ_AHEAD_GROWS_AFTER: f64 = 10.0;
+/// Seconds of read-ahead gained per second played: gentle enough to ask for
+/// only half as much again as the video's own rate.
+const READ_AHEAD_GROWTH: f64 = 0.5;
+
+impl PlayerConfig {
+    /// Only a network source grows its read-ahead.
+    fn for_source(mut self, src: &dyn ByteSource) -> PlayerConfig {
+        if !src.remote() {
+            self.remote_read_ahead_secs = self.read_ahead_secs;
+        }
+        self
+    }
+
+    /// Seconds to read ahead, `played` seconds after opening or a skip.
+    fn read_ahead_target(&self, played: f64) -> f64 {
+        let grown = (played - READ_AHEAD_GROWS_AFTER).max(0.0) * READ_AHEAD_GROWTH;
+        (self.read_ahead_secs + grown).min(self.remote_read_ahead_secs)
+    }
+}
+
+/// Whether the demuxer has read far enough ahead for now, aiming for `target`
+/// seconds: `ahead` seconds and `bytes` of packets queued, `video_packets` of
+/// them video.
 fn read_enough(
     cfg: &PlayerConfig,
+    target: f64,
     ahead: f64,
     bytes: usize,
     video_packets: usize,
     audio_starved: bool,
 ) -> bool {
-    let budget = ahead > cfg.read_ahead_secs || bytes > cfg.read_ahead_bytes || video_packets > 600;
+    let budget = ahead > target || bytes > cfg.read_ahead_bytes || video_packets > 600;
     // Starved audio may read past the budget to find its next packets, but
     // only so far: audio that ended early, or lags far behind, would
     // otherwise queue the rest of the video in memory.
@@ -792,6 +893,7 @@ fn demux_thread(
             sh.buffering.store(true, Ordering::Release);
             sh.clock.pause();
             sh.clock.set(req.target);
+            sh.read_to.store(req.target.to_bits(), Ordering::Relaxed);
             first_video_ts = None;
             await_key = Some(req.target + 20.0);
             sh.frames_cv.notify_all();
@@ -802,12 +904,17 @@ fn demux_thread(
             continue;
         }
         // Back-pressure: enough read ahead?
+        let now = sh.clock.now();
         let ahead = first_video_ts
-            .map(|f| last_video_ts - f.max(sh.clock.now()))
+            .map(|f| last_video_ts - f.max(now))
             .unwrap_or(0.0);
+        let target = cfg.read_ahead_target(first_video_ts.map_or(0.0, |f| now - f));
+        sh.read_target.store(target.to_bits(), Ordering::Relaxed);
         let bytes = sh.vpkts.bytes.load(Ordering::Relaxed) + sh.apkts.bytes.load(Ordering::Relaxed);
         let audio_starved = sh.has_audio.load(Ordering::Acquire) && sh.apkts.len() < 4;
-        if read_enough(&cfg, ahead, bytes, sh.vpkts.len(), audio_starved) {
+        let enough = read_enough(&cfg, target, ahead, bytes, sh.vpkts.len(), audio_starved);
+        sh.read_enough.store(enough, Ordering::Relaxed);
+        if enough {
             let c = sh.ctl();
             let _ = sh.ctl_cv.wait_timeout(c, Duration::from_millis(10));
             continue;
@@ -849,6 +956,7 @@ fn demux_thread(
                     if let Some(t) = t {
                         last_video_ts = t;
                         first_video_ts.get_or_insert(t);
+                        sh.read_to.store(t.to_bits(), Ordering::Relaxed);
                     }
                     sh.vpkts.push(serial, Some(pkt.take()));
                 } else if Some(idx) == audio_stream {
@@ -894,6 +1002,7 @@ fn demux_thread(
 fn reopen(restart: &Restart, current: &Input, at: f64, quit: Arc<AtomicBool>) -> Result<Input> {
     let src = restart(at).map_err(Error::Unsupported)?;
     let mut next = Input::open(src, &current.name, quit)?;
+    next.set_frame_sequential(current.frame_sequential());
     next.start_at(at);
     if next.streams().len() != current.streams().len() {
         return Err(Error::Unsupported(format!(
@@ -932,26 +1041,37 @@ fn video_thread(sh: Arc<Shared>, mut dec: Decoder, cap: usize) {
             .as_ref()
             .map(|p| p.as_ptr() as *const ff::AVPacket)
             .unwrap_or(std::ptr::null());
-        // The hardware decoder can fail once running and hand over to
-        // software (Decoder::fall_back): the stats follow.
-        if dec.hardware != hardware {
-            hardware = dec.hardware;
-            let mut st = sh.stats();
-            st.video_decoder = dec.name.clone();
-            st.hardware = dec.hardware;
-            st.hardware_error = dec.hardware_error.clone();
-        }
+        // Nothing follows end of stream, so after an error there nothing
+        // would call the decoder again and the player would wait forever.
+        let end_after_error = || {
+            if pkt_ptr.is_null() && sh.serial() == serial {
+                sh.video_done.store(true, Ordering::Release);
+            }
+        };
         loop {
             let accepted = match dec.send(pkt_ptr) {
                 Ok(a) => a,
                 Err(e) => {
                     log::warn!("video decode: {e}");
+                    end_after_error();
                     true
                 }
             };
             // Drain everything ready.
             loop {
-                match dec.receive(&mut frame) {
+                let received = dec.receive(&mut frame);
+                // The hardware decoder can fail once running and hand over to
+                // software (Decoder::fall_back), after end of stream too: the
+                // stats follow.
+                if dec.hardware != hardware {
+                    hardware = dec.hardware;
+                    let mut st = sh.stats();
+                    st.video_decoder = dec.name.clone();
+                    st.hardware = dec.hardware;
+                    st.hardware_error = dec.hardware_error.clone();
+                    st.hardware_holders = dec.hardware_holders.clone();
+                }
+                match received {
                     Ok(Some(true)) => {
                         let pts = dec.frame_time(&frame).unwrap_or(0.0);
                         let dur = Some(dec.frame_duration(&frame))
@@ -989,6 +1109,7 @@ fn video_thread(sh: Arc<Shared>, mut dec: Decoder, cap: usize) {
                     Ok(None) => break,
                     Err(e) => {
                         log::warn!("video decode: {e}");
+                        end_after_error();
                         break;
                     }
                 }
@@ -1317,13 +1438,87 @@ mod tests {
             read_ahead_bytes: 1000,
             ..cfg()
         };
-        assert!(!read_enough(&cfg, 1.0, 500, 10, false));
-        assert!(read_enough(&cfg, 5.0, 500, 10, false), "time");
-        assert!(read_enough(&cfg, 1.0, 1500, 10, false), "bytes");
+        assert!(!read_enough(&cfg, 4.0, 1.0, 500, 10, false));
+        assert!(read_enough(&cfg, 4.0, 5.0, 500, 10, false), "time");
+        assert!(
+            !read_enough(&cfg, 15.0, 5.0, 500, 10, false),
+            "a grown target"
+        );
+        assert!(read_enough(&cfg, 4.0, 1.0, 1500, 10, false), "bytes");
         // Waiting for audio packets: past the budget, up to four times it.
-        assert!(!read_enough(&cfg, 60.0, 3000, 10, true));
-        assert!(read_enough(&cfg, 60.0, 4001, 10, true));
-        assert!(read_enough(&cfg, 60.0, 100, 2401, true));
+        assert!(!read_enough(&cfg, 4.0, 60.0, 3000, 10, true));
+        assert!(read_enough(&cfg, 4.0, 60.0, 4001, 10, true));
+        assert!(read_enough(&cfg, 4.0, 60.0, 100, 2401, true));
+    }
+
+    struct Remote(Arc<dyn ByteSource>);
+
+    impl ByteSource for Remote {
+        fn size(&self) -> Option<u64> {
+            self.0.size()
+        }
+        fn read_at(&self, offset: u64, buf: &mut [u8]) -> std::io::Result<usize> {
+            self.0.read_at(offset, buf)
+        }
+        fn describe(&self) -> String {
+            self.0.describe()
+        }
+        fn remote(&self) -> bool {
+            true
+        }
+    }
+
+    #[test]
+    fn a_remote_read_ahead_starts_small_and_grows_as_the_video_plays() {
+        let remote = cfg().for_source(&Remote(crate::ts_fixture::h264_aac_ts(0.0)));
+        for (played, want) in [
+            (-1.0, 4.0),
+            (0.0, 4.0),
+            (10.0, 4.0),
+            (12.0, 5.0),
+            (20.0, 9.0),
+            (32.0, 15.0),
+            (600.0, 15.0),
+        ] {
+            assert_eq!(remote.read_ahead_target(played), want, "after {played} s");
+        }
+    }
+
+    #[test]
+    fn a_local_read_ahead_never_grows() {
+        let local = cfg().for_source(&*crate::ts_fixture::h264_aac_ts(0.0));
+        assert_eq!(local.read_ahead_target(0.0), 4.0);
+        assert_eq!(local.read_ahead_target(600.0), 4.0);
+    }
+
+    #[test]
+    fn stats_say_how_far_it_has_read_and_what_opening_and_a_skip_took() {
+        let p = open(
+            "h264_aac_180_LR.mp4",
+            PlayerConfig {
+                start_paused: true,
+                ..cfg()
+            },
+        );
+        run(&p, 3.0, |p, _| p.stats().read_enough);
+        let st = p.stats();
+        let (ahead, target) = st.read_ahead;
+        assert!(ahead > 0.5, "{ahead} s");
+        assert_eq!(target, 4.0);
+        let opened = st.last_jump.expect("the first picture");
+        assert!(!opened.skip);
+        assert!(opened.picture > Duration::ZERO);
+
+        let serial = st.serial;
+        p.seek(1.0, true);
+        assert!(
+            p.stats().last_jump.is_some_and(|j| !j.skip),
+            "until its picture"
+        );
+        run(&p, 3.0, |p, _| p.stats().last_jump.is_some_and(|j| j.skip));
+        let st = p.stats();
+        assert!(st.last_jump.is_some_and(|j| j.skip));
+        assert_ne!(st.serial, serial);
     }
 
     #[test]

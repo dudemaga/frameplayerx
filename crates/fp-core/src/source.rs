@@ -3,6 +3,9 @@
 
 use serde::{Deserialize, Serialize};
 use std::io;
+use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+use std::time::Duration;
 
 /// Random-access read of a remote or local file. The media pipeline wraps
 /// this in an FFmpeg I/O context, so FFmpeg never touches the network.
@@ -22,6 +25,55 @@ pub trait ByteSource: Send + Sync {
     /// reaches.
     fn streamed(&self) -> bool {
         false
+    }
+    /// Read over a network, whose speed can drop at any moment, so a player
+    /// should keep more in hand. A live transcode isn't: it arrives no faster
+    /// than the server encodes.
+    fn remote(&self) -> bool {
+        false
+    }
+    /// How reading it over the network is going; `None` when it isn't read
+    /// through the block cache.
+    fn net(&self) -> Option<Arc<NetCounters>> {
+        None
+    }
+}
+
+/// Running totals of a network file's reads, counted as they happen.
+#[derive(Debug, Default)]
+pub struct NetCounters {
+    /// Bytes received.
+    pub bytes: AtomicU64,
+    /// Requests that failed, and SMB connections made again.
+    pub retries: AtomicU64,
+    awaiting_first_read: AtomicBool,
+    first_read_ms: AtomicU64,
+}
+
+impl NetCounters {
+    /// A skip is starting: the next read at a new place is its first.
+    pub fn expect_first_read(&self) {
+        self.first_read_ms.store(0, Ordering::Relaxed);
+        self.awaiting_first_read.store(true, Ordering::Relaxed);
+    }
+
+    /// Whether a read at a new place is the first one being waited for.
+    pub fn take_first_read(&self) -> bool {
+        self.awaiting_first_read.swap(false, Ordering::Relaxed)
+    }
+
+    pub fn set_first_read(&self, took: Duration) {
+        // 0 means not known, so the quickest read counts as 1 ms.
+        let ms = (took.as_millis() as u64).max(1);
+        self.first_read_ms.store(ms, Ordering::Relaxed);
+    }
+
+    /// How long the last skip's first read took, once it has finished.
+    pub fn first_read(&self) -> Option<Duration> {
+        match self.first_read_ms.load(Ordering::Relaxed) {
+            0 => None,
+            ms => Some(Duration::from_millis(ms)),
+        }
     }
 }
 
@@ -221,6 +273,19 @@ mod tests {
         assert_eq!(&b, b"world");
         assert_eq!(s.read_at(11, &mut b).unwrap(), 0);
         assert_eq!(s.read_at(99, &mut b).unwrap(), 0);
+    }
+
+    #[test]
+    fn a_skip_times_only_its_first_read() {
+        let net = NetCounters::default();
+        assert!(!net.take_first_read(), "nothing to time until a skip");
+        net.set_first_read(Duration::from_millis(40));
+        net.expect_first_read();
+        assert_eq!(net.first_read(), None, "the last skip's is gone");
+        assert!(net.take_first_read());
+        assert!(!net.take_first_read(), "only the first");
+        net.set_first_read(Duration::ZERO);
+        assert_eq!(net.first_read(), Some(Duration::from_millis(1)));
     }
 
     #[test]

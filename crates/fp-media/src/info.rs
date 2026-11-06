@@ -2,6 +2,7 @@
 //! (spherical projection, stereo packing, HDR) that drive the renderer.
 
 use crate::input::Input;
+use crate::nal::Packing;
 use crate::q2d;
 use fp_core::format::{ContainerHints, Projection, StereoLayout};
 use fp_ffmpeg_sys as ff;
@@ -57,6 +58,9 @@ pub struct StreamInfo {
     /// 3D Blu-ray video (H.264 MVC): both eyes decode side by side, so
     /// `width` is twice an eye's.
     pub mvc: bool,
+    /// Frame sequential 3D: each pair of frames decodes side by side, so
+    /// `width` is twice an eye's and `fps` the film's, half the file's.
+    pub frame_sequential: bool,
     // audio
     pub sample_rate: u32,
     pub channels: u32,
@@ -186,16 +190,20 @@ fn spherical(par: &ff::AVCodecParameters) -> Option<Projection> {
     }
 }
 
+/// What the container says about the eyes, in FFmpeg's terms.
+pub(crate) fn stereo3d_side_data(par: &ff::AVCodecParameters) -> Option<&ff::AVStereo3D> {
+    let bytes = side_data(par, ff::AV_PKT_DATA_STEREO3D)?;
+    // SAFETY: size checked; FFmpeg stores an AVStereo3D here.
+    (bytes.len() >= size_of::<ff::AVStereo3D>())
+        .then(|| unsafe { &*(bytes.as_ptr() as *const ff::AVStereo3D) })
+}
+
 /// The stereo layout, and whether the right eye comes first.
 fn stereo3d(
     par: &ff::AVCodecParameters,
     metadata: *mut ff::AVDictionary,
 ) -> Option<(StereoLayout, bool)> {
-    if let Some(bytes) = side_data(par, ff::AV_PKT_DATA_STEREO3D)
-        && bytes.len() >= size_of::<ff::AVStereo3D>()
-    {
-        // SAFETY: size checked; FFmpeg stores an AVStereo3D here.
-        let s = unsafe { &*(bytes.as_ptr() as *const ff::AVStereo3D) };
+    if let Some(s) = stereo3d_side_data(par) {
         let swapped = s.flags & ff::AV_STEREO3D_FLAG_INVERT as i32 != 0;
         match s.type_ {
             ff::AV_STEREO3D_SIDEBYSIDE | ff::AV_STEREO3D_SIDEBYSIDE_QUINCUNX => {
@@ -313,6 +321,7 @@ pub fn read_info(input: &Input) -> MediaInfo {
             rotation: 0,
             pixel_aspect: 1.0,
             mvc: false,
+            frame_sequential: false,
             sample_rate: 0,
             channels: 0,
             ambisonic: false,
@@ -348,11 +357,26 @@ pub fn read_info(input: &Input) -> MediaInfo {
                     hints.stereo = Some(StereoLayout::SideBySide);
                     hints.eyes_swapped =
                         dict_get(st.metadata, "stereo_mode").as_deref() == Some("block_rl");
-                } else if hints.stereo.is_none()
-                    && let Some((stereo, swapped)) = stereo3d(par, st.metadata)
-                {
-                    hints.stereo = Some(stereo);
-                    hints.eyes_swapped = swapped;
+                } else {
+                    if crate::frame_seq::stream(input, index).is_some() {
+                        s.frame_sequential = true;
+                        s.width *= 2;
+                        s.fps /= 2.0;
+                    }
+                    if let Some(right_first) = crate::frame_seq::labelled(input, index) {
+                        hints.stereo = Some(StereoLayout::FrameSequential);
+                        hints.eyes_swapped = right_first;
+                    } else if hints.stereo.is_none()
+                        && let Some((stereo, swapped)) = stereo3d(par, st.metadata).or_else(|| {
+                            match input.frame_packing(index) {
+                                Some((Packing::Layout(layout), swapped)) => Some((layout, swapped)),
+                                _ => None,
+                            }
+                        })
+                    {
+                        hints.stereo = Some(stereo);
+                        hints.eyes_swapped = swapped;
+                    }
                 }
             }
             StreamKind::Audio => {
@@ -416,7 +440,7 @@ pub(crate) mod tests {
     use std::sync::Arc;
     use std::sync::atomic::AtomicBool;
 
-    fn fixture(name: &str) -> std::path::PathBuf {
+    pub(crate) fn fixture(name: &str) -> std::path::PathBuf {
         std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
             .join("tests/data")
             .join(name)
@@ -459,6 +483,13 @@ pub(crate) mod tests {
     /// h264_aac_180_LR.mp4 with 4:3 pixels (its `pasp` box).
     pub(crate) fn anamorphic_clip() -> Arc<MemorySource> {
         let pasp: Vec<u8> = [4u32, 3].iter().flat_map(|v| v.to_be_bytes()).collect();
+        patched("h264_aac_180_LR.mp4", b"pasp", 4, &pasp)
+    }
+
+    /// h264_aac_180_LR.mp4, two 320x320 eyes side by side, marked 1:2 as
+    /// some full side-by-side re-encodes are.
+    pub(crate) fn side_by_side_marked_1_2_clip() -> Arc<MemorySource> {
+        let pasp: Vec<u8> = [1u32, 2].iter().flat_map(|v| v.to_be_bytes()).collect();
         patched("h264_aac_180_LR.mp4", b"pasp", 4, &pasp)
     }
 
@@ -564,6 +595,13 @@ pub(crate) mod tests {
         assert_eq!(info.hints.projection, Some(Projection::EQUIRECT_180));
         let d = fp_core::format::resolve(None, info.hints, "camera_clip.mp4", 256, 128);
         assert_eq!(d.evidence, fp_core::format::Evidence::Metadata);
+    }
+
+    #[test]
+    fn a_3d_layout_stated_only_in_the_video_stream_is_read() {
+        let hints = read_info(&open("h264_sei_sbs.mp4")).hints;
+        assert_eq!(hints.stereo, Some(StereoLayout::SideBySide));
+        assert!(!hints.eyes_swapped);
     }
 
     #[test]

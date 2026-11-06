@@ -302,56 +302,26 @@ fn status_toast(ctx: &egui::Context, v: &mut View) {
     if toast.is_none() && err.is_none() && opening.is_none() {
         return;
     }
-    egui::Area::new(egui::Id::new("status"))
-        .anchor(Align2::CENTER_BOTTOM, Vec2::new(0.0, -24.0))
-        .order(egui::Order::Foreground)
-        .show(ctx, |ui| {
-            egui::Frame::new()
-                .fill(theme::SURFACE_3)
-                .corner_radius(26)
-                .inner_margin(egui::Margin::symmetric(20, 10))
-                .shadow(egui::Shadow {
-                    offset: [0, 8],
-                    blur: 24,
-                    spread: 0,
-                    color: Color32::from_black_alpha(150),
-                })
-                .show(ui, |ui| {
-                    ui.horizontal(|ui| {
-                        ui.set_min_height(32.0);
-                        if let Some(o) = opening {
-                            ui.spinner();
-                            let title = widgets::display_title(&o);
-                            ui.label(tr!("library-opening", title = title));
-                        } else if let Some(e) = err {
-                            ui.label(
-                                RichText::new(icons::WARNING_CIRCLE)
-                                    .font(theme::icon(22.0))
-                                    .color(theme::ERROR),
-                            );
-                            ui.label(tr!("library-could-not-open", error = e.as_str()));
-                            if widgets::button_sized(
-                                ui,
-                                None,
-                                tr!("library-dismiss"),
-                                Kind::Ghost,
-                                36.0,
-                            )
-                            .clicked()
-                            {
-                                v.state.open_error = None;
-                            }
-                        } else if let Some(t) = toast {
-                            ui.label(
-                                RichText::new(icons::INFO)
-                                    .font(theme::icon(22.0))
-                                    .color(theme::ACCENT_HOVER),
-                            );
-                            ui.label(t);
-                        }
-                    });
-                });
-        });
+    widgets::status_pill(ctx, Align2::CENTER_BOTTOM, Vec2::new(0.0, -24.0), |ui| {
+        if let Some(o) = opening {
+            ui.spinner();
+            let title = widgets::display_title(&o);
+            ui.label(tr!("library-opening", title = title));
+        } else if let Some(e) = err {
+            ui.label(
+                RichText::new(icons::WARNING_CIRCLE)
+                    .font(theme::icon(22.0))
+                    .color(theme::ERROR),
+            );
+            ui.label(tr!("library-could-not-open", error = e.as_str()));
+            if widgets::button_sized(ui, None, tr!("library-dismiss"), Kind::Ghost, 36.0).clicked()
+            {
+                v.state.open_error = None;
+            }
+        } else if let Some(t) = toast {
+            widgets::toast_line(ui, &t);
+        }
+    });
 }
 
 pub(crate) fn request(r: &MediaRecord) -> OpenRequest {
@@ -460,13 +430,13 @@ fn hero(ui: &mut egui::Ui, v: &mut View, rows: &HomeRows) {
     let resp = page::banner(ui, v.thumbs, key.as_deref(), 300.0, |inner| {
         inner.add_space(22.0);
         widgets::section_label(inner, caption);
-        inner.add(
-            egui::Label::new(
-                RichText::new(widgets::display_title(&r.title))
-                    .font(theme::font(Weight::Bold, 42.0))
-                    .color(Color32::WHITE),
-            )
-            .truncate(),
+        let room = inner.available_width();
+        widgets::title_line(
+            inner,
+            &widgets::display_title(&r.title),
+            theme::font(Weight::Bold, 42.0),
+            Color32::WHITE,
+            room,
         );
         let mut line = facts(r, v.settings.default_format);
         if resume && r.resume_position > 1.0 {
@@ -744,6 +714,9 @@ fn history(ui: &mut egui::Ui, v: &mut View) {
     v.state.history = g;
 }
 
+/// The size of a video's picture on its details page.
+const DETAILS_PICTURE: Vec2 = Vec2::new(512.0, 288.0);
+
 fn details(ui: &mut egui::Ui, v: &mut View, id: fp_library::MediaId) {
     let Some(r) = v.services.library.get(id).ok().flatten() else {
         v.state.details = None;
@@ -761,7 +734,7 @@ fn details(ui: &mut egui::Ui, v: &mut View, id: fp_library::MediaId) {
             ui.add_space(12.0);
             ui.horizontal_top(|ui| {
                 ui.spacing_mut().item_spacing.x = 28.0;
-                let (rect, _) = ui.allocate_exact_size(Vec2::new(512.0, 288.0), Sense::hover());
+                let (rect, _) = ui.allocate_exact_size(DETAILS_PICTURE, Sense::hover());
                 widgets::shadow(ui.painter(), rect, 16, 0.6);
                 let key = r.picture();
                 page::picture(ui, v.thumbs, key.as_deref(), rect, 16, icons::FILM_STRIP);
@@ -776,45 +749,28 @@ fn details(ui: &mut egui::Ui, v: &mut View, id: fp_library::MediaId) {
                 );
             }
             ui.add_space(28.0);
-            widgets::section_label(ui, tr!("adjust-format"));
-            ui.add_space(2.0);
-            let fmt = shown_format(&r, v.settings.default_format);
-            ui.label(
-                RichText::new(tr!(
-                    "adjust-detected",
-                    format = super::format_label(&fmt.format),
-                    evidence = super::evidence_label(fmt.evidence)
-                ))
-                .color(theme::TEXT_2),
+            let shown = shown_format(&r, v.settings.default_format);
+            let format = tr!(
+                "library-format-value",
+                format = super::format_label(&shown.format),
+                evidence = super::evidence_label(shown.evidence)
             );
-            ui.add_space(6.0);
-            ui.horizontal_wrapped(|ui| {
-                ui.spacing_mut().item_spacing = Vec2::new(8.0, 8.0);
-                let current = r.user_format;
-                if widgets::chip_icon(
-                    ui,
-                    Some(icons::MAGIC_WAND),
-                    tr!("adjust-format-automatic"),
-                    current.is_none(),
-                )
-                .clicked()
-                {
-                    v.actions.push(Action::SetUserFormat(r.id, None));
-                }
-                for f in super::player::format_choices() {
-                    if widgets::chip(ui, f.0, current == Some(f.1)).clicked() {
-                        v.actions.push(Action::SetUserFormat(r.id, Some(f.1)));
+            let location = crate::libraries::display_location(&r.location);
+            widgets::rows(ui, |rows| {
+                rows.row(tr!("adjust-format"), Some(&format), |ui| {
+                    if widgets::button(
+                        ui,
+                        Some(icons::SLIDERS_HORIZONTAL),
+                        tr!("common-change"),
+                        Kind::Secondary,
+                    )
+                    .clicked()
+                    {
+                        v.state.format_drawer = Some(r.id);
                     }
-                }
+                });
+                rows.row(tr!("library-file"), Some(&location), |_| {});
             });
-            ui.add_space(26.0);
-            widgets::section_label(ui, tr!("library-file"));
-            ui.add_space(2.0);
-            ui.label(
-                RichText::new(crate::libraries::display_location(&r.location))
-                    .font(theme::font(Weight::Regular, 15.0))
-                    .color(theme::TEXT_3),
-            );
             if r.last_played.is_some() {
                 ui.add_space(12.0);
                 if widgets::button(
@@ -831,6 +787,39 @@ fn details(ui: &mut egui::Ui, v: &mut View, id: fp_library::MediaId) {
             }
             ui.add_space(24.0);
         });
+    let mut open = v.state.format_drawer == Some(r.id);
+    if open {
+        // Wide enough for each row of formats on one line.
+        let width = super::player::format_list_width(ui, true) + page::DRAWER_MARGIN;
+        page::drawer(
+            ui,
+            "format",
+            width,
+            &mut open,
+            tr!("adjust-format"),
+            |_| {},
+            |ui| {
+                ui.add_space(8.0);
+                // As detected, whatever was picked: what Automatic plays.
+                let mut detected = r.detected;
+                if detected.evidence == Evidence::Default {
+                    detected.format = v.settings.default_format;
+                }
+                if super::player::automatic_row(ui, Some(r.user_format.is_none()), &detected) {
+                    v.actions.push(Action::SetUserFormat(r.id, None));
+                }
+                let current = r.user_format.unwrap_or(detected.format);
+                let fisheye = v.settings.fisheye_start;
+                if let Some(f) = super::player::format_list(ui, &current, true, fisheye) {
+                    v.actions.push(Action::SetUserFormat(r.id, Some(f)));
+                }
+            },
+            "",
+        );
+        if !open {
+            v.state.format_drawer = None;
+        }
+    }
 }
 
 /// Title, facts, actions and rating beside the details thumbnail.

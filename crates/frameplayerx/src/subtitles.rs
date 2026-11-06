@@ -1,7 +1,7 @@
 //! Which subtitles a video starts with, and how its tracks are named.
 
 use crate::settings::SubtitleMode;
-use fp_core::format::StereoLayout;
+use fp_core::format::{StereoLayout, VideoFormat};
 use fp_core::language::Tag;
 use fp_core::source::SubtitleFile;
 use fp_library::PickedSubtitles;
@@ -342,13 +342,26 @@ pub struct StereoSubs {
 }
 
 impl StereoSubs {
+    /// How a 3D video's picture subtitles are drawn. A 3D Blu-ray's or frame
+    /// sequential video's are made for one eye's picture, not the two side by
+    /// side it's decoded into, so they're drawn like a 2D video's, for both
+    /// eyes.
+    pub fn of(video: &StreamInfo, format: &VideoFormat, swap_eyes: bool) -> Option<StereoSubs> {
+        let paired = video.mvc || video.frame_sequential;
+        (format.stereo.is_stereo() && !paired).then_some(StereoSubs {
+            layout: format.stereo,
+            canvas: (video.width, video.height),
+            swap_eyes: format.eyes_swapped ^ swap_eyes,
+        })
+    }
+
     /// The size of an eye's half of the frame, and how many times wider and
     /// taller it shows (a half side-by-side eye is squeezed to half width).
     pub fn half(&self) -> ((u32, u32), (f32, f32)) {
         let (w, h) = self.canvas;
         match self.layout {
             StereoLayout::Mono => ((w, h), (1.0, 1.0)),
-            StereoLayout::SideBySide => ((w / 2, h), (1.0, 1.0)),
+            StereoLayout::SideBySide | StereoLayout::FrameSequential => ((w / 2, h), (1.0, 1.0)),
             StereoLayout::HalfSideBySide => ((w / 2, h), (2.0, 1.0)),
             StereoLayout::TopBottom => ((w, h / 2), (1.0, 1.0)),
             StereoLayout::HalfTopBottom => ((w, h / 2), (1.0, 2.0)),
@@ -361,7 +374,9 @@ impl StereoSubs {
         let ((hw, hh), _) = self.half();
         let half = (eye ^ self.swap_eyes as usize) as i32;
         let (x0, y0) = match self.layout {
-            StereoLayout::SideBySide | StereoLayout::HalfSideBySide => (half * hw as i32, 0),
+            StereoLayout::SideBySide
+            | StereoLayout::HalfSideBySide
+            | StereoLayout::FrameSequential => (half * hw as i32, 0),
             StereoLayout::TopBottom | StereoLayout::HalfTopBottom => (0, half * hh as i32),
             StereoLayout::Mono => (0, 0),
         };
@@ -413,6 +428,7 @@ mod tests {
             rotation: 0,
             pixel_aspect: 1.0,
             mvc: false,
+            frame_sequential: false,
             sample_rate: 0,
             channels: 0,
             ambisonic: false,
@@ -693,6 +709,23 @@ mod tests {
             height,
             rgba,
         }
+    }
+
+    #[test]
+    fn a_3d_blu_rays_pictures_are_for_both_eyes() {
+        use fp_core::format::Projection;
+        let format = VideoFormat::new(Projection::Flat, StereoLayout::SideBySide);
+        let mut video = stream(0, StreamKind::Video, None);
+        (video.width, video.height) = (3840, 1080);
+        assert!(StereoSubs::of(&video, &format, false).is_some());
+        video.mvc = true;
+        assert_eq!(StereoSubs::of(&video, &format, false), None);
+        video.mvc = false;
+        video.frame_sequential = true;
+        assert_eq!(StereoSubs::of(&video, &format, false), None);
+        video.frame_sequential = false;
+        let mono = VideoFormat::new(Projection::Flat, StereoLayout::Mono);
+        assert_eq!(StereoSubs::of(&video, &mono, false), None);
     }
 
     #[test]

@@ -3,9 +3,11 @@
 //! FFmpeg's `*_v4l2m2m` wrappers cannot open large streams on the Steam
 //! Frame: the qcom iris driver's admission check (`check_core_mbps_mbpf`)
 //! multiplies the *new* session's macroblocks per frame by the number of
-//! open decoder instances, Steam's own `vrlink` among them, so an 8192x4096
-//! stream fails `VIDIOC_REQBUFS` with `ENOMEM` as soon as one other instance
-//! exists, although the hardware decodes it at well over 60 fps.
+//! open instances, idle ones and encoders too (Steam's own `vrlink` and its
+//! recording among them), so an 8192x4096 stream fails `VIDIOC_REQBUFS` with
+//! `ENOMEM` as soon as one other instance exists, although the hardware
+//! decodes it at well over 60 fps. Past [`MAX_SESSION_MACROBLOCKS`] it fails
+//! with nothing else open.
 //!
 //! This decoder drives the device directly and works around the check:
 //!
@@ -49,6 +51,11 @@ pub(crate) const HEIGHT_STEP: u32 = 32;
 /// The smallest declared OUTPUT height worth trying: below this the
 /// bitstream buffers get too small for large streams' packets.
 pub(crate) const MIN_DECLARED_HEIGHT: u32 = 512;
+/// What the admission check takes for one session, whatever else is open
+/// (8192x4320, measured on the Frame).
+pub(crate) const MAX_SESSION_MACROBLOCKS: u64 = 138_240;
+/// What it takes for the new session's macroblocks times the sessions open.
+pub(crate) const MAX_CORE_MACROBLOCKS: u64 = 261_120;
 
 /// Codecs this decoder handles.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -144,16 +151,129 @@ pub(crate) fn primer_matches(stream: (u32, u32), primer: (u32, u32)) -> bool {
         && macroblocks(primer.0, primer.1) < macroblocks(stream.0, stream.1)
 }
 
+/// Whether the admission check takes a stream beside `others` other sessions:
+/// as it is or, when it has a `primer`, at the largest aligned height up to
+/// the primer's.
+pub(crate) fn fits_beside(stream: (u32, u32), primer: Option<(u32, u32)>, others: u64) -> bool {
+    let admits = |w, h| {
+        let mb = macroblocks(w, h);
+        mb <= MAX_SESSION_MACROBLOCKS && (others + 1) * mb <= MAX_CORE_MACROBLOCKS
+    };
+    admits(stream.0, stream.1)
+        || primer.is_some_and(|p| admits(p.0, p.1 / HEIGHT_STEP * HEIGHT_STEP))
+}
+
+/// A program with sessions open on the driver, and on which of its devices.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) struct Holder {
+    pub name: String,
+    pub decoder: u64,
+    pub encoder: u64,
+}
+
+impl Holder {
+    fn sessions(&self) -> u64 {
+        self.decoder + self.encoder
+    }
+}
+
+/// Pictures in a row the decoder may flag as broken before it counts as
+/// failed. A seek can leave a few leading pictures it can't decode; a stream
+/// the hardware misreads has every picture flagged.
+pub(crate) const MAX_BROKEN_PICTURES: u32 = 48;
+
+/// The part of a packet to rotate right by `extradata.len()` so the
+/// parameter sets `hevc_mp4toannexb` copied in from the hvcC (`extradata`,
+/// Annex B) go ahead of the VPS, SPS and PPS the packet carries itself,
+/// and those are the ones the decoder ends up with. `None` when nothing
+/// needs to move.
+///
+/// The filter inserts the hvcC's right before a packet's first IRAP
+/// picture, after any in-band ones, whether or not the packet is flagged
+/// as a keyframe. Software decoders read the hvcC once,
+/// so in-band parameter sets replace it, and a file whose hvcC doesn't
+/// match its pictures (some Matroska re-encodes) plays everywhere else; the
+/// Frame's decoder takes the stale copy and flags every picture as broken.
+pub(crate) fn hvcc_copy_after_own(data: &[u8], extradata: &[u8]) -> Option<std::ops::Range<usize>> {
+    if extradata.is_empty() {
+        return None;
+    }
+    // From start code to start code, reading only each unit's header, up
+    // to the first picture: the rest is the bulk of the packet, and only an
+    // IRAP picture gets the hvcC's copy.
+    let (mut own, mut at) = (None, 0);
+    let irap = loop {
+        let code = at + crate::nal::start_code(&data[at..])?;
+        let begin = if code > 0 && data[code - 1] == 0 {
+            code - 1
+        } else {
+            code
+        };
+        match (data.get(code + 3)? >> 1) & 0x3f {
+            16..=23 => break begin,
+            0..=15 | 24..=31 => return None,
+            32..=34 => own = own.or(Some(begin)),
+            _ => {}
+        }
+        at = code + 3;
+    };
+    let inserted = irap
+        .checked_sub(extradata.len())
+        .filter(|&at| data[at..irap] == *extradata)?;
+    let own = own.filter(|&own| own < inserted)?;
+    // Most files repeat the hvcC's own parameter sets: nothing to move.
+    (data[own..inserted] != *extradata).then_some(own..irap)
+}
+
 /// The error for a stream of size `stream` the admission check refuses,
 /// `admitted` being the largest height it takes at that width beside the
-/// sessions open, if any.
-pub(crate) fn refused(stream: (u32, u32), ten_bit: bool, admitted: Option<u32>) -> crate::Error {
+/// `holders`' sessions, if any.
+pub(crate) fn refused(
+    stream: (u32, u32),
+    ten_bit: bool,
+    admitted: Option<u32>,
+    primer: Option<(u32, u32)>,
+    holders: &[Holder],
+) -> crate::Error {
     let (w, h) = stream;
     let depth = if ten_bit { " 10-bit" } else { "" };
-    crate::Error::HardwareBusy(match admitted {
-        Some(c) => format!("other video sessions leave room for {w}x{c}, not {w}x{h}{depth}"),
-        None => "no room for another video session".into(),
-    })
+    if macroblocks(w, h) > MAX_SESSION_MACROBLOCKS {
+        return crate::Error::HardwareTooBig(format!(
+            "{w}x{h}{depth}, even with nothing else open"
+        ));
+    }
+    let names = holders
+        .iter()
+        .map(|p| match p.sessions() {
+            1 => p.name.clone(),
+            n => format!("{} x{n}", p.name),
+        })
+        .collect::<Vec<_>>()
+        .join(", ");
+    let message = match (names.is_empty(), admitted) {
+        (true, Some(c)) => {
+            format!("other video sessions leave room for {w}x{c}, not {w}x{h}{depth}")
+        }
+        (true, None) => "no room for another video session".into(),
+        (false, Some(c)) => {
+            format!("held by {names}, leaving room for {w}x{c}, not {w}x{h}{depth}")
+        }
+        (false, None) => format!("held by {names}, leaving no room for another video session"),
+    };
+    let sessions: u64 = holders.iter().map(Holder::sessions).sum();
+    let steam_encoder: u64 = holders
+        .iter()
+        .filter(|p| p.name == "steam")
+        .map(|p| p.encoder)
+        .sum();
+    crate::Error::HardwareBusy(
+        message,
+        crate::SessionHolders {
+            programs: holders.iter().map(|p| p.name.clone()).collect(),
+            recording_blocks: steam_encoder > 0
+                && fits_beside(stream, primer, sessions - steam_encoder),
+        },
+    )
 }
 
 /// Whether CAPTURE buffers already allocated can serve the new stream format
@@ -618,6 +738,7 @@ mod linux {
     use std::collections::VecDeque;
     use std::ffi::c_void;
     use std::os::fd::{AsRawFd, FromRawFd, OwnedFd};
+    use std::path::Path;
     use std::sync::Arc;
     use std::sync::atomic::{AtomicBool, Ordering};
     use std::time::{Duration, Instant};
@@ -758,6 +879,14 @@ mod linux {
         /// The primer trick is active (declared OUTPUT size was lowered).
         primed: bool,
         bsf: *mut ff::AVBSFContext,
+        /// The parameter sets the filter inserts before IRAP pictures when it
+        /// converts an hvcC (Annex B), else empty.
+        hvcc_parameter_sets: Vec<u8>,
+        /// IRAP pictures with parameter sets unlike the hvcC's were seen
+        /// (logged).
+        in_band_parameter_sets: bool,
+        /// CAPTURE buffers flagged as broken since the last good picture.
+        broken_in_a_row: u32,
         out_free: Vec<u32>,
         /// Filtered packets waiting for a free OUTPUT buffer, with their ids.
         pending: VecDeque<(Packet, u64)>,
@@ -894,6 +1023,64 @@ mod linux {
         )))
     }
 
+    /// The other programs with the driver's `decoder` or `encoder` open, from
+    /// `/proc`. Another user's processes can't be read and are left out.
+    pub(super) fn session_holders(decoder: &Path, encoder: &Path) -> Vec<Holder> {
+        let me = std::process::id().to_string();
+        let mut holders: Vec<Holder> = Vec::new();
+        let Ok(procs) = std::fs::read_dir("/proc") else {
+            return holders;
+        };
+        for process in procs.flatten() {
+            let pid = process.file_name();
+            let pid = pid.to_string_lossy();
+            if pid == me || !pid.bytes().all(|b| b.is_ascii_digit()) {
+                continue;
+            }
+            let Ok(fds) = std::fs::read_dir(process.path().join("fd")) else {
+                continue;
+            };
+            let (mut on_decoder, mut on_encoder) = (0, 0);
+            for fd in fds.flatten() {
+                match std::fs::read_link(fd.path()) {
+                    Ok(target) if target == decoder => on_decoder += 1,
+                    Ok(target) if target == encoder => on_encoder += 1,
+                    _ => {}
+                }
+            }
+            if on_decoder + on_encoder == 0 {
+                continue;
+            }
+            let name = program_name(&process.path());
+            match holders.iter_mut().find(|h| h.name == name) {
+                Some(h) => {
+                    h.decoder += on_decoder;
+                    h.encoder += on_encoder;
+                }
+                None => holders.push(Holder {
+                    name,
+                    decoder: on_decoder,
+                    encoder: on_encoder,
+                }),
+            }
+        }
+        holders.sort_by(|a, b| a.name.cmp(&b.name));
+        holders
+    }
+
+    /// The executable's file name, else the process's own name for itself.
+    fn program_name(process: &Path) -> String {
+        std::fs::read_link(process.join("exe"))
+            .ok()
+            .and_then(|exe| {
+                let name = exe.file_name()?.to_string_lossy();
+                Some(name.trim_end_matches(" (deleted)").to_string())
+            })
+            .or_else(|| std::fs::read_to_string(process.join("comm")).ok())
+            .map(|name| name.trim().to_string())
+            .unwrap_or_default()
+    }
+
     impl V4l2Decoder {
         /// Opens the device and configures the bitstream queue. CAPTURE is
         /// set up later, when the decoder reports the stream's format.
@@ -944,6 +1131,9 @@ mod linux {
                 pixelformat,
                 primed: false,
                 bsf: std::ptr::null_mut(),
+                hvcc_parameter_sets: Vec::new(),
+                in_band_parameter_sets: false,
+                broken_in_a_row: 0,
                 out_free: Vec::new(),
                 pending: VecDeque::new(),
                 ts: Timestamps::default(),
@@ -1014,7 +1204,44 @@ mod linux {
                 (*self.bsf).time_base_in = time_base;
                 crate::check(ff::av_bsf_init(self.bsf), "bsf init")?;
             }
+            if self.codec != Codec::Hevc {
+                return Ok(());
+            }
+            // SAFETY: par, the filter and its par_out are null or valid; each
+            // extradata holds extradata_size bytes.
+            unsafe {
+                let (Some(p), Some(out)) = (
+                    par.as_ref(),
+                    self.bsf.as_ref().and_then(|b| b.par_out.as_ref()),
+                ) else {
+                    return Ok(());
+                };
+                if p.extradata.is_null() || p.extradata_size < 3 || out.extradata.is_null() {
+                    return Ok(());
+                }
+                let ext = std::slice::from_raw_parts(p.extradata, p.extradata_size as usize);
+                // Annex B extradata (MPEG-TS) passes through unchanged; an
+                // hvcC comes out as the parameter sets the filter inserts.
+                if !ext.starts_with(&[0, 0, 1]) && !ext.starts_with(&[0, 0, 0, 1]) {
+                    self.hvcc_parameter_sets = std::slice::from_raw_parts(
+                        out.extradata,
+                        out.extradata_size.max(0) as usize,
+                    )
+                    .to_vec();
+                }
+            }
             Ok(())
+        }
+
+        /// The decoder flagged too many pictures in a row as broken: it
+        /// can't decode this stream, however it is fed.
+        pub(crate) fn pictures_broken(&self) -> bool {
+            self.broken_in_a_row >= MAX_BROKEN_PICTURES
+        }
+
+        /// End of stream was sent (until a flush).
+        pub(crate) fn ended(&self) -> bool {
+            self.eos_input
         }
 
         /// S_FMT + REQBUFS on the OUTPUT queue with the declared size.
@@ -1035,9 +1262,24 @@ mod linux {
             Ok(r.count)
         }
 
-        /// [`refused`], logging the driver's error.
-        fn busy(&self, admitted: Option<u32>, e: &std::io::Error) -> Error {
-            let refused = refused(self.stream_size, self.pixelformat == Q10C, admitted);
+        /// [`refused`], with who holds the driver, logging the driver's error.
+        fn busy(
+            &self,
+            admitted: Option<u32>,
+            primer: Option<(u32, u32)>,
+            e: &std::io::Error,
+        ) -> Error {
+            let holders = session_holders(
+                &std::fs::canonicalize(&self.device).unwrap_or_default(),
+                &std::fs::canonicalize("/dev/video-enc0").unwrap_or_default(),
+            );
+            let refused = refused(
+                self.stream_size,
+                self.pixelformat == Q10C,
+                admitted,
+                primer,
+                &holders,
+            );
             log::info!("V4L2 REQBUFS output: {e}; {refused}");
             refused
         }
@@ -1077,7 +1319,7 @@ mod linux {
                     let Some(capped) =
                         admitted.filter(|&c| primer.is_some_and(|p| c + HEIGHT_STEP > p.1))
                     else {
-                        return Err(self.busy(admitted, &e));
+                        return Err(self.busy(admitted, primer, &e));
                     };
                     log::info!(
                         "V4L2 {w}x{h} refused by the driver's admission check ({e}); \
@@ -1190,6 +1432,32 @@ mod linux {
                 if size <= 0 {
                     // V4L2 would read an empty OUTPUT buffer as a full one.
                     continue;
+                }
+                if !self.hvcc_parameter_sets.is_empty() {
+                    let sets = &self.hvcc_parameter_sets;
+                    // SAFETY: the filter's packet holds size bytes at data.
+                    let moved = unsafe {
+                        let p = &*out.as_ptr();
+                        hvcc_copy_after_own(std::slice::from_raw_parts(p.data, size as usize), sets)
+                    };
+                    if let Some(range) = moved {
+                        // SAFETY: a writable packet holds size bytes at data.
+                        unsafe {
+                            crate::check(
+                                ff::av_packet_make_writable(out.as_ptr()),
+                                "packet writable",
+                            )?;
+                            let p = &*out.as_ptr();
+                            std::slice::from_raw_parts_mut(p.data, size as usize)[range]
+                                .rotate_right(sets.len());
+                        }
+                        if !self.in_band_parameter_sets {
+                            self.in_band_parameter_sets = true;
+                            log::info!(
+                                "V4L2: IRAP pictures carry parameter sets unlike the hvcC's; theirs go last"
+                            );
+                        }
+                    }
                 }
                 let pts = if pts == ff::AV_NOPTS_VALUE { dts } else { pts };
                 if self.arm_floor {
@@ -1573,6 +1841,16 @@ mod linux {
                 if let Some(d) = self.dequeue_capture()? {
                     idle_since = None;
                     let last = d.flags & BUF_FLAG_LAST != 0;
+                    // Broken pictures keep coming, so the stall check never
+                    // fires: count them, but not the primer's or those from
+                    // before a seek.
+                    if self.ts.get(d.id).is_some() {
+                        if d.flags & BUF_FLAG_ERROR != 0 {
+                            self.broken_in_a_row += 1;
+                        } else if d.bytesused > 0 {
+                            self.broken_in_a_row = 0;
+                        }
+                    }
                     let timing = self.ts.get(d.id).filter(|&(pts, duration)| {
                         d.bytesused > 0
                             && d.flags & BUF_FLAG_ERROR == 0
@@ -1590,6 +1868,11 @@ mod linux {
                         self.last_seen = true;
                     } else {
                         self.queue_capture(d.index)?;
+                    }
+                    if self.pictures_broken() {
+                        return Err(Error::Unsupported(format!(
+                            "V4L2 decoder flagged {MAX_BROKEN_PICTURES} pictures in a row as broken"
+                        )));
                     }
                     match result {
                         Some(r) => {
@@ -1656,6 +1939,7 @@ mod linux {
             self.ts.invalidate();
             self.pts_floor = None;
             self.arm_floor = true;
+            self.broken_in_a_row = 0;
             if !self.stop_sent || self.drc_pending {
                 // Mid-stream (a pending resolution change is handled by the
                 // next receive): nothing to restart.
@@ -1703,9 +1987,52 @@ mod tests {
     use super::*;
 
     /// The iris driver's check: every open instance counts with the new
-    /// session's macroblocks.
+    /// session's macroblocks, and one session has a limit of its own.
     fn iris_admits(instances: u64, width: u32) -> impl Fn(u32) -> bool {
-        move |h| instances * macroblocks(width, h) <= 261_120
+        move |h| {
+            let mb = macroblocks(width, h);
+            mb <= MAX_SESSION_MACROBLOCKS && instances * mb <= MAX_CORE_MACROBLOCKS
+        }
+    }
+
+    fn holder(name: &str, decoder: u64, encoder: u64) -> Holder {
+        Holder {
+            name: name.into(),
+            decoder,
+            encoder,
+        }
+    }
+
+    /// `refused`'s text and who it found, panicking if it says too big.
+    fn busy(e: crate::Error) -> (String, crate::SessionHolders) {
+        let text = e.to_string();
+        match e {
+            crate::Error::HardwareBusy(_, holders) => (text, holders),
+            e => panic!("not busy: {e}"),
+        }
+    }
+
+    #[test]
+    fn the_model_matches_what_the_frame_admits() {
+        // Tallest admitted by other sessions open (0 to 3), measured with
+        // S_FMT and REQBUFS on OUTPUT.
+        let measured: [(u32, [u32; 4]); 5] = [
+            (8192, [4320, 4064, 2720, 2016]),
+            (7680, [4608, 4352, 2880, 2176]),
+            (7200, [4896, 4640, 3072, 2304]),
+            (6144, [5760, 5440, 3616, 2720]),
+            (5760, [6144, 5792, 3840, 2880]),
+        ];
+        for (width, tallest) in measured {
+            for (others, want) in tallest.into_iter().enumerate() {
+                let fits = iris_admits(others as u64 + 1, width);
+                assert_eq!(
+                    capped_height(8192, 512, fits),
+                    Some(want),
+                    "{width} wide beside {others}"
+                );
+            }
+        }
     }
 
     #[test]
@@ -1737,27 +2064,170 @@ mod tests {
 
     #[test]
     fn a_refused_stream_says_how_much_room_was_left() {
-        // 10-bit 8K gets no primer: beside Steam's vrlink it is refused.
+        // 10-bit 8K gets no primer: beside one other session it is refused.
         let admitted = capped_height(4096, 512, iris_admits(2, 8192));
         assert_eq!(
-            refused((8192, 4096), true, admitted).to_string(),
+            refused((8192, 4096), true, admitted, None, &[]).to_string(),
             "hardware decoder busy: other video sessions leave room for 8192x4064, \
              not 8192x4096 10-bit"
         );
-        // Nor does 6K top-bottom, 8-bit or not; 8K UHD and 5.7K top-bottom
-        // fit as they are.
-        assert!(!primer_matches((6144, 6144), (8192, 4080)));
-        let admitted = capped_height(6144, 512, iris_admits(2, 6144));
-        assert_eq!(
-            refused((6144, 6144), false, admitted).to_string(),
-            "hardware decoder busy: other video sessions leave room for 6144x5440, \
-             not 6144x6144"
-        );
         assert!(iris_admits(2, 7680)(4320) && iris_admits(2, 5760)(5760));
         assert_eq!(
-            refused((8192, 4096), false, None).to_string(),
+            refused((8192, 4096), false, None, None, &[]).to_string(),
             "hardware decoder busy: no room for another video session"
         );
+    }
+
+    #[test]
+    fn a_refused_stream_names_who_holds_the_driver() {
+        let holders = [holder("steam", 0, 1), holder("steamwebhelper", 2, 0)];
+        let admitted = capped_height(4096, 512, iris_admits(4, 8192));
+        let (text, found) = busy(refused((8192, 4096), true, admitted, None, &holders));
+        assert_eq!(
+            text,
+            "hardware decoder busy: held by steam, steamwebhelper x2, leaving room for \
+             8192x2016, not 8192x4096 10-bit"
+        );
+        assert_eq!(found.programs, ["steam", "steamwebhelper"]);
+        let (text, _) = busy(refused((8192, 4096), true, None, None, &holders));
+        assert_eq!(
+            text,
+            "hardware decoder busy: held by steam, steamwebhelper x2, leaving no room for \
+             another video session"
+        );
+    }
+
+    #[test]
+    fn too_big_is_not_busy_whoever_is_open() {
+        // Measured on the Frame with nothing else open: 8192x4320 is the
+        // largest 8192-wide stream it takes, and 6K top-bottom is refused.
+        assert!(iris_admits(1, 8192)(4320) && !iris_admits(1, 8192)(4352));
+        assert!(!iris_admits(1, 6144)(6144) && iris_admits(1, 5760)(5760));
+        assert!(!primer_matches((6144, 6144), (8192, 4080)));
+        let holders = [holder("steam", 0, 1)];
+        for (stream, text) in [
+            (
+                (6144, 6144),
+                "too big for the hardware decoder: 6144x6144, even with nothing else open",
+            ),
+            (
+                (8192, 8192),
+                "too big for the hardware decoder: 8192x8192, even with nothing else open",
+            ),
+            (
+                (8192, 4352),
+                "too big for the hardware decoder: 8192x4352, even with nothing else open",
+            ),
+        ] {
+            let e = refused(stream, false, Some(2016), None, &holders);
+            assert!(matches!(e, crate::Error::HardwareTooBig(_)), "{e}");
+            assert_eq!(e.to_string(), text);
+        }
+        assert!(matches!(
+            refused((8192, 4320), false, Some(4064), None, &holders),
+            crate::Error::HardwareBusy(..)
+        ));
+    }
+
+    #[test]
+    fn recording_only_blocks_what_would_fit_without_it() {
+        let blocks = |stream, ten_bit, primer, holders: &[Holder]| {
+            busy(refused(stream, ten_bit, None, primer, holders))
+                .1
+                .recording_blocks
+        };
+        let recording = holder("steam", 0, 1);
+        // Measured on the Frame: these went to hardware when it was turned off.
+        assert!(blocks(
+            (8192, 4096),
+            true,
+            None,
+            std::slice::from_ref(&recording)
+        ));
+        assert!(blocks(
+            (8192, 4320),
+            false,
+            None,
+            std::slice::from_ref(&recording)
+        ));
+        // Still refused beside two more sessions once it stops.
+        let browser = holder("steamwebhelper", 2, 0);
+        assert!(!blocks(
+            (8192, 4096),
+            true,
+            None,
+            &[recording.clone(), browser.clone()]
+        ));
+        // The primer fits beside one more; beside two it doesn't.
+        let primer = Some((8192, 4080));
+        let one = holder("steamwebhelper", 1, 0);
+        assert!(blocks(
+            (8192, 4096),
+            false,
+            primer,
+            &[recording.clone(), one.clone()]
+        ));
+        assert!(!blocks(
+            (8192, 4096),
+            false,
+            primer,
+            &[recording.clone(), browser.clone()]
+        ));
+        // Not Steam's recording: others on the encoder, Steam on the decoder.
+        assert!(!blocks((8192, 4096), true, None, &[holder("obs", 0, 1)]));
+        assert!(!blocks((8192, 4096), true, None, &[holder("steam", 1, 0)]));
+    }
+
+    #[test]
+    fn fits_beside_follows_the_driver_and_the_primer() {
+        let primer = Some((8192, 4080));
+        assert!(fits_beside((8192, 4096), None, 0));
+        assert!(!fits_beside((8192, 4096), None, 1));
+        assert!(fits_beside((8192, 4096), primer, 1));
+        assert!(!fits_beside((8192, 4096), primer, 2));
+        assert!(fits_beside((7680, 4320), None, 1));
+        assert!(!fits_beside((7680, 4320), None, 2));
+        assert!(fits_beside((8192, 4320), None, 0));
+        assert!(!fits_beside((8192, 4352), None, 0));
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn finds_who_holds_the_devices_by_their_open_files() {
+        let dir = std::env::temp_dir().join(format!("fpx-holders-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let (decoder, encoder) = (dir.join("video22"), dir.join("video23"));
+        std::fs::write(&decoder, b"").unwrap();
+        std::fs::write(&encoder, b"").unwrap();
+        let (decoder, encoder) = (
+            std::fs::canonicalize(decoder).unwrap(),
+            std::fs::canonicalize(encoder).unwrap(),
+        );
+        // This process's own files don't count; a child holds the stand-ins.
+        let _own = std::fs::File::open(&decoder).unwrap();
+        let script = format!(
+            "exec 3<{0} 4<{0} 5<{1}; echo ready; exec sleep 30",
+            decoder.display(),
+            encoder.display()
+        );
+        let mut child = std::process::Command::new("sh")
+            .args(["-c", &script])
+            .stdout(std::process::Stdio::piped())
+            .spawn()
+            .unwrap();
+        let mut ready = String::new();
+        std::io::BufRead::read_line(
+            &mut std::io::BufReader::new(child.stdout.take().unwrap()),
+            &mut ready,
+        )
+        .unwrap();
+        let found = linux::session_holders(&decoder, &encoder);
+        child.kill().unwrap();
+        child.wait().unwrap();
+        std::fs::remove_dir_all(&dir).unwrap();
+        assert_eq!(found.len(), 1, "{found:?}");
+        assert_eq!((found[0].decoder, found[0].encoder), (2, 1));
+        assert!(!found[0].name.is_empty());
     }
 
     #[test]
@@ -1896,5 +2366,79 @@ mod tests {
         assert_eq!(Codec::Hevc.fourcc(), fourcc(b"HEVC"));
         assert_eq!(macroblocks(8192, 4096), 131_072);
         assert_eq!(macroblocks(1920, 1080), 120 * 68);
+    }
+
+    /// Annex B with 4-byte start codes, as `hevc_mp4toannexb` writes it.
+    fn annex_b(nals: &[&[u8]]) -> Vec<u8> {
+        nals.iter()
+            .flat_map(|n| [&[0, 0, 0, 1][..], n].concat())
+            .collect()
+    }
+
+    #[test]
+    fn in_band_parameter_sets_go_last() {
+        // An hvcC that disagrees with the stream (some Matroska re-encodes):
+        // same ids, other contents.
+        let (vps, sps, pps) = (
+            &[0x40, 1, 0xaa][..],
+            &[0x42, 1, 0xaa][..],
+            &[0x44, 1, 0xaa][..],
+        );
+        let hvcc = annex_b(&[vps, sps, pps]);
+        let (own_vps, own_sps, own_pps) = (
+            &[0x40, 1, 0xbb][..],
+            &[0x42, 1, 0xbb][..],
+            &[0x44, 1, 0xbb][..],
+        );
+        let (aud, sei, idr, trail) = (
+            &[0x46, 1, 0x50][..],
+            &[0x4e, 1, 5][..],
+            &[0x26, 1, 0xaf][..],
+            &[0x02, 1, 0xd0][..],
+        );
+
+        // The keyframe as sent: the hvcC's copy moved ahead, when it moves.
+        let sent = |nals: &[&[u8]], extradata: &[u8]| {
+            let mut data = annex_b(nals);
+            let range = hvcc_copy_after_own(&data, extradata)?;
+            data[range].rotate_right(extradata.len());
+            Some(data)
+        };
+
+        // What the filter makes of a keyframe with its own parameter sets.
+        assert_eq!(
+            sent(&[own_vps, own_sps, own_pps, vps, sps, pps, idr], &hvcc),
+            Some(annex_b(&[vps, sps, pps, own_vps, own_sps, own_pps, idr]))
+        );
+        // An access unit delimiter and SEI stay ahead of them, and only the
+        // first picture's start is looked for.
+        assert_eq!(
+            sent(
+                &[aud, sei, own_vps, own_sps, own_pps, vps, sps, pps, idr, idr],
+                &hvcc
+            ),
+            Some(annex_b(&[
+                aud, sei, vps, sps, pps, own_vps, own_sps, own_pps, idr, idr
+            ]))
+        );
+
+        // Unchanged: keyframes without parameter sets of their own (most
+        // MP4s) or with the hvcC's, pictures that aren't IRAP, nothing
+        // inserted.
+        for nals in [
+            &[vps, sps, pps, idr][..],
+            &[aud, vps, sps, pps, idr],
+            &[vps, sps, pps, vps, sps, pps, idr],
+            &[own_vps, own_sps, own_pps, trail],
+            &[own_vps, own_sps, own_pps, idr],
+            // The search ends at the first picture.
+            &[aud, trail, own_vps, own_sps, own_pps, vps, sps, pps, idr],
+        ] {
+            assert_eq!(sent(nals, &hvcc), None, "{nals:x?}");
+        }
+        assert_eq!(
+            sent(&[own_vps, own_sps, own_pps, vps, sps, pps, idr], &[]),
+            None
+        );
     }
 }

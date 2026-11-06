@@ -58,7 +58,7 @@ pub fn fmt_size(bytes: u64) -> String {
 
 /// A video format, as the format panels name it ("180° side by side").
 pub fn format_label(f: &VideoFormat) -> String {
-    use fp_core::format::{Projection, StereoLayout};
+    use fp_core::format::Projection;
     let projection = match f.projection {
         Projection::Flat => tr!("format-flat").to_string(),
         Projection::Equirect { h_fov, .. } => format!("{}°", h_fov.round()),
@@ -66,16 +66,24 @@ pub fn format_label(f: &VideoFormat) -> String {
             let fov = format!("{}", fov.round());
             tr!("format-short-fisheye", fov = fov)
         }
+        Projection::Eac { h_fov } if h_fov >= 360.0 => "YouTube 360°".to_string(),
         Projection::Eac { h_fov } => format!("EAC {}°", h_fov.round()),
     };
-    let stereo = match f.stereo {
-        StereoLayout::Mono => tr!("format-mono"),
-        StereoLayout::SideBySide => tr!("format-sbs"),
-        StereoLayout::HalfSideBySide => tr!("format-half-sbs"),
-        StereoLayout::TopBottom => tr!("format-tb"),
-        StereoLayout::HalfTopBottom => tr!("format-half-tb"),
-    };
+    let stereo = layout_name(f.stereo);
     tr!("format-label", projection = projection, stereo = stereo)
+}
+
+/// A stereo layout's full name ("3D side by side").
+pub fn layout_name(stereo: fp_core::format::StereoLayout) -> &'static str {
+    use fp_core::format::StereoLayout;
+    match stereo {
+        StereoLayout::Mono => tr!("format-2d"),
+        StereoLayout::SideBySide => tr!("format-3d-sbs"),
+        StereoLayout::HalfSideBySide => tr!("format-3d-half-sbs"),
+        StereoLayout::TopBottom => tr!("format-3d-tb"),
+        StereoLayout::HalfTopBottom => tr!("format-3d-half-tb"),
+        StereoLayout::FrameSequential => tr!("format-3d-frame-sequential"),
+    }
 }
 
 /// Where a video's format came from.
@@ -653,6 +661,7 @@ pub struct SourceForm {
     pub username: String,
     pub password: String,
     pub insecure_tls: bool,
+    pub parallel_downloads: bool,
     /// Signing in to a Jellyfin/Emby server with Quick Connect rather than a
     /// password.
     pub use_quick_connect: bool,
@@ -691,6 +700,7 @@ impl Default for SourceForm {
             username: String::new(),
             password: String::new(),
             insecure_tls: false,
+            parallel_downloads: false,
             use_quick_connect: true,
             quick_connect: QuickConnect::Idle,
             plex: plex::Connect::default(),
@@ -769,6 +779,8 @@ pub struct UiState {
     pub clear_armed: Option<std::time::Instant>,
     pub home: Option<HomeRows>,
     pub details: Option<MediaId>,
+    /// The video whose details page has its format drawer open.
+    pub format_drawer: Option<MediaId>,
     /// The playlist open on the Playlists screen.
     pub playlist: Option<PlaylistId>,
     /// The playlists, and the open one's videos, as last read.
@@ -842,6 +854,7 @@ impl Default for UiState {
             clear_armed: None,
             home: None,
             details: None,
+            format_drawer: None,
             playlist: None,
             playlists: None,
             playlist_items: None,

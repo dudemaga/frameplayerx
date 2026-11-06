@@ -3,6 +3,7 @@
 use crate::bluray::Title;
 use crate::decode::Packet;
 use crate::io::IoContext;
+use crate::nal::{NalReader, Packing};
 use crate::second_view::{BASE_PID, SECOND_PID, SecondView};
 use crate::{Result, check};
 use fp_core::ByteSource;
@@ -23,6 +24,11 @@ pub struct Input {
     /// H.264 streams whose packets carry MVC's second view (3D Blu-ray)
     /// though their configuration doesn't say so.
     mvc_in_band: Vec<usize>,
+    /// How streams say their eyes are packed in their first packets.
+    frame_packing: Vec<(usize, (Packing, bool))>,
+    /// Whether the viewer says the video is frame sequential 3D; None goes
+    /// by its labels.
+    frame_sequential: Option<bool>,
     /// 3D Blu-ray's second view in a stream of its own (SSIF files, and
     /// transport streams holding both views), added to the base view's
     /// packets.
@@ -159,6 +165,8 @@ impl Input {
                 origin: 0.0,
                 peeked: VecDeque::new(),
                 mvc_in_band: Vec::new(),
+                frame_packing: Vec::new(),
+                frame_sequential: None,
                 pair: None,
                 title: None,
             };
@@ -169,7 +177,7 @@ impl Input {
             // MPEG-TS streams appear while probing.
             input.pair_views(src);
             input.origin = input.timeline_start();
-            input.find_in_band_mvc();
+            input.read_first_packets();
             if let Some(p) = &input.pair {
                 input.mvc_in_band.push(p.base);
             }
@@ -260,14 +268,15 @@ impl Input {
         self.pair.as_ref().is_some_and(|p| p.second == index)
     }
 
-    /// Reads up to the second packet of each H.264 video stream not marked
-    /// as MVC, mostly from what probing buffered, to see whether it holds
-    /// MVC's second view anyway (3D Blu-ray remuxed by tools that drop the
-    /// `mvcC` box). The packets read are given out first by [`Input::read`].
-    fn find_in_band_mvc(&mut self) {
+    /// Reads up to the second packet of each H.264 and HEVC video stream,
+    /// mostly from what probing buffered, to see the 3D layout it states
+    /// there, and whether an H.264 stream not marked as MVC holds MVC's second
+    /// view anyway (3D Blu-ray remuxed by tools that drop the `mvcC` box). The
+    /// packets read are given out first by [`Input::read`].
+    fn read_first_packets(&mut self) {
         // Each stream's first two packets: some muxers put the second view
         // of the first access unit at the start of the second.
-        let mut unseen: Vec<(usize, usize, u32)> = self
+        let mut unseen: Vec<(usize, NalReader, u32)> = self
             .streams()
             .iter()
             .enumerate()
@@ -275,14 +284,15 @@ impl Input {
                 // SAFETY: streams and their parameters are valid while open.
                 let par = unsafe { &*(*st).codecpar };
                 let extradata = crate::mvc::extradata(par);
-                (par.codec_type == ff::AVMEDIA_TYPE_VIDEO
-                    && par.codec_id == ff::AV_CODEC_ID_H264
-                    && !self
-                        .pair
-                        .as_ref()
-                        .is_some_and(|p| p.base == i || p.second == i)
-                    && crate::mvc::config(par.codec_id, extradata).is_none())
-                .then(|| (i, crate::mvc::length_size(extradata), 2))
+                let mvc = self
+                    .pair
+                    .as_ref()
+                    .is_some_and(|p| p.base == i || p.second == i)
+                    || crate::mvc::config(par.codec_id, extradata).is_some();
+                (par.codec_type == ff::AVMEDIA_TYPE_VIDEO && !mvc)
+                    .then(|| NalReader::new(par.codec_id, extradata))
+                    .flatten()
+                    .map(|reader| (i, reader, 2))
             })
             .collect();
         while !unseen.is_empty() && self.peeked.len() < 256 {
@@ -292,8 +302,8 @@ impl Input {
             }
             let index = pkt.stream_index();
             if let Some(at) = unseen.iter().position(|&(i, _, _)| i == index) {
-                let (_, length_size, left) = &mut unseen[at];
-                let length_size = *length_size;
+                let (_, reader, left) = &mut unseen[at];
+                let reader = *reader;
                 *left -= 1;
                 if *left == 0 {
                     unseen.swap_remove(at);
@@ -307,8 +317,18 @@ impl Input {
                         std::slice::from_raw_parts(p.data, p.size.max(0) as usize)
                     }
                 };
-                if crate::nal::units(data, length_size)
-                    .any(|n| n.first().is_some_and(|h| matches!(h & 0x1f, 15 | 20)))
+                if !self.frame_packing.iter().any(|&(i, _)| i == index)
+                    && let Some(layout) = reader.frame_packing(data)
+                {
+                    self.frame_packing.push((index, layout));
+                }
+                // SAFETY: as above, the parameters of a stream of this input.
+                let h264 = unsafe {
+                    (*(*self.streams()[index]).codecpar).codec_id == ff::AV_CODEC_ID_H264
+                };
+                if h264
+                    && crate::nal::units(data, reader.length_size())
+                        .any(|n| n.first().is_some_and(|h| matches!(h & 0x1f, 15 | 20)))
                 {
                     self.mvc_in_band.push(index);
                     unseen.retain(|&(i, _, _)| i != index);
@@ -318,10 +338,30 @@ impl Input {
         }
     }
 
+    /// How stream `index` says its eyes are packed in its first packets, and
+    /// whether the right eye comes first.
+    pub(crate) fn frame_packing(&self, index: usize) -> Option<(Packing, bool)> {
+        self.frame_packing
+            .iter()
+            .find(|&&(i, _)| i == index)
+            .map(|&(_, layout)| layout)
+    }
+
     /// Whether stream `index` carries MVC's second view in its packets,
     /// configured or not.
     pub(crate) fn mvc_in_band(&self, index: usize) -> bool {
         self.mvc_in_band.contains(&index)
+    }
+
+    /// Plays the video as frame sequential 3D or not, whatever its labels
+    /// say (None: as they say). Read when its info is read and its video
+    /// decoder opened.
+    pub(crate) fn set_frame_sequential(&mut self, choice: Option<bool>) {
+        self.frame_sequential = choice;
+    }
+
+    pub(crate) fn frame_sequential(&self) -> Option<bool> {
+        self.frame_sequential
     }
 
     /// Best stream of a media type, as FFmpeg chooses it.
