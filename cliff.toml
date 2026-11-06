@@ -11,7 +11,7 @@
 [changelog]
 body = """
 {% for group, commits in commits | group_by(attribute="group") %}
-### {{ group | upper_first }}
+### {{ group | striptags | trim | upper_first }}
 {% for commit in commits %}
 - {{ commit.message | split(pat="\n") | first | trim }}\
   {% if commit.scope %} *({{ commit.scope }})*{% endif %}\
@@ -26,22 +26,24 @@ trim = true
 conventional_commits = true
 filter_unconventional = false
 split_commits = false
+# Sections come in the order of their names, so each starts with a hidden
+# number (stripped from the heading) to list them by importance to users.
 commit_parsers = [
-    { message = "^feat", group = "🚀 Features" },
-    { message = "^fix", group = "🐛 Bug Fixes" },
-    { message = "^perf", group = "⚡ Performance" },
-    { message = "^refactor", group = "🔧 Refactor" },
-    { message = "^docs", group = "📖 Documentation" },
-    { message = "^test", group = "🧪 Testing" },
-    { message = "^style", group = "🎨 Style" },
+    { message = "^feat", group = "<!-- 0 -->🚀 Features" },
+    { message = "^fix", group = "<!-- 1 -->🐛 Bug Fixes" },
+    { message = "^perf", group = "<!-- 2 -->⚡ Performance" },
+    { message = "^docs", group = "<!-- 3 -->📖 Documentation" },
+    { message = "^refactor", group = "<!-- 5 -->🔧 Refactor" },
+    { message = "^test", group = "<!-- 6 -->🧪 Testing" },
+    { message = "^style", group = "<!-- 7 -->🎨 Style" },
     { message = "^chore\\(release\\)", skip = true },
-    { message = "^chore", group = "⚙️ Maintenance" },
-    { message = "^ci", group = "⚙️ Maintenance" },
-    { message = "^build", group = "⚙️ Maintenance" },
+    { message = "^chore", group = "<!-- 8 -->⚙️ Maintenance" },
+    { message = "^ci", group = "<!-- 8 -->⚙️ Maintenance" },
+    { message = "^build", group = "<!-- 8 -->⚙️ Maintenance" },
     # A merge only repeats the commits it brings in.
     { message = "^Merge (pull request|branch|remote-tracking branch) ", skip = true },
     # Catch-all: commits not following any convention still appear.
-    { message = ".*", group = "📦 Other" },
+    { message = ".*", group = "<!-- 4 -->📦 Other" },
 ]
 tag_pattern = '^v[0-9]+\.[0-9]+\.[0-9]+$'
 
