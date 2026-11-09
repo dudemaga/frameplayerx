@@ -364,7 +364,12 @@ impl Player {
 
         // Decoders are opened here so errors surface from open().
         let video_dec = match info.video {
-            Some(i) => Some(Decoder::open(&input, i, config.hw_decode)?),
+            Some(i) => {
+                let mut d = Decoder::open(&input, i, config.hw_decode)?;
+                // Its frames go to the renderer alone.
+                d.share_frames();
+                Some(d)
+            }
             None => None,
         };
         if let Some(d) = &video_dec {
@@ -1084,7 +1089,13 @@ fn video_thread(sh: Arc<Shared>, mut dec: Decoder, cap: usize) {
                                 continue;
                             }
                         };
-                        // Wait for room in the frame queue.
+                        // Wait for room in the frame queue, shorter for
+                        // frames that hold a decoder buffer.
+                        let cap = if vf.shared().is_some() {
+                            cap.min(crate::v4l2::SHARED_QUEUE)
+                        } else {
+                            cap
+                        };
                         let mut q = sh.frames();
                         while q.len() >= cap
                             && !sh.quit.load(Ordering::Acquire)

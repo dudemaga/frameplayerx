@@ -36,8 +36,11 @@ pub mod thumb;
 pub(crate) mod ts_fixture;
 pub(crate) mod v4l2;
 
-pub use decode::{HwDecode, hardware_sessions, hevc_10bit_hardware, set_hevc_10bit_hardware};
-pub use frame::{ColorInfo, PixelLayout, Q10cPicture, VideoFrame};
+pub use decode::{
+    HwDecode, hardware_sessions, hevc_10bit_hardware, set_hevc_10bit_hardware, set_shared_frames,
+    shared_frames,
+};
+pub use frame::{ColorInfo, PixelLayout, Q10cPicture, SharedPicture, VideoFrame};
 pub use info::{MediaInfo, StreamInfo, StreamKind};
 pub use player::{LastJump, Player, PlayerConfig, PlayerState, Restart, Stats, Timeline, Tracks};
 pub use subtitle::Cue;

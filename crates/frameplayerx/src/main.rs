@@ -427,6 +427,7 @@ fn run_xr(args: &Args) -> Result<(), Error> {
     );
     let mut renderer = Renderer::new(gpu.clone(), session.format)?;
     fp_media::set_hevc_10bit_hardware(renderer.shows_q10c());
+    fp_media::set_shared_frames(renderer.reads_decoder_buffers());
     let mut app = make_app()?;
     app.set_about(vec![
         ("OpenXR runtime".into(), ctx.runtime.clone()),

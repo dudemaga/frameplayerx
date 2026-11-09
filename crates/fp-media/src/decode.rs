@@ -32,6 +32,23 @@ pub fn hevc_10bit_hardware() -> bool {
     HEVC_10BIT_HARDWARE.load(Ordering::Relaxed)
 }
 
+static SHARED_FRAMES: AtomicBool = AtomicBool::new(false);
+
+/// Lets the player's hardware decoder hand its pictures over in its own
+/// buffers ([`VideoFrame::shared`](crate::VideoFrame::shared)) instead of
+/// copies. The renderer turns this on when it can import them, and off if
+/// an import fails, after which pictures are copied again.
+/// `FRAMEPLAYERX_ZERO_COPY=0` keeps it off.
+pub fn set_shared_frames(on: bool) {
+    let allowed = std::env::var("FRAMEPLAYERX_ZERO_COPY").map_or(true, |v| v.trim() != "0");
+    SHARED_FRAMES.store(on && allowed, Ordering::Relaxed);
+}
+
+/// Whether hardware-decoded pictures are shared (see [`set_shared_frames`]).
+pub fn shared_frames() -> bool {
+    SHARED_FRAMES.load(Ordering::Relaxed)
+}
+
 /// An owned `AVPacket`.
 pub struct Packet(pub(crate) *mut ff::AVPacket);
 // SAFETY: packets are reference counted buffers; ownership moves between threads.
@@ -922,6 +939,20 @@ impl Decoder {
                 return false;
             }
             nal.disposable(std::slice::from_raw_parts(p.data, p.size.max(0) as usize))
+        }
+    }
+
+    /// Lets the native hardware decoder lend its buffers as shared frames
+    /// while [`shared_frames`] is on: the player's video decoder only, whose
+    /// frames go to the renderer alone. Nothing for 3D pairing, which works
+    /// on copies.
+    pub(crate) fn share_frames(&mut self) {
+        if self.paired.is_some() {
+            return;
+        }
+        #[cfg(target_os = "linux")]
+        if let Some(n) = self.native.as_mut() {
+            n.dec.share_frames();
         }
     }
 

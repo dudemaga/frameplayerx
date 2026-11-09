@@ -146,6 +146,16 @@ the GPU can read: `fp-render/src/q10c.rs` reads it through TP10 texture
 descriptors made from Turnip's own (`VK_EXT_descriptor_buffer`) and turns
 it into P010 planes in a compute pass.
 
+The player's hardware-decoded frames aren't copied at all on the Frame:
+the decoder lends each frame its buffer, exported as a DMA-BUF
+(`VideoFrame::shared`), and the renderer imports each buffer once and
+reads it where it is (`fp-render/src/shared.rs`), NV12 by the eye passes
+and Q10C by the conversion. A frame holds its buffer until the GPU is done
+with it, then the decoder has it back. When the driver would be left with
+fewer buffers than it needs, or an import fails, frames are copied out as
+before. So are 8-bit HDR frames, whose scenes are measured in the planes
+the renderer uploads.
+
 **Sources and browsing.** Every source implements one `Source` trait
 (`list`, `open`, `details`). Each kind gets its own browser in `ui/`:
 `local.rs`, `folders.rs`, `catalog.rs` and `feeds.rs`, built from the
@@ -447,6 +457,7 @@ Steam can't pass environment variables to an app, so the launcher reads
 | `FRAMEPLAYERX_DEBUG_INPUT` | | `1` logs each controller's input when it changes |
 | `FRAMEPLAYERX_V4L2` | | `0` turns off the native V4L2 decoder |
 | `FRAMEPLAYERX_V4L2_DEVICE` | | The V4L2 device to decode with, instead of the one found |
+| `FRAMEPLAYERX_ZERO_COPY` | | `0` copies hardware-decoded frames out of the decoder's buffers instead of reading them there, as before; for comparing the two |
 
 ### Steam Frame notes
 
