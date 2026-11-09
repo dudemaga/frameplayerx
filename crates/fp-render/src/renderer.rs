@@ -7,8 +7,10 @@
 //! time no submitted frame can still read them.
 
 use crate::gpu::Gpu;
+use crate::hdr::PeakDetector;
 use crate::mem::{self, Buffer, Image};
 use crate::params::{self, SceneParams, VideoParams};
+use crate::peak::PeakPass;
 use crate::pipeline::{self, PipelineDesc};
 use crate::q10c::Converter;
 use crate::video::VideoPlanes;
@@ -172,6 +174,10 @@ pub struct Renderer {
     video_gen: [u64; 2],
     /// Shows hardware-decoded 10-bit frames, on GPUs that can.
     q10c: Option<Converter>,
+    /// Measures HDR frames for `hdr_peak`; without it HDR keeps the
+    /// default peak.
+    peak: Option<PeakPass>,
+    hdr_peak: PeakDetector,
     current: usize,
     recording: bool,
 }
@@ -354,6 +360,10 @@ impl Renderer {
                 video_cur: 0,
                 video_gen: [0, 0],
                 q10c: Converter::new(&gpu),
+                peak: PeakPass::new(&gpu, SLOTS)
+                    .inspect_err(|e| log::warn!("HDR scenes aren't measured: {e}"))
+                    .ok(),
+                hdr_peak: PeakDetector::default(),
                 current: 0,
                 recording: false,
             };
@@ -661,6 +671,9 @@ impl Renderer {
         slot.egui_vb_used = 0;
         slot.egui_ib_used = 0;
         slot.staging_used = 0;
+        if let Some(hist) = self.peak.as_mut().and_then(|p| p.take(self.current)) {
+            self.hdr_peak.add(&hist);
+        }
         self.recording = true;
         Ok(())
     }
@@ -677,6 +690,7 @@ impl Renderer {
                 slot.scene_set_dirty = true;
             }
             slot.has_video = false;
+            self.forget_scene();
             return Ok(());
         };
         let resident = self.videos[self.video_cur]
@@ -698,8 +712,16 @@ impl Renderer {
                 Ok(recreated) => {
                     if recreated {
                         self.video_gen[target] += 1;
+                        // Another size or layout: most likely another video.
+                        self.hdr_peak.reset();
+                        if let Some(p) = self.peak.as_mut() {
+                            p.discard();
+                        }
                     }
                     self.video_cur = target;
+                    if let (Some(p), Some(v)) = (self.peak.as_mut(), self.videos[target].as_ref()) {
+                        p.record(&self.gpu, slot.cmd, self.current, v);
+                    }
                 }
                 Err(e) => {
                     log::warn!("video frame upload failed: {e}");
@@ -723,6 +745,27 @@ impl Renderer {
     /// frames) can be shown; see [`fp_media::set_hevc_10bit_hardware`].
     pub fn shows_q10c(&self) -> bool {
         self.q10c.is_some()
+    }
+
+    /// The HDR scene peak in nits that tone mapping uses now.
+    pub fn hdr_peak(&self) -> f32 {
+        self.hdr_peak.peak_nits()
+    }
+
+    /// The video shown last, if it is HDR: its transfer and the scene peak
+    /// in nits tone mapping uses.
+    pub fn hdr_scene(&self) -> Option<(fp_media::info::Transfer, f32)> {
+        let v = self.videos[self.video_cur].as_ref()?;
+        (v.desc.color.transfer != fp_media::info::Transfer::Sdr)
+            .then(|| (v.desc.color.transfer, self.hdr_peak.peak_nits()))
+    }
+
+    /// Starts the HDR peak afresh, ignoring measurements still on their way.
+    fn forget_scene(&mut self) {
+        self.hdr_peak.reset();
+        if let Some(p) = self.peak.as_mut() {
+            p.discard();
+        }
     }
 
     /// The video image set this slot shows, if any.
@@ -1106,7 +1149,8 @@ impl Renderer {
         ];
         let slot_idx = self.current;
         let frame_desc = self.slot_video(slot_idx).map(|v| v.desc);
-        let p = params::build(video, frame_desc.as_ref(), inv);
+        let mut p = params::build(video, frame_desc.as_ref(), inv);
+        p.hdr = params::hdr_levels(self.hdr_peak.peak_nits());
         // Quad vertices: two triangles per quad.
         let mut verts: Vec<QuadVertex> = Vec::with_capacity(quads.len() * 6);
         let mut sets = Vec::with_capacity(quads.len());
@@ -1607,6 +1651,9 @@ impl Drop for Renderer {
             }
             if let Some(mut c) = self.q10c.take() {
                 c.destroy(&gpu);
+            }
+            if let Some(mut p) = self.peak.take() {
+                p.destroy(&gpu);
             }
             for mut s in self.slots.drain(..) {
                 for mut i in s.garbage.drain(..) {

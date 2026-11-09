@@ -34,6 +34,18 @@ pub(crate) struct SceneParams {
     pub key2: Vec4,
     pub viewer: Vec4,
     pub display: [u32; 4],
+    pub hdr: Vec4,
+}
+
+/// The shader's `hdr`: an HDR scene peaking at `peak` nits on the screen's
+/// white, both PQ-coded.
+pub(crate) fn hdr_levels(peak: f32) -> Vec4 {
+    Vec4::new(
+        crate::hdr::pq_from_nits(peak),
+        crate::hdr::pq_from_nits(crate::hdr::SDR_WHITE),
+        0.0,
+        0.0,
+    )
 }
 
 /// Everything about the video that the projection pass needs, other than
@@ -250,6 +262,7 @@ pub(crate) fn build(
         ),
         viewer: glam::vec3(0.0, s.height, -s.forward).extend(SPHERE_RADIUS),
         display: [turns, 0, 0, 0],
+        hdr: hdr_levels(crate::hdr::DEFAULT_PEAK),
     }
 }
 

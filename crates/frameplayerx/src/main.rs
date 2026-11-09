@@ -590,8 +590,12 @@ fn run_xr(args: &Args) -> Result<(), Error> {
             );
             if let Some(pb) = &app.playback {
                 let st = pb.player.stats();
+                let hdr = renderer
+                    .hdr_scene()
+                    .map(|(t, peak)| format!(", {t:?} scene peak {peak:.0} nits"))
+                    .unwrap_or_default();
                 log::info!(
-                    "video {} ({}): {} shown, {} dropped, {} stalls, {} queued",
+                    "video {} ({}): {} shown, {} dropped, {} stalls, {} queued{hdr}",
                     st.video_decoder,
                     if st.hardware { "hardware" } else { "software" },
                     st.frames_shown,
