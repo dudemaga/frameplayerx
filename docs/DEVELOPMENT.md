@@ -137,7 +137,10 @@ protocol is implemented in Rust and looks like a file to FFmpeg. H.264 and
 HEVC go to the Frame's V4L2 stateful decoder; anything it can't take is
 decoded in software. Frames are uploaded to Vulkan as YUV and converted in
 the shader, which maps each pixel of each eye onto the video for the chosen
-projection and stereo layout. HDR is tone mapped there too. 10-bit HEVC
+projection and stereo layout. HDR is tone mapped there too, with BT.2390's
+curve to the scene's peak, after compressing BT.2020 colours into BT.709
+(`fp-render/src/hdr.rs`); a small compute pass counts each new HDR frame's
+brightness into a histogram the peak comes from (`peak.rs`). 10-bit HEVC
 comes out of the decoder as Q10C (Qualcomm's compressed TP10), which only
 the GPU can read: `fp-render/src/q10c.rs` reads it through TP10 texture
 descriptors made from Turnip's own (`VK_EXT_descriptor_buffer`) and turns

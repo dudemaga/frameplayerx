@@ -52,6 +52,8 @@ struct Params {
     viewer: vec4<f32>,
     // x: clockwise quarter turns that show the frame upright
     display: vec4<u32>,
+    // HDR, as PQ codes: x the scene's peak, y the screen's white
+    hdr: vec4<f32>,
 };
 
 struct PushConstants {
@@ -260,36 +262,57 @@ fn luma_at(uv: vec2<f32>) -> f32 {
     return textureSampleLevel(plane0, samp, uv, 0.0).r * params.yuv_offset.w;
 }
 
-fn pq_eotf(e: vec3<f32>) -> vec3<f32> {
-    let m1 = 0.1593017578125; let m2 = 78.84375;
-    let c1 = 0.8359375; let c2 = 18.8515625; let c3 = 18.6875;
-    let p = pow(clamp(e, vec3<f32>(0.0), vec3<f32>(1.0)), vec3<f32>(1.0 / m2));
-    return pow(max(p - c1, vec3<f32>(0.0)) / (c2 - c3 * p), vec3<f32>(1.0 / m1)) * 10000.0;
+// BT.2390's EETF on PQ code `e`, for a source peaking at PQ `src` and a
+// display peaking at PQ `dst`: unchanged below the knee, a Hermite spline
+// above it.
+fn eetf(e: f32, src: f32, dst: f32) -> f32 {
+    if (src <= dst) { return e; }
+    let e1 = e / src;
+    let max_lum = dst / src;
+    let ks = max(1.5 * max_lum - 0.5, 0.0);
+    if (e1 < ks) { return e; }
+    let t = (min(e1, 1.0) - ks) / (1.0 - ks);
+    let t2 = t * t;
+    let t3 = t2 * t;
+    let p = (2.0 * t3 - 3.0 * t2 + 1.0) * ks + (t3 - 2.0 * t2 + t) * (1.0 - ks)
+        + (-2.0 * t3 + 3.0 * t2) * max_lum;
+    return p * src;
 }
 
-fn hlg_inverse_oetf(e: vec3<f32>) -> vec3<f32> {
-    let a = 0.17883277; let b = 0.28466892; let c = 0.55991073;
-    var o: vec3<f32>;
-    for (var i = 0; i < 3; i++) {
-        let x = e[i];
-        if (x <= 0.5) { o[i] = x * x / 3.0; } else { o[i] = (exp((x - c) / a) + b) / 12.0; }
-    }
-    return o;
+// Nits, tone mapped through the brightest channel so hue is kept; 1.0 is
+// the screen's white.
+fn tone_map(c: vec3<f32>) -> vec3<f32> {
+    let m = max3(c);
+    if (m <= 0.0) { return vec3<f32>(0.0); }
+    let mapped = pq_eotf1(eetf(pq_oetf1(m), params.hdr.x, params.hdr.y));
+    return c * (mapped / (m * 203.0));
 }
 
-fn bt2020_to_709(c: vec3<f32>) -> vec3<f32> {
-    return vec3<f32>(
-        dot(vec3<f32>(1.6605, -0.5876, -0.0728), c),
-        dot(vec3<f32>(-0.1246, 1.1329, -0.0083), c),
-        dot(vec3<f32>(-0.0182, -0.1006, 1.1187), c));
+// The ACES reference gamut compression, sized for BT.2020 in BT.709 (see
+// src/hdr.rs): each channel's distance below the brightest one is
+// compressed past 0.8, bringing the most saturated BT.2020 colours to
+// BT.709's edge and leaving most colours alone.
+const GAMUT_THRESHOLD: f32 = 0.8;
+const GAMUT_LIMIT: vec3<f32> = vec3<f32>(1.60, 1.09, 1.12);
+const GAMUT_POWER: f32 = 1.2;
+
+fn compress_distance(d: f32, limit: f32) -> f32 {
+    if (d < GAMUT_THRESHOLD) { return d; }
+    let s = (limit - GAMUT_THRESHOLD)
+        / pow(pow((1.0 - GAMUT_THRESHOLD) / (limit - GAMUT_THRESHOLD), -GAMUT_POWER) - 1.0, 1.0 / GAMUT_POWER);
+    let x = (d - GAMUT_THRESHOLD) / s;
+    return GAMUT_THRESHOLD + s * x / pow(1.0 + pow(x, GAMUT_POWER), 1.0 / GAMUT_POWER);
 }
 
-// Linear light (1.0 = SDR reference white) -> displayable linear 0..1.
-fn tonemap(c: vec3<f32>, peak: f32) -> vec3<f32> {
-    let m = max(max(c.r, c.g), c.b);
-    if (m <= 1e-6) { return c; }
-    let mapped = m * (1.0 + m / (peak * peak)) / (1.0 + m);
-    return c * (mapped / m);
+fn gamut_compress(c: vec3<f32>) -> vec3<f32> {
+    let ach = max3(c);
+    if (ach <= 0.0) { return vec3<f32>(0.0); }
+    let d = (ach - c) / ach;
+    let cd = vec3<f32>(
+        compress_distance(d.r, GAMUT_LIMIT.r),
+        compress_distance(d.g, GAMUT_LIMIT.g),
+        compress_distance(d.b, GAMUT_LIMIT.b));
+    return ach - cd * ach;
 }
 
 fn srgb_to_linear(c: vec3<f32>) -> vec3<f32> {
@@ -374,20 +397,21 @@ fn fs_main(in: VsOut) -> @location(0) vec4<f32> {
         rgb += vec3<f32>((yc - blur) * params.extra.x * 2.0);
     }
 
+    // HDR: to BT.709 nits, into its gamut, then the tone curve, which also
+    // keeps every channel within the screen's white.
     var lin: vec3<f32>;
     let transfer = u32(params.extra.y + 0.5);
-    if (transfer == 1u) {
-        var nits = pq_eotf(rgb);
-        if (params.extra.z > 0.5) { nits = bt2020_to_709(nits); }
-        lin = tonemap(max(nits, vec3<f32>(0.0)) / 203.0, 1000.0 / 203.0);
-    } else if (transfer == 2u) {
-        var scene = hlg_inverse_oetf(clamp(rgb, vec3<f32>(0.0), vec3<f32>(1.0)));
-        if (params.extra.z > 0.5) { scene = bt2020_to_709(scene); }
-        // HLG OOTF for a 1000-nit display, normalised to 203-nit white.
-        let ys = dot(vec3<f32>(0.2627, 0.6780, 0.0593), max(scene, vec3<f32>(0.0)));
-        lin = tonemap(max(scene, vec3<f32>(0.0)) * pow(max(ys, 1e-6), 0.2) * (1000.0 / 203.0), 1000.0 / 203.0);
+    let wide = params.extra.z > 0.5;
+    if (transfer == 1u || transfer == 2u) {
+        var nits = hdr_nits(rgb, transfer, wide);
+        if (wide) { nits = gamut_compress(nits); }
+        lin = tone_map(nits);
     } else {
         lin = srgb_to_linear(rgb);
+        if (wide) {
+            lin = gamut_compress(bt2020_to_709(lin));
+            lin = lin / max(max3(lin), 1.0);
+        }
     }
 
     // Picture adjustments, applied in a perceptual (gamma) space.

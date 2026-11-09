@@ -10,12 +10,16 @@
 //! - [`capture`]: offscreen eye targets with read-back, for tests and
 //!   screenshots.
 //! - `q10c`: shows the Steam Frame decoder's 10-bit (Q10C) pictures.
+//! - [`hdr`]: HDR on the SDR screen: tone curve, gamut compression and the
+//!   scene peak, which `peak` measures from the frames.
 
 pub mod capture;
 pub mod gpu;
+pub mod hdr;
 pub mod math;
 pub mod mem;
 pub mod params;
+mod peak;
 mod pipeline;
 mod q10c;
 pub mod renderer;
@@ -58,3 +62,4 @@ pub(crate) const SCENE_SPV: &[u8] = include_bytes!(concat!(env!("OUT_DIR"), "/sc
 pub(crate) const QUAD_SPV: &[u8] = include_bytes!(concat!(env!("OUT_DIR"), "/quad.spv"));
 pub(crate) const EGUI_SPV: &[u8] = include_bytes!(concat!(env!("OUT_DIR"), "/egui.spv"));
 pub(crate) const Q10C_SPV: &[u8] = include_bytes!(concat!(env!("OUT_DIR"), "/q10c.spv"));
+pub(crate) const PEAK_SPV: &[u8] = include_bytes!(concat!(env!("OUT_DIR"), "/peak.spv"));

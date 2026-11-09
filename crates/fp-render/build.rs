@@ -4,10 +4,16 @@ use std::path::PathBuf;
 
 fn main() {
     let out = PathBuf::from(std::env::var("OUT_DIR").expect("OUT_DIR"));
-    for name in ["scene", "quad", "egui", "q10c"] {
+    // WGSL has no includes: the shaders doing HDR maths get it in front.
+    println!("cargo:rerun-if-changed=shaders/hdr.wgsl");
+    let hdr = std::fs::read_to_string("shaders/hdr.wgsl").expect("shader source");
+    for name in ["scene", "quad", "egui", "q10c", "peak"] {
         let path = format!("shaders/{name}.wgsl");
         println!("cargo:rerun-if-changed={path}");
-        let src = std::fs::read_to_string(&path).expect("shader source");
+        let mut src = std::fs::read_to_string(&path).expect("shader source");
+        if matches!(name, "scene" | "peak") {
+            src = format!("{hdr}\n{src}");
+        }
         let module = match naga::front::wgsl::parse_str(&src) {
             Ok(m) => m,
             Err(e) => panic!("{path}:\n{}", e.emit_to_string(&src)),

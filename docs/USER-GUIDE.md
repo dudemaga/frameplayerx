@@ -534,6 +534,13 @@ MP3, DTS, TrueHD, PCM (Blu-ray and DVD LPCM too), and spatial (ambisonic)
 audio that follows your head.
 Subtitles: SRT, ASS/SSA, WebVTT, and embedded text or picture subtitles.
 
+HDR videos (HDR10 and HLG) are fitted to the headset's screen as they play.
+Each scene's brightest parts are measured, so midtones keep the brightness
+they were graded at and only the highlights are compressed, keeping their
+detail. Colours richer than the screen can show are toned down smoothly
+instead of being cut off, and the most vivid ones it can show lose a
+little saturation to make room for them.
+
 ### Fisheye lenses
 
 A fisheye format shows **Fisheye lens** under the format list. Its presets

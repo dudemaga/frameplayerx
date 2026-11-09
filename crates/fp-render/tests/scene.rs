@@ -475,6 +475,155 @@ fn brightness_and_saturation_controls() {
     e.destroy(&r);
 }
 
+/// A 10-bit PQ frame of `rgb(u, v)`, PQ-coded R'G'B' (BT.2020 when `wide`).
+fn pq_frame(
+    w: u32,
+    h: u32,
+    wide: bool,
+    rgb: impl Fn(f32, f32) -> [f32; 3],
+) -> Arc<fp_media::VideoFrame> {
+    let rgba: Vec<u8> = (0..w * h)
+        .flat_map(|i| {
+            let (u, v) = (
+                ((i % w) as f32 + 0.5) / w as f32,
+                ((i / w) as f32 + 0.5) / h as f32,
+            );
+            let [r, g, b] = rgb(u, v).map(|c| (c * 255.0).round() as u8);
+            [r, g, b, 255]
+        })
+        .collect();
+    let mut f =
+        fp_media::VideoFrame::from_rgba_as(w, h, &rgba, PixelLayout::P010, true).expect("frame");
+    f.color.transfer = fp_media::info::Transfer::Pq;
+    f.color.wide_gamut = wide;
+    Arc::new(f)
+}
+
+/// What the eye target holds for linear `c` (1.0 the screen's white).
+fn srgb(c: [f32; 3]) -> [u8; 3] {
+    c.map(|l| {
+        let l = l.clamp(0.0, 1.0);
+        let e = if l <= 0.003_130_8 {
+            12.92 * l
+        } else {
+            1.055 * l.powf(1.0 / 2.4) - 0.055
+        };
+        (e * 255.0).round() as u8
+    })
+}
+
+fn near(got: [u8; 3], want: [u8; 3], tol: u8) -> bool {
+    got.iter().zip(want).all(|(g, w)| g.abs_diff(w) <= tol)
+}
+
+/// The PQ code a test frame's 8-bit level stands for.
+fn level(pq: f32) -> f32 {
+    (pq * 255.0).round() / 255.0
+}
+
+#[test]
+fn hdr_is_tone_mapped_to_the_scenes_measured_peak() {
+    use fp_render::hdr::{self, DEFAULT_PEAK, nits_from_pq, tone_map};
+    let Some((mut r, mut e)) = setup() else {
+        return;
+    };
+    let p = params(
+        Projection::EQUIRECT_360,
+        StereoLayout::Mono,
+        ViewSettings::default(),
+    );
+    // Mid-grey around diffuse white, with 1000-nit highlights along the top.
+    let (mid, top) = (level(0.58), level(0.75));
+    let scene = |wide| {
+        pq_frame(256, 128, wide, move |_, v| {
+            [if v < 0.1 { top } else { mid }; 3]
+        })
+    };
+    let want = |peak: f32| srgb(tone_map([nits_from_pq(mid); 3], peak));
+    let shown =
+        |r: &mut Renderer, e: &mut OffscreenEyes, f| centre(&render(r, e, Some(&f), &p, &[])[0]);
+
+    // Nothing measured yet: the default peak.
+    let got = shown(&mut r, &mut e, scene(false));
+    assert_eq!(r.hdr_peak(), DEFAULT_PEAK);
+    assert!(
+        near(got, want(DEFAULT_PEAK), 3),
+        "{got:?} != {:?}",
+        want(DEFAULT_PEAK)
+    );
+
+    // The first frame's measurement comes back once its slot comes round.
+    shown(&mut r, &mut e, scene(false));
+    let got = shown(&mut r, &mut e, scene(false));
+    let peak = r.hdr_peak();
+    let highlight = nits_from_pq(top);
+    assert!(
+        (peak / highlight - 1.0).abs() < 0.06,
+        "measured {peak} nits, highlights are {highlight}"
+    );
+    assert!(
+        near(got, want(peak), 3),
+        "{got:?} != {:?} at {peak} nits",
+        want(peak)
+    );
+    // Grey is grey in BT.2020 too.
+    let wide = shown(&mut r, &mut e, scene(true));
+    assert!(near(wide, got, 2), "{wide:?} != {got:?}");
+
+    // A cut to a darker scene, highlights at 400 nits: the peak jumps to it.
+    let dark_top = level(hdr::pq_from_nits(400.0));
+    let dark = || {
+        pq_frame(256, 128, false, move |_, v| {
+            [if v < 0.1 { dark_top } else { 0.3 }; 3]
+        })
+    };
+    for _ in 0..3 {
+        shown(&mut r, &mut e, dark());
+    }
+    let peak = r.hdr_peak();
+    assert!(
+        (peak / nits_from_pq(dark_top) - 1.0).abs() < 0.06,
+        "measured {peak} nits after the cut"
+    );
+    // Closing the video forgets the scene.
+    render(&mut r, &mut e, None, &p, &[]);
+    assert_eq!(r.hdr_peak(), DEFAULT_PEAK);
+    e.destroy(&r);
+}
+
+#[test]
+fn saturated_bt2020_colours_are_compressed_into_the_screens_gamut() {
+    use fp_render::hdr::{bt2020_to_709, gamut_compress, nits_from_pq, tone_map};
+    let Some((mut r, mut e)) = setup() else {
+        return;
+    };
+    let p = params(
+        Projection::EQUIRECT_360,
+        StereoLayout::Mono,
+        ViewSettings::default(),
+    );
+    for (name, colour) in [
+        ("green", [0.0, 0.6, 0.0]),
+        ("cyan", [0.0, 0.55, 0.6]),
+        ("red", [0.62, 0.05, 0.05]),
+    ] {
+        let c = colour.map(level);
+        let mut got = [0; 3];
+        // The third frame is shown with the first one's measured peak.
+        for _ in 0..3 {
+            let f = pq_frame(64, 32, true, move |_, _| c);
+            got = centre(&render(&mut r, &mut e, Some(&f), &p, &[])[0]);
+        }
+        let nits = bt2020_to_709(c.map(nits_from_pq));
+        let want = srgb(tone_map(gamut_compress(nits), r.hdr_peak()));
+        assert!(near(got, want, 3), "{name}: {got:?} != {want:?}");
+        // Clipping each channel would have left one or two at zero.
+        assert!(got.iter().all(|&ch| ch > 0), "{name} clipped: {got:?}");
+        render(&mut r, &mut e, None, &p, &[]);
+    }
+    e.destroy(&r);
+}
+
 #[test]
 fn every_upload_layout_renders_like_i420() {
     let Some((mut r, mut e)) = setup() else {
