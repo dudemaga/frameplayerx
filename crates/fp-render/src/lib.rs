@@ -23,6 +23,7 @@ mod peak;
 mod pipeline;
 mod q10c;
 pub mod renderer;
+mod shared;
 mod video;
 
 pub use gpu::{Creator, DirectCreator, Gpu};

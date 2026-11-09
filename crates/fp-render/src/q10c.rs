@@ -190,16 +190,18 @@ impl Carriers {
     /// Creates the carriers of `g` and checks they need the memory the
     /// decoder's layout has; `bind` then gets their requirements and binds
     /// them (at 0 and the UV offset).
+    /// `external`: bound to an imported DMA-BUF (the decoder's buffer).
     fn new(
         gpu: &Gpu,
         g: &Geometry,
+        external: bool,
         bind: impl FnOnce(&[vk::MemoryRequirements; 2]) -> Result<vk::DeviceMemory>,
     ) -> Result<Carriers> {
         let mut c = Carriers {
             images: [vk::Image::null(); 2],
             views: [vk::ImageView::null(); 2],
         };
-        let r = c.create(gpu, g, bind);
+        let r = c.create(gpu, g, external, bind);
         if r.is_err() {
             c.destroy(gpu);
         }
@@ -210,6 +212,7 @@ impl Carriers {
         &mut self,
         gpu: &Gpu,
         g: &Geometry,
+        external: bool,
         bind: impl FnOnce(&[vk::MemoryRequirements; 2]) -> Result<vk::DeviceMemory>,
     ) -> Result<()> {
         let d = &gpu.device;
@@ -222,6 +225,7 @@ impl Carriers {
             let mut explicit = vk::ImageDrmFormatModifierExplicitCreateInfoEXT::default()
                 .drm_format_modifier(QCOM_COMPRESSED)
                 .plane_layouts(&layouts);
+            let mut ext = crate::shared::external_info();
             let info = vk::ImageCreateInfo::default()
                 .image_type(vk::ImageType::TYPE_2D)
                 .format(CARRIER)
@@ -237,8 +241,19 @@ impl Carriers {
                 .usage(vk::ImageUsageFlags::SAMPLED)
                 // The memory is written by the host, then the layout
                 // changes to GENERAL keeping it (see `Converter::record`).
-                .initial_layout(vk::ImageLayout::PREINITIALIZED)
+                // Images over imported memory start UNDEFINED, as Vulkan
+                // asks, and are read in GENERAL as the decoder left it.
+                .initial_layout(if external {
+                    vk::ImageLayout::UNDEFINED
+                } else {
+                    vk::ImageLayout::PREINITIALIZED
+                })
                 .push_next(&mut explicit);
+            let info = if external {
+                info.push_next(&mut ext)
+            } else {
+                info
+            };
             // SAFETY: valid create info; images are destroyed by `destroy`.
             unsafe {
                 self.images[i] = d.create_image(&info, None).ctx("Q10C carrier")?;
@@ -316,6 +331,10 @@ pub(crate) struct Picture {
     bands: Vec<Band>,
     /// The carriers' layout is GENERAL (after the first conversion).
     ready: bool,
+    /// The memory is the decoder's buffer, imported ([`Converter::import`]):
+    /// nothing is copied in, and each conversion acquires the carriers from
+    /// the decoder's queue family and releases them to it after.
+    imported: bool,
 }
 
 // SAFETY: `mapped` points into `memory`, which only this picture uses; the
@@ -323,8 +342,12 @@ pub(crate) struct Picture {
 unsafe impl Send for Picture {}
 
 impl Picture {
-    /// The memory the decoder's buffer goes into.
+    /// The memory the decoder's buffer goes into (nothing for an imported
+    /// picture, which is the decoder's buffer).
     pub fn bytes(&mut self) -> &mut [u8] {
+        if self.mapped.is_null() {
+            return &mut [];
+        }
         // SAFETY: `mapped` is the persistent mapping of `geometry.len` bytes.
         unsafe { std::slice::from_raw_parts_mut(self.mapped, self.geometry.len) }
     }
@@ -520,7 +543,7 @@ impl Converter {
     fn check(&self, gpu: &Gpu) -> Result<()> {
         let g = Geometry::REFERENCE;
         let mut memory = vk::DeviceMemory::null();
-        let carriers = Carriers::new(gpu, &g, |reqs| {
+        let carriers = Carriers::new(gpu, &g, false, |reqs| {
             memory = allocate(
                 gpu,
                 g.len as u64,
@@ -591,10 +614,23 @@ impl Converter {
     /// The resources to convert pictures of geometry `g` into `outputs`
     /// (the Y and UV planes, R16 and R16G16).
     pub fn picture(&self, gpu: &Gpu, g: Geometry, outputs: &[Image]) -> Result<Picture> {
+        self.make(gpu, g, outputs, None)
+    }
+
+    /// A picture whose memory is the decoder's buffer `fd` (a DMA-BUF of
+    /// `g.len` bytes), converted into `outputs` where it lies.
+    pub fn import(&self, gpu: &Gpu, g: Geometry, fd: i32, outputs: &[Image]) -> Result<Picture> {
+        self.make(gpu, g, outputs, Some(fd))
+    }
+
+    fn make(&self, gpu: &Gpu, g: Geometry, outputs: &[Image], fd: Option<i32>) -> Result<Picture> {
         let mut memory = vk::DeviceMemory::null();
-        let carriers = Carriers::new(gpu, &g, |reqs| {
+        let carriers = Carriers::new(gpu, &g, fd.is_some(), |reqs| {
             let bits = reqs[0].memory_type_bits & reqs[1].memory_type_bits;
-            memory = allocate(gpu, g.len as u64, bits, false)?;
+            memory = match fd {
+                Some(fd) => crate::shared::import(gpu, fd, g.len as u64, bits, None)?,
+                None => allocate(gpu, g.len as u64, bits, false)?,
+            };
             Ok(memory)
         });
         let mut p = Picture {
@@ -614,6 +650,7 @@ impl Converter {
             descriptor_address: 0,
             bands: Vec::new(),
             ready: false,
+            imported: fd.is_some(),
         };
         if let Err(e) = self.fill(gpu, &mut p, outputs) {
             p.destroy(gpu);
@@ -625,12 +662,14 @@ impl Converter {
     fn fill(&self, gpu: &Gpu, p: &mut Picture, outputs: &[Image]) -> Result<()> {
         let d = &gpu.device;
         let g = p.geometry;
-        // SAFETY: host-visible memory of g.len bytes, mapped for the
-        // picture's lifetime (freeing it unmaps).
-        p.mapped = unsafe {
-            d.map_memory(p.memory, 0, g.len as u64, vk::MemoryMapFlags::empty())
-                .ctx("map Q10C memory")? as *mut u8
-        };
+        if !p.imported {
+            // SAFETY: host-visible memory of g.len bytes, mapped for the
+            // picture's lifetime (freeing it unmaps).
+            p.mapped = unsafe {
+                d.map_memory(p.memory, 0, g.len as u64, vk::MemoryMapFlags::empty())
+                    .ctx("map Q10C memory")? as *mut u8
+            };
+        }
         let (cw, ch) = (g.width.div_ceil(2), g.height.div_ceil(2));
         let mut offset = 0;
         for (plane, per_row, height) in [(Plane::Y, g.width, g.height), (Plane::Uv, cw * 2, ch)] {
@@ -716,7 +755,22 @@ impl Converter {
                 compute_write,
             );
         }
-        if !p.ready {
+        if p.imported {
+            // From the decoder, as it wrote the buffer: compressed data
+            // read in GENERAL, as on the Frame since the first conversion.
+            for &image in &p.carriers.images {
+                mem::ownership_barrier(
+                    gpu,
+                    cmd,
+                    image,
+                    vk::ImageLayout::GENERAL,
+                    vk::ImageLayout::GENERAL,
+                    mem::TOP,
+                    compute_read,
+                    (gpu.decoder_family, gpu.queue_family),
+                );
+            }
+        } else if !p.ready {
             for &image in &p.carriers.images {
                 mem::barrier(
                     gpu,
@@ -760,6 +814,21 @@ impl Converter {
                     &b.row0.to_ne_bytes(),
                 );
                 d.cmd_dispatch(cmd, width.div_ceil(8), b.rows.div_ceil(8), 1);
+            }
+        }
+        if p.imported {
+            // Back to the decoder once read.
+            for &image in &p.carriers.images {
+                mem::ownership_barrier(
+                    gpu,
+                    cmd,
+                    image,
+                    vk::ImageLayout::GENERAL,
+                    vk::ImageLayout::GENERAL,
+                    compute_read,
+                    mem::BOTTOM,
+                    (gpu.queue_family, gpu.decoder_family),
+                );
             }
         }
         for o in outputs {

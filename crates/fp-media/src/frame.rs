@@ -65,6 +65,102 @@ pub struct Q10cPicture<'a> {
 /// format, so this is its fourcc, far outside FFmpeg's own values.
 pub(crate) const PIX_FMT_Q10C: ff::AVPixelFormat = 0x4330_3151;
 
+/// `AVFrame::format` of frames left in the decoder's buffer
+/// ([`VideoFrame::shared`]), "SHRD", also outside FFmpeg's values.
+pub(crate) const PIX_FMT_SHARED: ff::AVPixelFormat = 0x4452_4853;
+
+/// A picture left in the hardware decoder's buffer, for the GPU to read
+/// there instead of from a copy. Laid out as [`Q10cPicture`] for
+/// [`PixelLayout::Q10c`], as NV12 (Y rows, then interleaved UV rows, at
+/// `stride`) for [`PixelLayout::Nv12`]. The buffer goes back to the
+/// decoder when the last frame holding it is dropped, so the renderer keeps
+/// a frame until the GPU has finished with it.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct SharedPicture {
+    /// The buffer as a DMA-BUF file descriptor, open while the frame lives.
+    pub fd: i32,
+    /// Bytes in the buffer.
+    pub len: usize,
+    /// Bytes per row of both planes.
+    pub stride: u32,
+    /// Luma rows the buffer is laid out for (the frame height or more).
+    pub rows: u32,
+    /// Where the UV plane starts (for Q10C, its metadata first).
+    pub uv_offset: usize,
+    /// Names the buffer: every frame from it has the same, so the renderer
+    /// imports it once. Unique in the process.
+    pub buffer: u64,
+    /// The decoder's set of buffers it belongs to. A new set (another
+    /// video, or a new size) means the old buffers are done with.
+    pub set: u64,
+}
+
+/// What a shared frame's `buf[0]` points at: the picture, and what gives
+/// the buffer back to the decoder when FFmpeg frees the last reference.
+pub(crate) struct Lent {
+    pub(crate) picture: SharedPicture,
+    pub(crate) layout: PixelLayout,
+    pub(crate) release: Option<Box<dyn FnOnce() + Send>>,
+}
+
+impl Drop for Lent {
+    fn drop(&mut self) {
+        if let Some(r) = self.release.take() {
+            r();
+        }
+    }
+}
+
+unsafe extern "C" fn free_lent(_opaque: *mut std::ffi::c_void, data: *mut u8) {
+    // SAFETY: `data` is the Box `set_shared` leaked into the buffer, freed
+    // once, when its last reference goes.
+    drop(unsafe { Box::from_raw(data as *mut Lent) });
+}
+
+/// Makes `f` a shared frame of the picture in `lent`, `size` its visible
+/// size. On failure `lent` is dropped, which gives the buffer back.
+///
+/// # Safety
+/// `f` is an unreferenced frame.
+pub(crate) unsafe fn set_shared(
+    f: &mut ff::AVFrame,
+    lent: Box<Lent>,
+    size: (u32, u32),
+) -> Result<()> {
+    let data = Box::into_raw(lent) as *mut u8;
+    // SAFETY: the buffer owns the Box from here; free_lent drops it.
+    let buf = unsafe {
+        ff::av_buffer_create(
+            data,
+            size_of::<Lent>(),
+            Some(free_lent),
+            std::ptr::null_mut(),
+            ff::AV_BUFFER_FLAG_READONLY as i32,
+        )
+    };
+    if buf.is_null() {
+        // SAFETY: not taken over by a buffer.
+        drop(unsafe { Box::from_raw(data as *mut Lent) });
+        return Err(Error::Unsupported("out of memory for a frame".into()));
+    }
+    // No pixels in `data`: only the GPU reads the picture.
+    f.buf[0] = buf;
+    f.format = PIX_FMT_SHARED;
+    f.width = size.0 as i32;
+    f.height = size.1 as i32;
+    Ok(())
+}
+
+/// The [`Lent`] of a shared frame.
+fn lent(f: &ff::AVFrame) -> Option<&Lent> {
+    if f.format != PIX_FMT_SHARED || f.buf[0].is_null() {
+        return None;
+    }
+    // SAFETY: shared frames are built by set_shared: buf[0] holds a Lent,
+    // alive while the frame references it.
+    unsafe { ((*f.buf[0]).data as *const Lent).as_ref() }
+}
+
 /// One plane of a frame.
 pub struct Plane<'a> {
     pub data: &'a [u8],
@@ -298,6 +394,15 @@ impl VideoFrame {
         unsafe { ((*self.frame).data[0] as *const ff::AVDRMFrameDescriptor).as_ref() }
     }
 
+    /// The picture in the decoder's own buffer, for frames the GPU reads
+    /// there ([`SharedPicture`]). Such frames have no [`VideoFrame::planes`]
+    /// or [`VideoFrame::q10c`]: the CPU can't read them.
+    pub fn shared(&self) -> Option<&SharedPicture> {
+        // SAFETY: the frame is valid while self lives.
+        let f = unsafe { self.frame.as_ref() }?;
+        lent(f).map(|l| &l.picture)
+    }
+
     /// The decoder's buffer, when the layout is Q10c. Such frames keep the
     /// whole buffer in `data[0]`, the UV plane's start in `data[1]`, the
     /// stride in `linesize[0]` and the buffer's luma rows in `linesize[2]`.
@@ -470,6 +575,7 @@ impl FrameConverter {
             ff::AV_PIX_FMT_NV12 => Some(PixelLayout::Nv12),
             ff::AV_PIX_FMT_P010LE => Some(PixelLayout::P010),
             PIX_FMT_Q10C => Some(PixelLayout::Q10c),
+            PIX_FMT_SHARED => lent(f).map(|l| l.layout),
             _ => None,
         }
         // Rows stored bottom up (negative strides) go through swscale, which
@@ -583,6 +689,81 @@ impl FrameConverter {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::sync::Arc;
+    use std::sync::atomic::{AtomicUsize, Ordering};
+
+    /// A shared frame of `layout` whose release counts into `released`.
+    fn shared_frame(layout: PixelLayout, released: &Arc<AtomicUsize>) -> *mut ff::AVFrame {
+        let picture = SharedPicture {
+            fd: 7,
+            len: 4096,
+            stride: 64,
+            rows: 32,
+            uv_offset: 2048,
+            buffer: 1,
+            set: 1,
+        };
+        let r = released.clone();
+        let lent = Box::new(Lent {
+            picture,
+            layout,
+            release: Some(Box::new(move || {
+                r.fetch_add(1, Ordering::SeqCst);
+            })),
+        });
+        // SAFETY: a fresh frame, then made shared.
+        unsafe {
+            let f = ff::av_frame_alloc();
+            set_shared(&mut *f, lent, (60, 30)).unwrap();
+            f
+        }
+    }
+
+    #[test]
+    fn a_shared_frame_gives_its_buffer_back_once_its_last_copy_goes() {
+        let released = Arc::new(AtomicUsize::new(0));
+        let raw = shared_frame(PixelLayout::Nv12, &released);
+        // SAFETY: a valid frame; the clone adds a reference to its buffer.
+        let mut copy = unsafe { ff::av_frame_clone(raw) };
+        let frame = FrameConverter::default()
+            .convert(raw, 1.0, 0.04, 3)
+            .unwrap();
+        // SAFETY: our own reference.
+        unsafe { ff::av_frame_free(&mut copy) };
+        assert_eq!(
+            released.load(Ordering::SeqCst),
+            0,
+            "the frame still holds it"
+        );
+        assert_eq!(frame.layout, PixelLayout::Nv12);
+        assert_eq!((frame.width, frame.height, frame.serial), (60, 30, 3));
+        assert_eq!(frame.shared().map(|p| (p.fd, p.uv_offset)), Some((7, 2048)));
+        // Only the GPU reads it.
+        assert!(frame.planes().is_empty());
+        drop(frame);
+        assert_eq!(released.load(Ordering::SeqCst), 1);
+    }
+
+    #[test]
+    fn a_shared_q10c_frame_has_no_cpu_picture() {
+        let released = Arc::new(AtomicUsize::new(0));
+        let frame = FrameConverter::default()
+            .convert(shared_frame(PixelLayout::Q10c, &released), 0.0, 0.0, 0)
+            .unwrap();
+        assert_eq!(frame.layout, PixelLayout::Q10c);
+        assert!(frame.q10c().is_none());
+        assert_eq!(frame.shared().map(|p| p.rows), Some(32));
+        drop(frame);
+        assert_eq!(released.load(Ordering::SeqCst), 1);
+    }
+
+    #[test]
+    fn copied_frames_are_not_shared() {
+        let rgba = vec![255u8; 16 * 16 * 4];
+        let f = VideoFrame::from_rgba_as(16, 16, &rgba, PixelLayout::Nv12, false).unwrap();
+        assert!(f.shared().is_none());
+        assert!(!f.planes().is_empty());
+    }
 
     #[test]
     fn from_rgba_grey_has_neutral_chroma() {
