@@ -13,6 +13,7 @@ use crate::params::{self, SceneParams, VideoParams};
 use crate::peak::PeakPass;
 use crate::pipeline::{self, PipelineDesc};
 use crate::q10c::Converter;
+use crate::timing::{FrameTimer, GpuTimes, Mark};
 use crate::video::VideoPlanes;
 use crate::{Result, VkContext};
 use ash::vk;
@@ -186,6 +187,10 @@ pub struct Renderer {
     /// default peak.
     peak: Option<PeakPass>,
     hdr_peak: PeakDetector,
+    /// Times each frame's parts on the GPU, where it has timestamps.
+    timer: Option<FrameTimer>,
+    /// The parts of the last frame the GPU finished.
+    gpu_times: Option<GpuTimes>,
     /// Decoder buffers imported to be read in place.
     imports: crate::shared::Imports,
     /// The decoder buffer set of the last shared frame, whose imports stay
@@ -380,6 +385,8 @@ impl Renderer {
                     .inspect_err(|e| log::warn!("HDR scenes aren't measured: {e}"))
                     .ok(),
                 hdr_peak: PeakDetector::default(),
+                timer: FrameTimer::new(&gpu, SLOTS),
+                gpu_times: None,
                 imports: Default::default(),
                 shared_set: None,
                 shared_desc: None,
@@ -704,11 +711,32 @@ impl Renderer {
         slot.egui_vb_used = 0;
         slot.egui_ib_used = 0;
         slot.staging_used = 0;
+        let cmd = slot.cmd;
         if let Some(hist) = self.peak.as_mut().and_then(|p| p.take(self.current)) {
             self.hdr_peak.add(&hist);
         }
+        if let Some(t) = self.timer.as_mut() {
+            // Read before `begin` resets the queries for this frame.
+            self.gpu_times = t.read(&self.gpu, self.current);
+            t.begin(&self.gpu, cmd, self.current);
+        }
         self.recording = true;
         Ok(())
+    }
+
+    /// The parts of the last frame the GPU finished, two frames back.
+    pub fn gpu_times(&self) -> Option<GpuTimes> {
+        self.gpu_times
+    }
+
+    fn stamp(&mut self, mark: Mark) {
+        if !self.recording {
+            return;
+        }
+        let cmd = self.slots[self.current].cmd;
+        if let Some(t) = self.timer.as_mut() {
+            t.stamp(&self.gpu, cmd, self.current, mark);
+        }
     }
 
     /// Uploads the frame to show (or clears the video when `None`).
@@ -720,6 +748,13 @@ impl Renderer {
     /// A frame in the decoder's own buffer ([`VideoFrame::shared`]) is read
     /// there instead, without a copy, and kept until the GPU is done with it.
     pub fn set_video(&mut self, frame: Option<&Arc<VideoFrame>>) -> Result<()> {
+        self.stamp(Mark::Video);
+        let r = self.show_video(frame);
+        self.stamp(Mark::VideoDone);
+        r
+    }
+
+    fn show_video(&mut self, frame: Option<&Arc<VideoFrame>>) -> Result<()> {
         let Some(f) = frame else {
             let slot = &mut self.slots[self.current];
             if slot.has_video {
@@ -1320,6 +1355,19 @@ impl Renderer {
         video: &VideoParams,
         quads: &[QuadDraw],
     ) -> Result<()> {
+        self.stamp(Mark::Eyes);
+        let r = self.draw_eyes(targets, eyes, video, quads);
+        self.stamp(Mark::EyesDone);
+        r
+    }
+
+    fn draw_eyes(
+        &mut self,
+        targets: &[EyeTarget; 2],
+        eyes: &[EyeView; 2],
+        video: &VideoParams,
+        quads: &[QuadDraw],
+    ) -> Result<()> {
         self.update_scene_set();
         let inv = [
             (eyes[0].proj * eyes[0].view).inverse(),
@@ -1499,6 +1547,8 @@ impl Renderer {
             // Acquired in set_video; released to the decoder once read.
             self.imports.release_nv12(&self.gpu, slot.cmd, buffer);
         }
+        self.stamp(Mark::End);
+        let slot = &self.slots[self.current];
         let d = &self.gpu.device;
         // SAFETY: the command buffer is recording; fence is unsignalled after reset.
         unsafe {
@@ -1839,6 +1889,9 @@ impl Drop for Renderer {
             }
             if let Some(mut p) = self.peak.take() {
                 p.destroy(&gpu);
+            }
+            if let Some(mut t) = self.timer.take() {
+                t.destroy(&gpu);
             }
             self.imports.destroy(&gpu);
             for mut s in self.slots.drain(..) {

@@ -61,6 +61,7 @@ struct Sim {
     start: Instant,
     last: Instant,
     frames: u64,
+    gpu_ms: crate::perf::GpuWindow,
     out: std::path::PathBuf,
 }
 
@@ -81,6 +82,7 @@ impl Sim {
         let dt = self.last.elapsed().as_secs_f32().clamp(0.001, 0.1);
         self.last = Instant::now();
         self.renderer.begin_frame()?;
+        self.gpu_ms.push(self.renderer.gpu_times());
         let hands = [Hand::default(), self.hand];
         let head = Some((self.head_pos(), self.head));
         let out = self.app.frame(
@@ -532,6 +534,12 @@ impl Sim {
             Some("grip") => self.hand.squeeze = num(1)?,
             Some("trigger") => self.hand.trigger = num(1)?,
             Some("status") => println!("status: {}", self.app.status_line()),
+            // The GPU's time per frame since the last `gpu`: `gpu`.
+            Some("gpu") => {
+                if let Some(line) = self.gpu_ms.take_line() {
+                    println!("{line}");
+                }
+            }
             Some("squeeze") => {
                 self.hand.squeeze = 1.0;
                 self.run_frames(2)?;
@@ -872,6 +880,7 @@ pub fn run(args: &Args, out: &Path) -> Result<(), Error> {
         start: Instant::now(),
         last: Instant::now(),
         frames: 0,
+        gpu_ms: Default::default(),
         out: out.to_path_buf(),
     };
     sim.hand.aim = Some((sim.hand_pos(), Quat::IDENTITY));
@@ -891,6 +900,9 @@ pub fn run(args: &Args, out: &Path) -> Result<(), Error> {
         }
     }
     println!("{} frames rendered", sim.frames);
+    if let Some(line) = sim.gpu_ms.take_line() {
+        println!("{line}");
+    }
     let Sim {
         app,
         renderer,

@@ -488,6 +488,63 @@ fn gpu_time() -> Option<u64> {
 }
 
 /// The GPU's clock (MHz) from its devfreq node, the one named for a GPU.
+/// One part of a frame's GPU time.
+type Part = fn(&fp_render::GpuTimes) -> Option<f32>;
+
+/// The GPU's time per frame over a stretch of frames, from the renderer's
+/// timestamps, for the log.
+#[derive(Default)]
+pub struct GpuWindow {
+    frames: Vec<fp_render::GpuTimes>,
+}
+
+impl GpuWindow {
+    pub fn push(&mut self, times: Option<fp_render::GpuTimes>) {
+        self.frames.extend(times);
+    }
+
+    /// The frames since the last call as one line, the GPU's clock at the
+    /// end (it decides how long the same work takes); `None` without any.
+    pub fn take_line(&mut self) -> Option<String> {
+        let frames = std::mem::take(&mut self.frames);
+        let sorted = |part: Part| {
+            let mut v: Vec<f32> = frames.iter().filter_map(part).collect();
+            v.sort_by(f32::total_cmp);
+            v
+        };
+        let at = |v: &[f32], q: f32| v[((v.len() - 1) as f32 * q) as usize];
+        let total = sorted(|t| t.total);
+        if total.is_empty() {
+            return None;
+        }
+        let mut line = format!(
+            "frame GPU ms: median {:.1}, 95% {:.1}, max {:.1} over {} frames",
+            at(&total, 0.5),
+            at(&total, 0.95),
+            at(&total, 1.0),
+            total.len()
+        );
+        let parts: [(&str, Part); 4] = [
+            ("video", |t| t.video),
+            ("eyes", |t| t.eyes),
+            ("panels", |t| t.panels),
+            ("layers", |t| t.layers),
+        ];
+        let medians: Vec<String> = parts
+            .iter()
+            .filter_map(|&(name, part)| {
+                let v = sorted(part);
+                (!v.is_empty()).then(|| format!("{name} {:.2}", at(&v, 0.5)))
+            })
+            .collect();
+        line += &format!("; medians {}", medians.join(", "));
+        if let Some(mhz) = gpu_clock() {
+            line += &format!("; GPU at {mhz} MHz");
+        }
+        Some(line)
+    }
+}
+
 fn gpu_clock() -> Option<u32> {
     std::fs::read_dir("/sys/class/devfreq")
         .ok()?
@@ -501,6 +558,31 @@ fn gpu_clock() -> Option<u32> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn the_gpu_line_gives_the_frame_spread_and_each_parts_median() {
+        let mut w = GpuWindow::default();
+        assert_eq!(w.take_line(), None);
+        for i in 0..20 {
+            w.push(Some(fp_render::GpuTimes {
+                panels: Some(0.1),
+                video: (i % 2 == 0).then_some(1.0),
+                eyes: Some(3.0 + i as f32 / 10.0),
+                layers: None,
+                total: Some(4.0 + i as f32 / 10.0),
+            }));
+        }
+        w.push(None);
+        let line = w.take_line().expect("a line");
+        assert!(
+            line.starts_with(
+                "frame GPU ms: median 4.9, 95% 5.8, max 5.9 over 20 frames; \
+                 medians video 1.00, eyes 3.90, panels 0.10"
+            ),
+            "{line}"
+        );
+        assert_eq!(w.take_line(), None, "the window starts again");
+    }
 
     // As read on a Steam Frame (SteamOS 0.4.5).
     const STAT: &str = "cpu  400447 132664 196222 7662770 1308 77230 21967 0 0 0\n\
