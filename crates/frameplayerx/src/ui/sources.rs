@@ -17,6 +17,7 @@ pub(super) fn kind_icon(kind: SourceKind) -> &'static str {
         SourceKind::DeoVr | SourceKind::HereSphere => icons::VIRTUAL_REALITY,
         SourceKind::MediaBrowser | SourceKind::Plex => icons::MONITOR_PLAY,
         SourceKind::Smb => icons::SHARE_NETWORK,
+        SourceKind::Sftp => icons::TERMINAL_WINDOW,
     }
 }
 
@@ -36,6 +37,7 @@ pub(super) fn kind_label(kind: SourceKind) -> &'static str {
         SourceKind::DeoVr => tr!("source-kind-deovr"),
         SourceKind::HereSphere => tr!("source-kind-heresphere"),
         SourceKind::Smb => tr!("source-kind-smb"),
+        SourceKind::Sftp => tr!("source-kind-sftp"),
         SourceKind::MediaBrowser => "Jellyfin/Emby",
         SourceKind::Plex => "Plex",
     }
@@ -46,6 +48,8 @@ fn kind_chip_label(kind: SourceKind) -> &'static str {
     match kind {
         SourceKind::DeoVr => "DeoVR",
         SourceKind::HereSphere => "HereSphere",
+        SourceKind::Smb => "SMB",
+        SourceKind::Sftp => "SFTP",
         _ => kind_label(kind),
     }
 }
@@ -532,7 +536,7 @@ fn pin_form(ui: &mut egui::Ui, v: &mut View) {
     }
 }
 
-fn kinds() -> [(SourceKind, &'static str); 9] {
+fn kinds() -> [(SourceKind, &'static str); 10] {
     [
         (SourceKind::Library, tr!("source-kind-library-desc")),
         (SourceKind::MediaBrowser, tr!("source-kind-jellyfin-desc")),
@@ -542,6 +546,7 @@ fn kinds() -> [(SourceKind, &'static str); 9] {
         (SourceKind::WebDav, tr!("source-kind-webdav-desc")),
         (SourceKind::Http, tr!("source-kind-http-desc")),
         (SourceKind::Smb, tr!("source-kind-smb-desc")),
+        (SourceKind::Sftp, tr!("source-kind-sftp-desc")),
         (SourceKind::Dlna, tr!("source-kind-dlna-desc")),
     ]
 }
@@ -556,6 +561,7 @@ pub(super) fn address_hint(kind: SourceKind) -> &'static str {
         SourceKind::WebDav => "https://nas.local/dav/videos/",
         SourceKind::Http => "http://192.168.1.10:8080/videos/",
         SourceKind::Smb => "smb://nas.local/videos",
+        SourceKind::Sftp => "sftp://pc.local/~/Videos",
         SourceKind::Dlna => "",
     }
 }
@@ -569,6 +575,7 @@ pub(super) fn name_hint(kind: SourceKind) -> &'static str {
         SourceKind::WebDav => tr!("source-name-hint-webdav"),
         SourceKind::Http => tr!("source-name-hint-http"),
         SourceKind::Smb => tr!("source-name-hint-smb"),
+        SourceKind::Sftp => tr!("source-name-hint-sftp"),
         SourceKind::Local | SourceKind::Library => tr!("source-name-hint-library"),
         SourceKind::Dlna => tr!("source-name-hint"),
     }
@@ -649,7 +656,8 @@ fn form_header(ui: &mut egui::Ui, f: &mut SourceForm, editing: Option<&SourceCon
         });
     } else {
         ui.horizontal_wrapped(|ui| {
-            ui.spacing_mut().item_spacing = Vec2::new(8.0, 8.0);
+            // Tight enough for every type to fit on one line in English.
+            ui.spacing_mut().item_spacing = Vec2::new(4.0, 8.0);
             for (k, _) in kinds() {
                 if widgets::chip_icon(ui, Some(kind_icon(k)), kind_chip_label(k), f.kind == k)
                     .clicked()
@@ -861,6 +869,7 @@ fn server_form(
     let mut save = None;
     let local = f.kind == SourceKind::Local;
     let smb = f.kind == SourceKind::Smb;
+    let sftp = f.kind == SourceKind::Sftp;
     let is_mb = f.kind == SourceKind::MediaBrowser;
     if is_mb && f.use_quick_connect {
         poll_quick_connect(ui, f, actions);
@@ -902,7 +911,8 @@ fn server_form(
             } else {
                 r.row(
                     tr!("source-user-name"),
-                    Some(tr!("source-user-name-desc")),
+                    // SFTP always needs one.
+                    (!sftp).then_some(tr!("source-user-name-desc")),
                     |ui| {
                         text_field(ui, &mut f.username, "", false);
                     },
@@ -911,7 +921,10 @@ fn server_form(
                     text_field(ui, &mut f.password, "", true);
                 });
             }
-            if !smb {
+            if sftp {
+                key_rows(r, f);
+            }
+            if !smb && !sftp {
                 r.switch(
                     tr!("source-self-signed"),
                     Some(tr!("source-self-signed-desc")),
@@ -1174,6 +1187,16 @@ pub fn edit_form(cfg: &SourceConfig) -> SourceForm {
             creds(&c.credentials);
             f.address = fp_sources::smb::smb_url(&c.host, c.port, &c.share, &c.path);
         }
+        SourceConfig::Sftp(c) => {
+            creds(&c.credentials);
+            f.address = fp_sources::sftp::sftp_url(&c.host, c.port, &c.path);
+            f.key_file = c
+                .key_file
+                .as_ref()
+                .map(|p| p.display().to_string())
+                .unwrap_or_default();
+            f.key_passphrase = c.key_passphrase.clone();
+        }
         SourceConfig::MediaBrowser(c) => {
             creds(&c.credentials);
             f.address = c.url.clone();
@@ -1211,9 +1234,82 @@ fn keep_hidden(mut new: SourceConfig, old: &SourceConfig) -> SourceConfig {
         (SourceConfig::MediaBrowser(n), SourceConfig::MediaBrowser(o)) => {
             n.max_height = o.max_height;
         }
+        // The same server keeps the key trusted for it.
+        (SourceConfig::Sftp(n), SourceConfig::Sftp(o))
+            if n.host.eq_ignore_ascii_case(&o.host)
+                && n.port.unwrap_or(22) == o.port.unwrap_or(22) =>
+        {
+            n.host_key = o.host_key.clone();
+        }
         _ => {}
     }
     new
+}
+
+/// An SFTP source's private key file, with the key files found on the
+/// headset to pick from, and its passphrase.
+fn key_rows(r: &mut widgets::Rows, f: &mut SourceForm) {
+    let found = f.key_files.get_or_insert_with(|| {
+        fp_sources::sftp::key_files()
+            .into_iter()
+            .map(|p| p.display().to_string())
+            .collect()
+    });
+    let key_file = &mut f.key_file;
+    r.row(
+        tr!("source-key-file"),
+        Some(tr!("source-key-file-desc")),
+        |ui| text_field(ui, key_file, "/home/steamos/.ssh/id_ed25519", false),
+    );
+    if !found.is_empty() {
+        r.content(|ui| {
+            ui.horizontal_wrapped(|ui| {
+                ui.spacing_mut().item_spacing = Vec2::new(8.0, 8.0);
+                let home = std::env::var("HOME").unwrap_or_default();
+                for path in found.iter() {
+                    let picked = *key_file == *path;
+                    let label = match path.strip_prefix(&home) {
+                        Some(rest) if !home.is_empty() => format!("~{rest}"),
+                        _ => path.clone(),
+                    };
+                    if widgets::chip_icon(ui, Some(icons::KEY), &label, picked).clicked() {
+                        *key_file = if picked { String::new() } else { path.clone() };
+                    }
+                }
+            });
+        });
+    }
+    let path = f.key_file.trim();
+    if f.key_locked
+        .as_ref()
+        .is_none_or(|(checked, _)| checked != path)
+    {
+        let locked = (!path.is_empty())
+            .then(|| fp_sources::sftp::key_is_locked(std::path::Path::new(path)))
+            .flatten();
+        f.key_locked = Some((path.to_string(), locked));
+    }
+    // A passphrase for a file that can't be read yet stays in view.
+    let ask = match key_locked(f) {
+        Some(locked) => locked,
+        None => !path.is_empty() && !f.key_passphrase.is_empty(),
+    };
+    if ask {
+        r.row(
+            tr!("source-key-passphrase"),
+            Some(tr!("source-key-passphrase-desc")),
+            |ui| text_field(ui, &mut f.key_passphrase, "", true),
+        );
+    }
+}
+
+/// Whether the form's key file is password-protected, as last checked;
+/// `None` when unknown.
+fn key_locked(f: &SourceForm) -> Option<bool> {
+    f.key_locked
+        .as_ref()
+        .filter(|(checked, _)| checked == f.key_file.trim())
+        .and_then(|(_, locked)| *locked)
 }
 
 /// Builds a source configuration from the form, validating the address.
@@ -1335,6 +1431,44 @@ pub fn build_config(f: &SourceForm, id: String) -> Result<SourceConfig, String> 
                 share,
                 path,
                 credentials,
+            })
+        }
+        SourceKind::Sftp => {
+            let a = fp_sources::sftp::SftpAddress::parse(&address)
+                .map_err(|_| tr!("source-error-sftp").to_string())?;
+            // The user in the address when the field is left empty.
+            let user = Some(f.username.trim().to_string())
+                .filter(|u| !u.is_empty())
+                .or(a.user)
+                .ok_or_else(|| tr!("source-error-sftp-user").to_string())?;
+            let key_file = Some(f.key_file.trim())
+                .filter(|k| !k.is_empty())
+                .map(std::path::PathBuf::from);
+            if key_file.is_none() && f.password.is_empty() {
+                return Err(tr!("source-error-sftp-sign-in").into());
+            }
+            let locked = key_locked(f);
+            if locked == Some(true) && f.key_passphrase.is_empty() {
+                return Err(tr!("source-error-key-passphrase").into());
+            }
+            SourceConfig::Sftp(fp_sources::SftpConfig {
+                id,
+                name: if f.name.trim().is_empty() {
+                    a.host.clone()
+                } else {
+                    name
+                },
+                host: a.host,
+                port: a.port,
+                path: a.path,
+                credentials: Some(Credentials::new(user, f.password.clone())),
+                key_passphrase: if key_file.is_some() && locked != Some(false) {
+                    f.key_passphrase.clone()
+                } else {
+                    String::new()
+                },
+                key_file,
+                host_key: None,
             })
         }
         SourceKind::MediaBrowser => {
@@ -1498,6 +1632,51 @@ mod tests {
         }
         f.address = "smb://".into();
         assert!(build_config(&f, "x".into()).is_err());
+
+        // SFTP: the user from the address, and a password or a key file.
+        let mut f = SourceForm {
+            kind: SourceKind::Sftp,
+            address: "sftp://me@pc.local:2222/~/Videos".into(),
+            ..Default::default()
+        };
+        assert!(build_config(&f, "x".into()).is_err(), "no way to sign in");
+        f.key_file = "/home/steamos/.ssh/desktop.ppk".into();
+        f.key_passphrase = "words".into();
+        match build_config(&f, "x".into()).unwrap() {
+            SourceConfig::Sftp(c) => {
+                assert_eq!(
+                    (c.host.as_str(), c.port, c.path.as_str(), c.name.as_str()),
+                    ("pc.local", Some(2222), "~/Videos", "pc.local")
+                );
+                assert_eq!(c.credentials.unwrap().username, "me");
+                assert_eq!(c.key_passphrase, "words");
+            }
+            other => panic!("{other:?}"),
+        }
+        // A password-protected key needs its passphrase; an open one keeps none.
+        let path = f.key_file.clone();
+        f.key_locked = Some((path.clone(), Some(true)));
+        f.key_passphrase.clear();
+        assert!(build_config(&f, "x".into()).is_err(), "no passphrase");
+        f.key_locked = Some((path, Some(false)));
+        f.key_passphrase = "words".into();
+        match build_config(&f, "x".into()).unwrap() {
+            SourceConfig::Sftp(c) => assert!(c.key_passphrase.is_empty()),
+            other => panic!("{other:?}"),
+        }
+        f.address = "sftp://pc.local/".into();
+        assert!(build_config(&f, "x".into()).is_err(), "no user");
+        f.username = "you".into();
+        f.key_file.clear();
+        // Not a literal: CodeQL reports literal passwords, even in tests.
+        f.password = std::process::id().to_string();
+        match build_config(&f, "x".into()).unwrap() {
+            SourceConfig::Sftp(c) => {
+                assert!(c.key_file.is_none() && c.key_passphrase.is_empty());
+                assert_eq!(c.path, "");
+            }
+            other => panic!("{other:?}"),
+        }
         f.kind = SourceKind::DeoVr;
         f.address = "192.168.1.5:9999/deovr".into();
         f.username = "me".into();

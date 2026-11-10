@@ -105,7 +105,7 @@ headset's Noto Sans CJK; for the preview, install it with
 | `fp-xr` | OpenXR: the session and swapchains, controller input, passthrough |
 | `fp-xr-loader` | Finds the active OpenXR runtime and loads it directly, with no Khronos loader to ship (shared with `frame-probe`) |
 | `fp-library` | The SQLite database: folder scanning, the metadata and thumbnail worker, search, watch history |
-| `fp-sources` | Sources: local folders, HTTP, WebDAV, DLNA, SMB, DeoVR and HereSphere feeds, Jellyfin, Emby and Plex |
+| `fp-sources` | Sources: local folders, HTTP, WebDAV, DLNA, SMB, SFTP, DeoVR and HereSphere feeds, Jellyfin, Emby and Plex |
 | `fp-haptics` | Funscripts, the sync engine, and TCode, Buttplug and Handy devices |
 | `fp-remote` | The DeoVR remote API and the phone web remote |
 | `fp-updater` | Signed update manifests, download, install and rollback; the `fp-release` maintainer tool |
@@ -177,7 +177,7 @@ Persistent source references use
 `source://source/<encoded-source-id>/<kind>/<encoded-key>`
 (`fp-sources/src/location.rs`). Each component is encoded separately; the
 key is one opaque segment, including any encoded path separators. HTTP(S),
-WebDAV and SMB keys are relative to the configured root; Jellyfin and Emby
+WebDAV, SMB and SFTP keys are relative to the configured root; Jellyfin and Emby
 keys retain item and version IDs, and DLNA uses object IDs rather than
 resource URLs. Feeds use published stable scene IDs where available;
 otherwise scene, media and asset URLs remain exactly as published,

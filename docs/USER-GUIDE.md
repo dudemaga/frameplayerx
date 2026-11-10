@@ -168,6 +168,7 @@ that pairing, you can also delete `~/.ssh/id_rsa_frame_devkit` and
 | Any folder on the headset, a microSD card or a USB drive | Browse it under Home › On this device, or make it a library: Sources › Add source › Library |
 | Any server with a DeoVR feed or HereSphere API | Sources › Add source › DeoVR or HereSphere |
 | NAS / Windows share | Sources › Add source › SMB share: a whole server (`smb://nas/`, which lists the shares your login, or a guest without one, may open) or one share or folder (`smb://nas/videos`) |
+| Any computer with SSH (Linux, macOS, many NAS) | Sources › Add source › SFTP (see [Connecting over SFTP](#connecting-over-sftp)) |
 | Nextcloud and other WebDAV | Sources › Add source › WebDAV |
 | Jellyfin, Emby | Sources › Add source › Jellyfin / Emby (a password, or Quick Connect on Jellyfin) |
 | Plex | Sources › Add source › Plex › Link with code; enter the code at plex.tv/link on your phone or computer, then choose a server |
@@ -266,7 +267,7 @@ Videos of a source locked with a PIN are left out until it is unlocked.
 | Jellyfin / Emby | Your libraries, *Continue watching*, *Next up* and the latest additions; a search of the whole server by title, as Jellyfin's own search shows it: a row each of movies, shows, collections and other videos, best matches first (episodes are found through their show), a *People* row of the cast and crew whose names match (tap one to see what they are in), and a *Tagged* row of what carries a tag with your words in it; poster grids searched, sorted (title, date added, release date, rating, length, last watched, shuffle) and filtered by the server: unwatched, in progress, favorites, and **Filters** for genres, decades, resolution, studios and tags; series by season and episode; details with the story, cast, genres and tags (tap a tag to see everything that has it), and a *Version* row when the server keeps more than one version of a video (4K and 1080p, a director's cut): *Automatic* plays the tallest that fits the source's maximum height; pick another and the video plays from it wherever you open it (subtitles included) until the app closes. Each version keeps its own format and adjustments, as a separate video in your history. Watched marks, favorites and resume points are the server's (see [Watch sync](#watch-sync-with-jellyfin-emby-plex-and-heresphere)) |
 | DeoVR feed / HereSphere API | The server's scene groups as chips over a grid of scenes; search the chosen group (or *All*) across titles, studios, performers and tags; order by title, date, rating or length, either way, or shuffle; *Favorites* (and *Scripted*, with haptics on), and **Filters** for studio, people, tags, length, format and rating, each with how many scenes have it (a DeoVR feed's studios, tags and performers come with each scene's details, fetched while you search or filter and kept for next time). ⋯ opens a scene's details: description, performers and tags (tap one to see all their scenes), chapters to start from, and ♡ to make it a favourite on a HereSphere API that takes favourites. The page opens with the scenes from last time while the server sends the current list ("updating…" under the title). A HereSphere API can also sync watch state (see [Watch sync](#watch-sync-with-jellyfin-emby-plex-and-heresphere)) |
 | Plex | Movie, TV and personal-video libraries; Continue watching and recent additions; server search, sorted and shuffled grids, unwatched and in-progress filters, and genre, studio and decade filters. Shows open by season and episode; details include artwork, chapters and available versions. Resume points and watched marks belong to the selected Plex account. Plex server favorites, people and tag browsing are not offered. App playlists, Up next, history and format adjustments work as with other video sources |
-| SMB, WebDAV, HTTP folders, DLNA, local folders | Folders and files: search the folder you are in, order by name, date or size, *Play all* |
+| SMB, SFTP, WebDAV, HTTP folders, DLNA, local folders | Folders and files: search the folder you are in, order by name, date or size, *Play all* |
 
 **Filters** opens a drawer on the right: what you pick there applies at
 once, any of the choices in a section and all of the sections together,
@@ -335,6 +336,38 @@ the selected server's media connection; entering `app.plex.tv` in the
 manual address field starts account linking. Plex Home profile switching,
 live TV, music, photos, cloud Watchlist and casting are not supported.
 
+### Connecting over SFTP
+
+Any computer you can sign in to with SSH can be a source: Linux, macOS and
+many NAS. Under **Sources › Add source › SFTP**, the address says which
+folder to open:
+
+| Address | Opens |
+|---|---|
+| `sftp://pc.local/` | Your home folder on the server |
+| `sftp://pc.local/~/Videos` | A folder in your home folder |
+| `sftp://pc.local/srv/media` | Any other folder, from the top of the server's disk |
+
+Add the port after the name (`sftp://pc.local:2222/`) if the server doesn't
+use 22. A user name is always needed; one in the address
+(`sftp://me@pc.local/`) works as well as the **User name** field.
+
+Sign in with a password, a key file, or both: the key is tried first.
+A key file is a private key on the headset, from OpenSSH (`id_ed25519`,
+`id_rsa`) or PuTTY (`.ppk`). Copy it to `~/.ssh` or `~/Downloads` on the
+headset and it's listed under the field: tap it to use it. If the key is
+password-protected, a **Key passphrase** row appears: enter the passphrase
+you set when you made the key, not your account password.
+
+The first time it connects, FramePlayerX remembers the server's identity
+key. If the server later answers with a different key, the source stops
+with an error instead of signing in. If you reinstalled the server or gave
+it a new key, remove the source and add it again; otherwise another
+machine may be answering in its place.
+
+Files and folders whose names start with a dot (hidden on Linux and macOS)
+aren't listed.
+
 ### Locking a source with a PIN
 
 To keep a share or folder private when someone else uses the headset, press
@@ -353,7 +386,7 @@ own, if it shows the same videos.
 
 ### Parallel downloads
 
-A server's form has a **Parallel downloads** switch, off by default. On, FramePlayerX downloads several parts of a video at once over separate connections while it plays, the way some download managers do. This helps if the server limits the speed of each connection. If it doesn't, the switch may gain nothing, and a server on hard drives can get slower, because the drives have to jump between parts of the file. SMB shares and DLNA servers don't have the switch.
+A server's form has a **Parallel downloads** switch, off by default. On, FramePlayerX downloads several parts of a video at once over separate connections while it plays, the way some download managers do. This helps if the server limits the speed of each connection. If it doesn't, the switch may gain nothing, and a server on hard drives can get slower, because the drives have to jump between parts of the file. SMB shares, SFTP servers and DLNA servers don't have the switch.
 
 ### Editing a source
 
@@ -367,7 +400,7 @@ existing source. History, resume points, playlists and adjustments follow
 the same relative paths or server item IDs. Removing and adding the source
 again creates a different identity.
 
-HTTP(S), WebDAV and SMB use paths relative to the configured root.
+HTTP(S), WebDAV, SMB and SFTP use paths relative to the configured root.
 Jellyfin and Emby use item and version IDs; DLNA uses object IDs, and Plex
 keeps its server and item IDs. Feeds keep scene, media and artwork URLs
 exactly as published, unless a stable scene ID allows a fresh lookup.
