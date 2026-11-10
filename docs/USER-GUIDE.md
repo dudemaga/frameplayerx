@@ -9,6 +9,7 @@ or your network.
   PIN locks, microSD cards and USB drives
 - [Video formats](#video-formats), [fisheye lenses](#fisheye-lenses) and
   [videos that stutter](#videos-that-stutter-av1-and-422)
+- [Display](#display): refresh rate, resolution and foveated rendering
 - [Controls](#controls), and [watching lying down](#watching-lying-down)
 - [Passthrough videos](#passthrough-videos)
 - [Haptics](#haptics)
@@ -740,6 +741,32 @@ size asked. Jellyfin and Emby send H.264, or HEVC when their admin allowed
 it (Dashboard › Playback › Transcoding), and pick their own limits:
 Jellyfin transcodes to at most 3840 pixels wide, so an 8K 180° video's
 2880p and 2160p both come as 3840×1920.
+
+## Display
+
+**Settings › General › Display** sets how the headset draws the picture.
+Changes apply at once, also while a video plays.
+
+| Setting | Choices | To begin with |
+|---|---|---|
+| Refresh rate | 72, 90, 120 Hz | 120 Hz |
+| Render resolution | 2160, 3072, 3744 pixels across each eye | 3744 |
+| Foveated rendering | Off, Low, High | Low |
+
+- **Refresh rate**: at 120 Hz, 24, 30 and 60 fps videos get even frame
+  timing. A lower rate gives each frame more time and saves battery.
+- **Render resolution**: the size of the picture drawn for each eye. Above
+  the Frame's 2160-pixel panels, 8K video looks sharper and fine detail
+  shimmers less. The menus and the control bar look the same at any
+  resolution.
+- **Foveated rendering**: the picture keeps full detail within 30° of where
+  you look (Low) or 18° (High) and less beyond, where your eyes don't see
+  detail anyway. It follows your eyes; without eye tracking it stays in the
+  middle of each lens. Menus and the pointer always keep full detail.
+
+If a demanding video stutters (8K 10-bit, or a passthrough video with a
+mask), set foveation to High or lower the resolution. With foveation off,
+8K 10-bit video needs a lower resolution or refresh rate to play smoothly.
 
 ## Controls
 

@@ -11,6 +11,8 @@
 //! | `wait-playing [TIMEOUT]` | run until a video is playing |
 //! | `look YAW PITCH [ROLL]` | head direction (and roll, to lie on your side) in degrees |
 //! | `recenter` | recenter on where the head faces |
+//! | `gaze YAW PITCH` / `gaze off` | where the eyes look, in degrees from where the head faces (simulated eye tracking) |
+//! | `foveation off/low/high` | set Settings › General › Display › Foveated rendering |
 //! | `aim YAW PITCH` | controller ray direction in degrees |
 //! | `point PANEL X Y` | aim at a panel (`main`, `bar`, `adjust`, `keyboard`, `tracks`, `perf`) at fractional X, Y |
 //! | `click` | pull and release the trigger |
@@ -57,6 +59,8 @@ struct Sim {
     eyes: OffscreenEyes,
     size: u32,
     head: Quat,
+    /// Where the eyes look, from where the head faces.
+    gaze: Option<Quat>,
     hand: Hand,
     start: Instant,
     last: Instant,
@@ -110,6 +114,10 @@ impl Sim {
             proj,
         };
         let eyes = [ev(self.head_pos() - right), ev(self.head_pos() + right)];
+        self.renderer
+            .set_gaze(self.gaze.map(|g| self.head * g * Vec3::NEG_Z));
+        self.renderer
+            .set_foveation(self.app.settings.display.foveation);
         self.renderer
             .draw(&self.eyes.targets(), &eyes, &out.video, &out.quads)?;
         self.renderer.end_frame()?;
@@ -429,6 +437,15 @@ impl Sim {
                 self.run_frames(3)?;
             }
             // `subtitles always ar`, as Settings › Sound and subtitles does.
+            Some("foveation") => {
+                use fp_core::display::Foveation;
+                self.app.settings.display.foveation = match parts.get(1).copied() {
+                    Some("off") => Foveation::Off,
+                    Some("low") => Foveation::Low,
+                    Some("high") => Foveation::High,
+                    _ => return Err("foveation needs off, low or high".into()),
+                };
+            }
             Some("subtitles") => {
                 use crate::settings::SubtitleMode;
                 self.app.settings.subtitles = match parts.get(1).copied() {
@@ -483,6 +500,12 @@ impl Sim {
             Some("look") => {
                 let roll = num(3).unwrap_or(0.0).to_radians();
                 self.head = dir_quat(num(1)?, num(2)?) * Quat::from_rotation_z(roll);
+            }
+            Some("gaze") => {
+                self.gaze = match parts.get(1) {
+                    Some(&"off") => None,
+                    _ => Some(dir_quat(num(1)?, num(2)?)),
+                };
             }
             Some("recenter") => {
                 self.app.apply(crate::ui::Action::Recenter);
@@ -843,7 +866,9 @@ pub fn run(args: &Args, out: &Path) -> Result<(), Error> {
     fp_media::set_shared_frames(renderer.reads_decoder_buffers());
     let size = args.size.unwrap_or(1024);
     let eyes = OffscreenEyes::new(&renderer, size, size)?;
-    let mut app = crate::make_app()?;
+    let mut app = crate::make_app(crate::settings::Settings::load(
+        &crate::settings::Settings::path(),
+    ))?;
     // The rows a Steam Frame shows, so screenshots cover long values.
     app.set_about(vec![
         ("Mode".into(), "Preview (no headset)".into()),
@@ -872,6 +897,7 @@ pub fn run(args: &Args, out: &Path) -> Result<(), Error> {
         eyes,
         size,
         head: Quat::IDENTITY,
+        gaze: None,
         hand: Hand {
             active: true,
             aim: None,

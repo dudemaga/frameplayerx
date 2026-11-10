@@ -97,9 +97,9 @@ const FORMATS: [vk::Format; 2] = [vk::Format::R8G8B8A8_SRGB, vk::Format::B8G8R8A
 
 impl XrSession {
     /// Creates the session on `gpu` (which must have been created with
-    /// `ctx.creator()`).
-    pub fn new(ctx: Arc<XrContext>, gpu: Arc<Gpu>) -> Result<XrSession> {
-        let mut actions = Actions::new(&ctx.instance)?;
+    /// `ctx.creator()`), with eye pictures `eye_resolution` pixels across.
+    pub fn new(ctx: Arc<XrContext>, gpu: Arc<Gpu>, eye_resolution: u32) -> Result<XrSession> {
+        let mut actions = Actions::new(&ctx.instance, ctx.enabled.ext_eye_gaze_interaction)?;
         let info = xr::vulkan::SessionCreateInfo {
             instance: gpu.instance.handle().as_raw() as _,
             physical_device: gpu.pdev.as_raw() as _,
@@ -139,45 +139,19 @@ impl XrSession {
             .copied()
             .find(|f| formats.contains(&(f.as_raw() as u32)))
             .ok_or_else(|| Error::Runtime(format!("no sRGB swapchain format among {formats:?}")))?;
-        let (w, h) = ctx.eye_size()?;
-        let mut eyes = Vec::new();
-        for _ in 0..2 {
-            let swapchain = session
-                .create_swapchain(&xr::SwapchainCreateInfo {
-                    create_flags: xr::SwapchainCreateFlags::EMPTY,
-                    usage_flags: xr::SwapchainUsageFlags::COLOR_ATTACHMENT
-                        | xr::SwapchainUsageFlags::SAMPLED,
-                    format: format.as_raw() as u32,
-                    sample_count: 1,
-                    width: w,
-                    height: h,
-                    face_count: 1,
-                    array_size: 1,
-                    mip_count: 1,
-                })
-                .ctx("xrCreateSwapchain")?;
-            let images: Vec<vk::Image> = swapchain
-                .enumerate_images()
-                .ctx("xrEnumerateSwapchainImages")?
-                .into_iter()
-                .map(vk::Image::from_raw)
-                .collect();
-            let mut views = Vec::new();
-            for &img in &images {
-                views.push(fp_render::mem::view(&gpu, img, format, 0, 1)?);
-            }
-            eyes.push(Eye {
-                swapchain,
-                images,
-                views,
-            });
-        }
+        let extent = eye_extent(&ctx, eye_resolution)?;
+        let eyes = make_eyes(&session, &gpu, format, extent)?;
         let blend_mode = ctx
             .blend_modes
             .first()
             .copied()
             .unwrap_or(xr::EnvironmentBlendMode::OPAQUE);
-        log::info!("XR session: {w}x{h} per eye, {format:?}, blend {blend_mode:?}");
+        let ((rw, rh), (mw, mh)) = ctx.eye_sizes()?;
+        log::info!(
+            "XR session: {}x{} per eye (runtime recommends {rw}x{rh}, allows up to {mw}x{mh}),              {format:?}, blend {blend_mode:?}",
+            extent.width,
+            extent.height
+        );
         Ok(XrSession {
             ctx,
             gpu,
@@ -187,10 +161,7 @@ impl XrSession {
             space,
             view_space,
             eyes,
-            extent: vk::Extent2D {
-                width: w,
-                height: h,
-            },
+            extent,
             format,
             actions,
             state: xr::SessionState::UNKNOWN,
@@ -202,6 +173,33 @@ impl XrSession {
             launch_closed_at: None,
             quads: std::collections::HashMap::new(),
         })
+    }
+
+    /// Makes the eye pictures `resolution` pixels across. Call between
+    /// frames.
+    pub fn set_eye_resolution(&mut self, resolution: u32) -> Result<()> {
+        let extent = eye_extent(&self.ctx, resolution)?;
+        if extent == self.extent {
+            return Ok(());
+        }
+        let eyes = make_eyes(&self.session, &self.gpu, self.format, extent)?;
+        self.gpu.wait_idle();
+        for e in std::mem::replace(&mut self.eyes, eyes) {
+            for v in e.views {
+                // SAFETY: GPU idle; views were created by us.
+                unsafe { self.gpu.device.destroy_image_view(v, None) };
+            }
+        }
+        self.extent = extent;
+        log::info!("eye pictures {}x{}", extent.width, extent.height);
+        Ok(())
+    }
+
+    /// Runs the display at `hz`, through SteamVR's setting for this app: it
+    /// changes the rate at once, while `XR_FB_display_refresh_rate` offers
+    /// only the current rate and refuses requests.
+    pub fn set_refresh_rate(&self, hz: u32) {
+        self.ctx.set_steamvr_refresh_rate(hz);
     }
 
     pub fn is_running(&self) -> bool {
@@ -586,6 +584,60 @@ impl XrSession {
     pub fn bindings(&self) -> &[crate::BoundProfile] {
         &self.actions.bound
     }
+}
+
+/// The eye pictures' size for `resolution` pixels across: the runtime's
+/// recommended shape, within its largest.
+fn eye_extent(ctx: &XrContext, resolution: u32) -> Result<vk::Extent2D> {
+    let ((rw, rh), (mw, mh)) = ctx.eye_sizes()?;
+    let width = resolution.min(mw).max(1);
+    let height = (u64::from(width) * u64::from(rh) / u64::from(rw.max(1))) as u32;
+    Ok(vk::Extent2D {
+        width,
+        height: height.clamp(1, mh.max(1)),
+    })
+}
+
+/// Each eye's swapchain at `extent`, with a view of every image.
+fn make_eyes(
+    session: &xr::Session<xr::Vulkan>,
+    gpu: &Gpu,
+    format: vk::Format,
+    extent: vk::Extent2D,
+) -> Result<Vec<Eye>> {
+    let mut eyes = Vec::new();
+    for _ in 0..2 {
+        let swapchain = session
+            .create_swapchain(&xr::SwapchainCreateInfo {
+                create_flags: xr::SwapchainCreateFlags::EMPTY,
+                usage_flags: xr::SwapchainUsageFlags::COLOR_ATTACHMENT
+                    | xr::SwapchainUsageFlags::SAMPLED,
+                format: format.as_raw() as u32,
+                sample_count: 1,
+                width: extent.width,
+                height: extent.height,
+                face_count: 1,
+                array_size: 1,
+                mip_count: 1,
+            })
+            .ctx("xrCreateSwapchain")?;
+        let images: Vec<vk::Image> = swapchain
+            .enumerate_images()
+            .ctx("xrEnumerateSwapchainImages")?
+            .into_iter()
+            .map(vk::Image::from_raw)
+            .collect();
+        let mut views = Vec::new();
+        for &img in &images {
+            views.push(fp_render::mem::view(gpu, img, format, 0, 1)?);
+        }
+        eyes.push(Eye {
+            swapchain,
+            images,
+            views,
+        });
+    }
+    Ok(eyes)
 }
 
 impl Drop for XrSession {

@@ -471,8 +471,6 @@ Steam can't pass environment variables to an app, so the launcher reads
 
 | Variable | Default | What it does |
 |---|---|---|
-| `FRAMEPLAYERX_REFRESH_RATE` | `90` | The refresh rate set in SteamVR's per-app settings for FramePlayerX, unless you chose one there. `0` leaves it alone |
-| `FRAMEPLAYERX_RESOLUTION` | `2160` | Pixels per eye, set the same way (SteamVR's default is 1728). `0` leaves it alone |
 | `FRAMEPLAYERX_DEBUG_INPUT` | | `1` logs each controller's input when it changes |
 | `FRAMEPLAYERX_V4L2` | | `0` turns off the native V4L2 decoder |
 | `FRAMEPLAYERX_V4L2_DEVICE` | | The V4L2 device to decode with, instead of the one found |
@@ -493,9 +491,18 @@ What the code relies on about the platform:
   `/interaction_profiles/valve/frame_controller_valve`, from the
   `XR_VALVE_frame_controller_interaction` extension. Without it SteamVR
   presents them as Touch controllers.
-- SteamVR's per-app video settings override what an app asks for through
-  OpenXR, which is why the launcher sets the refresh rate and resolution
-  there.
+- SteamVR runs each app at its per-app refresh rate:
+  `XR_FB_display_refresh_rate` offers only the current rate and refuses
+  requests. Setting the app's `preferredRefreshRate` with `vrcmd` changes
+  the rate at once, which is how Settings › General › Display sets it. The
+  eye picture size is the app's own: it makes its swapchains at the
+  chosen resolution (SteamVR allows up to 8192 per eye); the per-app
+  resolution only changes what SteamVR recommends.
+- Turnip applies a fragment density map once per rendering bin, about 576
+  pixels wide for one 8-bit target, so foveation uses a fragment shading
+  rate attachment instead: 8×8-pixel texels, `R8_UINT` in optimal tiling
+  only, padded to 64 texels (one 270 texels wide was misread near its
+  right edge). The gaze comes from `XR_EXT_eye_gaze_interaction`.
 - The hardware decoder is a V4L2 stateful decoder for 4:2:0 H.264 (8-bit)
   and HEVC (8- and 10-bit). One session takes at most 8192×4320. Every
   session open on the driver lowers that, idle ones and encoders too, so

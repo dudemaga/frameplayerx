@@ -14,6 +14,7 @@
 //!   scene peak, which `peak` measures from the frames.
 
 pub mod capture;
+mod foveation;
 pub mod gpu;
 pub mod hdr;
 pub mod math;
@@ -28,6 +29,7 @@ mod timing;
 mod tp10_eyes;
 mod video;
 
+pub use foveation::Foveation;
 pub use gpu::{Creator, DirectCreator, Gpu};
 pub use params::VideoParams;
 pub use renderer::{EyeTarget, EyeView, PanelId, QuadDraw, QuadTexture, Renderer};

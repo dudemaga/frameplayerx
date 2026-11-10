@@ -105,7 +105,7 @@ impl XrContext {
     /// Closes SteamVR's dashboard, without waiting for it. Does nothing on
     /// other runtimes.
     pub fn hide_steamvr_dashboard(&self) {
-        if let Some(mut c) = self.vrcmd("--hidedashboard") {
+        if let Some(mut c) = self.vrcmd(&["--hidedashboard"]) {
             std::thread::spawn(move || c.wait());
         }
     }
@@ -113,13 +113,25 @@ impl XrContext {
     /// Opens SteamVR's dashboard and waits for that. Does nothing on other
     /// runtimes.
     pub fn show_steamvr_dashboard(&self) {
-        if let Some(mut c) = self.vrcmd("--showdashboard") {
+        if let Some(mut c) = self.vrcmd(&["--showdashboard"]) {
             let _ = c.wait();
         }
     }
 
-    /// Starts SteamVR's `vrcmd` tool, beside the runtime library, with `arg`.
-    fn vrcmd(&self, arg: &str) -> Option<std::process::Child> {
+    /// Sets SteamVR's refresh rate for this Steam app, without waiting for
+    /// it. Does nothing outside SteamVR or Steam.
+    pub fn set_steamvr_refresh_rate(&self, hz: u32) {
+        let Ok(app) = std::env::var("SteamAppId") else {
+            return;
+        };
+        let key = format!("steam.app.{app}.preferredRefreshRate");
+        if let Some(mut c) = self.vrcmd(&["--set-settings-float", &key, &hz.to_string()]) {
+            std::thread::spawn(move || c.wait());
+        }
+    }
+
+    /// Starts SteamVR's `vrcmd` tool, beside the runtime library, with `args`.
+    fn vrcmd(&self, args: &[&str]) -> Option<std::process::Child> {
         if !self.manifest.is_steamvr {
             return None;
         }
@@ -129,7 +141,7 @@ impl XrContext {
         // With Steam's variables SteamVR would file vrcmd under this app, and
         // the library path is the launcher's, for our own libraries.
         let child = std::process::Command::new(&vrcmd)
-            .arg(arg)
+            .args(args)
             .env_remove("SteamAppId")
             .env_remove("SteamGameId")
             .env_remove("SteamOverlayGameId")
@@ -141,7 +153,7 @@ impl XrContext {
             .spawn();
         match child {
             Ok(c) => {
-                log::info!("vrcmd {arg}");
+                log::info!("vrcmd {}", args.join(" "));
                 Some(c)
             }
             Err(e) => {
@@ -151,8 +163,8 @@ impl XrContext {
         }
     }
 
-    /// Recommended per-eye render size.
-    pub fn eye_size(&self) -> Result<(u32, u32)> {
+    /// The runtime's recommended and largest eye picture sizes.
+    pub fn eye_sizes(&self) -> Result<((u32, u32), (u32, u32))> {
         let views = self
             .instance
             .enumerate_view_configuration_views(
@@ -164,8 +176,11 @@ impl XrContext {
             .first()
             .ok_or_else(|| Error::Runtime("no views".into()))?;
         Ok((
-            v.recommended_image_rect_width,
-            v.recommended_image_rect_height,
+            (
+                v.recommended_image_rect_width,
+                v.recommended_image_rect_height,
+            ),
+            (v.max_image_rect_width, v.max_image_rect_height),
         ))
     }
 

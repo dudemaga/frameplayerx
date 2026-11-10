@@ -236,7 +236,8 @@ fn controller(ui: &mut egui::Ui, v: &mut View) {
     });
 }
 
-/// App-wide switches, thumbnails, then the switches for finding a problem.
+/// App-wide switches, the display, thumbnails, then the switches for
+/// finding a problem.
 fn general(ui: &mut egui::Ui, v: &mut View) {
     let s = &mut *v.settings;
     let open = &mut v.state.interface_languages_open;
@@ -303,6 +304,7 @@ fn general(ui: &mut egui::Ui, v: &mut View) {
             &mut s.haptics_enabled,
         );
     });
+    display(ui, &mut s.display);
     heading(ui, tr!("settings-thumbnails"));
     widgets::rows(ui, |r| {
         r.switch(
@@ -357,6 +359,53 @@ fn general(ui: &mut egui::Ui, v: &mut View) {
             tr!("settings-perf-overlay"),
             Some(tr!("settings-perf-panel-desc")),
             &mut s.perf_overlay,
+        );
+    });
+}
+
+/// Refresh rate, render resolution and foveated rendering. A row's
+/// chips go right to left, so the first choice is added last.
+fn display(ui: &mut egui::Ui, d: &mut fp_core::display::Display) {
+    use fp_core::display::{EYE_RESOLUTIONS, Foveation, REFRESH_RATES};
+    heading(ui, tr!("settings-display"));
+    widgets::rows(ui, |r| {
+        r.row(
+            tr!("settings-refresh-rate"),
+            Some(tr!("settings-refresh-rate-desc")),
+            |ui| {
+                for hz in REFRESH_RATES.into_iter().rev() {
+                    if widgets::chip(ui, &format!("{hz} Hz"), d.refresh_rate == hz).clicked() {
+                        d.refresh_rate = hz;
+                    }
+                }
+            },
+        );
+        r.row(
+            tr!("settings-render-resolution"),
+            Some(tr!("settings-render-resolution-desc")),
+            |ui| {
+                for px in EYE_RESOLUTIONS.into_iter().rev() {
+                    if widgets::chip(ui, &px.to_string(), d.eye_resolution == px).clicked() {
+                        d.eye_resolution = px;
+                    }
+                }
+            },
+        );
+        r.row(
+            tr!("settings-foveation"),
+            Some(tr!("settings-foveation-desc")),
+            |ui| {
+                for level in Foveation::ALL.into_iter().rev() {
+                    let label = match level {
+                        Foveation::Off => tr!("foveation-off"),
+                        Foveation::Low => tr!("foveation-low"),
+                        Foveation::High => tr!("foveation-high"),
+                    };
+                    if widgets::chip(ui, label, d.foveation == level).clicked() {
+                        d.foveation = level;
+                    }
+                }
+            },
         );
     });
 }
