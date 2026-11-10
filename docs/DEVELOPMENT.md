@@ -431,6 +431,15 @@ frameplayerx --seek-test URL --rounds 5 --seeks 0 --play 0               # first
 
 A skip slower than 2 s counts as a failure, so a slow route ends in `FAIL`; the numbers are still good. "Read speed while the buffer fills" counts only bursts of at least 16 MiB with no gap over 5 ms, so time the demuxer spends waiting with a full queue doesn't lower it, and reads served from the block cache don't raise it. A link's speed can swing 2x between runs, so compare builds in one session, on medians.
 
+### Measuring GPU time
+
+Every 10 s the log has a `frame GPU ms` line beside `frame CPU ms`: the GPU's time per frame (median, 95th percentile, longest) and the median of each part of a frame (`video`: an upload, a 10-bit conversion and HDR measuring; `eyes`: both eye passes; `panels`: painting the menus; `layers`: copying them into the compositor's layers), from timestamps the renderer writes between the parts. The compositor's own work isn't in it. The same work takes longer at a lower GPU clock, so the line ends with the clock. In `--preview`, the `gpu` script command prints the same line for the frames since the last one, and the run ends with one for the rest; `--size 2160` renders the eyes at the headset's size.
+
+```bash
+printf 'open clip_8k.mp4\nwait-playing 30\nwait 2\ngpu\nwait 10\ngpu\n' > /tmp/gpu.fps
+frameplayerx --preview /tmp/shots --size 2160 --script /tmp/gpu.fps
+```
+
 ## On the headset
 
 ```bash

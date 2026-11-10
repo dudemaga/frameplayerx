@@ -472,6 +472,7 @@ fn run_xr(args: &Args) -> Result<(), Error> {
     // Render-thread time per frame (after xrWaitFrame), logged every 10 s:
     // over ~9 ms the compositor starts synthesising frames.
     let mut frame_ms: Vec<f32> = Vec::new();
+    let mut gpu_ms = perf::GpuWindow::default();
     let mut last_frame_ms = None;
     let mut timing_since = Instant::now();
     let layers = session.supports_quad_layers();
@@ -503,6 +504,7 @@ fn run_xr(args: &Args) -> Result<(), Error> {
         let dt = last.elapsed().as_secs_f32().min(0.1);
         last = Instant::now();
         renderer.begin_frame()?;
+        gpu_ms.push(renderer.gpu_times());
         let out = app.frame(
             &mut renderer,
             FrameInput {
@@ -589,6 +591,9 @@ fn run_xr(args: &Args) -> Result<(), Error> {
                 at(1.0),
                 frame_ms.len()
             );
+            if let Some(line) = gpu_ms.take_line() {
+                log::info!("{line}");
+            }
             if let Some(pb) = &app.playback {
                 let st = pb.player.stats();
                 let hdr = renderer

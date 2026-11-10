@@ -24,11 +24,13 @@ mod pipeline;
 mod q10c;
 pub mod renderer;
 mod shared;
+mod timing;
 mod video;
 
 pub use gpu::{Creator, DirectCreator, Gpu};
 pub use params::VideoParams;
 pub use renderer::{EyeTarget, EyeView, PanelId, QuadDraw, QuadTexture, Renderer};
+pub use timing::GpuTimes;
 
 use ash::vk;
 

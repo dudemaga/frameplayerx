@@ -625,6 +625,33 @@ fn saturated_bt2020_colours_are_compressed_into_the_screens_gamut() {
 }
 
 #[test]
+fn frames_are_timed_on_the_gpu() {
+    let Some((mut r, mut e)) = setup() else {
+        return;
+    };
+    let p = params(
+        Projection::EQUIRECT_360,
+        StereoLayout::Mono,
+        ViewSettings::default(),
+    );
+    let f = frame(64, 32, |_, _| [200, 100, 50]);
+    // A frame's times come back once its slot comes round, two frames on.
+    for _ in 0..3 {
+        render(&mut r, &mut e, Some(&f), &p, &[]);
+    }
+    let Some(t) = r.gpu_times() else {
+        eprintln!("skipping: no GPU timestamps");
+        e.destroy(&r);
+        return;
+    };
+    let (Some(eyes), Some(video), Some(total)) = (t.eyes, t.video, t.total) else {
+        panic!("parts missing: {t:?}");
+    };
+    assert!(eyes > 0.0 && eyes <= total && video <= total, "{t:?}");
+    e.destroy(&r);
+}
+
+#[test]
 fn every_upload_layout_renders_like_i420() {
     let Some((mut r, mut e)) = setup() else {
         return;
