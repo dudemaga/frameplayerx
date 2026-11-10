@@ -25,6 +25,7 @@ mod q10c;
 pub mod renderer;
 mod shared;
 mod timing;
+mod tp10_eyes;
 mod video;
 
 pub use gpu::{Creator, DirectCreator, Gpu};
@@ -66,3 +67,5 @@ pub(crate) const QUAD_SPV: &[u8] = include_bytes!(concat!(env!("OUT_DIR"), "/qua
 pub(crate) const EGUI_SPV: &[u8] = include_bytes!(concat!(env!("OUT_DIR"), "/egui.spv"));
 pub(crate) const Q10C_SPV: &[u8] = include_bytes!(concat!(env!("OUT_DIR"), "/q10c.spv"));
 pub(crate) const PEAK_SPV: &[u8] = include_bytes!(concat!(env!("OUT_DIR"), "/peak.spv"));
+pub(crate) const SCENE_TP10_SPV: &[u8] =
+    include_bytes!(concat!(env!("OUT_DIR"), "/scene_tp10.spv"));

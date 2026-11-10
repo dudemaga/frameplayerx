@@ -8,7 +8,7 @@
 
 use crate::gpu::Gpu;
 use crate::mem;
-use crate::q10c::Picture;
+use crate::q10c::{Picture, Sampled};
 use crate::{Error, Result, VkContext};
 use ash::vk;
 use fp_media::SharedPicture;
@@ -417,6 +417,8 @@ pub(crate) enum Imported {
     Nv12(Nv12),
     /// A Q10C picture, imported to be converted into one image set.
     Q10c(Picture),
+    /// A Q10C picture, imported for the eye passes to sample.
+    Tp10(Sampled),
 }
 
 impl Imported {
@@ -425,6 +427,7 @@ impl Imported {
         match self {
             Imported::Nv12(p) => p.destroy(gpu),
             Imported::Q10c(p) => p.destroy(gpu),
+            Imported::Tp10(p) => p.destroy(gpu),
         }
     }
 }
@@ -517,6 +520,7 @@ impl<T> Shelf<(u64, Target), T> {
 pub(crate) struct Imports {
     nv12: Shelf<u64, Nv12>,
     q10c: Shelf<(u64, Target), Picture>,
+    tp10: Shelf<u64, Sampled>,
     /// Frames shown so far: one per call to [`Imports::sweep`], which the
     /// renderer makes once for each frame. [`UNUSED_FRAMES`] counts on it.
     frame: u64,
@@ -555,6 +559,35 @@ impl Imports {
         }
     }
 
+    /// The Q10C picture in `p` as the eye passes sample it, made by `import`
+    /// the first time this buffer is seen, and moved from the decoder to the
+    /// renderer for the frame `cmd` records. [`Imports::release_tp10`] hands
+    /// it back.
+    pub fn tp10(
+        &mut self,
+        gpu: &Gpu,
+        cmd: vk::CommandBuffer,
+        p: &SharedPicture,
+        import: impl FnOnce() -> Result<Sampled>,
+    ) -> Result<&Sampled> {
+        let picture = self.tp10.get_or_make(p.buffer, p.set, self.frame, import)?;
+        picture.acquire(gpu, cmd);
+        Ok(picture)
+    }
+
+    /// The sampled Q10C picture in `buffer`, if it is imported.
+    pub fn tp10_picture(&self, buffer: u64) -> Option<&Sampled> {
+        self.tp10.get(&buffer)
+    }
+
+    /// Records the move of the Q10C picture in `buffer` back to the decoder,
+    /// after the frame's eye passes in `cmd`. Nothing if it isn't held.
+    pub fn release_tp10(&mut self, gpu: &Gpu, cmd: vk::CommandBuffer, buffer: u64) {
+        if let Some(p) = self.tp10.get_mut(&buffer) {
+            p.release(gpu, cmd);
+        }
+    }
+
     /// The import of the Q10C picture in `p` for image set `target`, made by
     /// `import` the first time this buffer meets this set.
     pub fn q10c(
@@ -574,6 +607,7 @@ impl Imports {
         self.frame += 1;
         garbage.extend(self.nv12.sweep(keep, self.frame).map(Imported::Nv12));
         garbage.extend(self.q10c.sweep(keep, self.frame).map(Imported::Q10c));
+        garbage.extend(self.tp10.sweep(keep, self.frame).map(Imported::Tp10));
     }
 
     /// Moves to `garbage` the Q10C imports made for the image set of
@@ -589,6 +623,9 @@ impl Imports {
             p.destroy(gpu);
         }
         for mut p in self.q10c.drain() {
+            p.destroy(gpu);
+        }
+        for mut p in self.tp10.drain() {
             p.destroy(gpu);
         }
     }

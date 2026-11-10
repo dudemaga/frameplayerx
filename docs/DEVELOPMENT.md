@@ -156,6 +156,16 @@ fewer buffers than it needs, or an import fails, frames are copied out as
 before. So are 8-bit HDR frames, whose scenes are measured in the planes
 the renderer uploads.
 
+An SDR 10-bit frame read in place isn't converted either: the eye passes
+sample its Q10C planes through TP10 descriptors (`fp-render/src/tp10_eyes.rs`,
+`shaders/planes_tp10.wgsl`), which saves the conversion pass, 5.7 ms for an
+8K frame. A descriptor reads at most 2^24 samples, so each plane is read in
+overlapping bands of rows, and a sample comes from the band whose middle is
+nearest, where its bilinear neighbours are too. TP10 descriptors exist only
+as bytes, so this pipeline takes all its descriptors from descriptor
+buffers, the scene's parameters included. HDR 10-bit frames are still
+converted, as their scenes are measured in the converted planes.
+
 **Sources and browsing.** Every source implements one `Source` trait
 (`list`, `open`, `details`). Each kind gets its own browser in `ui/`:
 `local.rs`, `folders.rs`, `catalog.rs` and `feeds.rs`, built from the
@@ -467,6 +477,7 @@ Steam can't pass environment variables to an app, so the launcher reads
 | `FRAMEPLAYERX_V4L2` | | `0` turns off the native V4L2 decoder |
 | `FRAMEPLAYERX_V4L2_DEVICE` | | The V4L2 device to decode with, instead of the one found |
 | `FRAMEPLAYERX_ZERO_COPY` | | `0` copies hardware-decoded frames out of the decoder's buffers instead of reading them there, as before; for comparing the two |
+| `FRAMEPLAYERX_TP10_EYES` | | `0` converts SDR 10-bit frames read in place into P010 planes instead of sampling them in the eye passes, as before; for comparing the two |
 
 ### Steam Frame notes
 

@@ -14,6 +14,7 @@ use crate::peak::PeakPass;
 use crate::pipeline::{self, PipelineDesc};
 use crate::q10c::Converter;
 use crate::timing::{FrameTimer, GpuTimes, Mark};
+use crate::tp10_eyes::Tp10Eyes;
 use crate::video::VideoPlanes;
 use crate::{Result, VkContext};
 use ash::vk;
@@ -140,6 +141,9 @@ struct Slot {
     /// Or the NV12 decoder buffer it points at, read in place
     /// ([`crate::shared`]), and that frame's description.
     shared_bound: Option<(u64, params::FrameDesc)>,
+    /// Or the Q10C decoder buffer the TP10 eye pipeline samples
+    /// ([`Tp10Eyes`]), and that frame's description.
+    tp10_bound: Option<(u64, params::FrameDesc)>,
     has_video: bool,
     /// Frames in the decoder's buffers this slot's submission reads: kept
     /// until its fence signals, which gives the buffers back.
@@ -183,6 +187,8 @@ pub struct Renderer {
     video_gen: [u64; 2],
     /// Shows hardware-decoded 10-bit frames, on GPUs that can.
     q10c: Option<Converter>,
+    /// Samples 10-bit frames read in place without converting them.
+    tp10_eyes: Option<Tp10Eyes>,
     /// Measures HDR frames for `hdr_peak`; without it HDR keeps the
     /// default peak.
     peak: Option<PeakPass>,
@@ -274,6 +280,7 @@ impl Renderer {
                     vertex_stride: 0,
                     attributes: &[],
                     blend: false,
+                    descriptor_buffer: false,
                 },
             )?;
             let tex_layout = pipeline::set_layout(
@@ -313,6 +320,7 @@ impl Renderer {
                     vertex_stride: size_of::<QuadVertex>() as u32,
                     attributes: &quad_attrs,
                     blend: true,
+                    descriptor_buffer: false,
                 },
             )?;
             let egui_pl = pipeline::layout(&gpu, tex_layout, 8)?;
@@ -345,6 +353,7 @@ impl Renderer {
                     vertex_stride: 20,
                     attributes: &egui_attrs,
                     blend: true,
+                    descriptor_buffer: false,
                 },
             )?;
 
@@ -381,6 +390,7 @@ impl Renderer {
                 video_cur: 0,
                 video_gen: [0, 0],
                 q10c: Converter::new(&gpu),
+                tp10_eyes: None,
                 peak: PeakPass::new(&gpu, SLOTS)
                     .inspect_err(|e| log::warn!("HDR scenes aren't measured: {e}"))
                     .ok(),
@@ -429,6 +439,7 @@ impl Renderer {
                     );
                 }
             })?;
+            r.tp10_eyes = tp10_eyes(&r.gpu, color_format, r.sampler, r.q10c.is_some());
             for _ in 0..SLOTS {
                 let slot = r.new_slot()?;
                 r.slots.push(slot);
@@ -489,6 +500,7 @@ impl Renderer {
                 scene_set_dirty: true,
                 video_bound: None,
                 shared_bound: None,
+                tp10_bound: None,
                 has_video: false,
                 frames: Vec::new(),
                 garbage_imports: Vec::new(),
@@ -695,7 +707,7 @@ impl Renderer {
             slot.frames.clear();
             // A decoder buffer is read only in a frame that took it over
             // (set_video), so the binding doesn't carry over.
-            if slot.shared_bound.take().is_some() {
+            if slot.shared_bound.take().is_some() | slot.tp10_bound.take().is_some() {
                 slot.has_video = false;
                 slot.scene_set_dirty = true;
             }
@@ -762,6 +774,7 @@ impl Renderer {
             }
             slot.has_video = false;
             slot.shared_bound = None;
+            slot.tp10_bound = None;
             // Nothing playing: the decoder's buffers can go.
             self.imports.sweep(None, &mut slot.garbage_imports);
             self.shared_set = None;
@@ -779,13 +792,14 @@ impl Renderer {
                 let slot = &mut self.slots[self.current];
                 slot.has_video = false;
                 slot.shared_bound = None;
+                slot.tp10_bound = None;
                 slot.scene_set_dirty = true;
             }
             return r;
         }
         {
             let slot = &mut self.slots[self.current];
-            if slot.shared_bound.take().is_some() {
+            if slot.shared_bound.take().is_some() | slot.tp10_bound.take().is_some() {
                 slot.scene_set_dirty = true;
             }
             self.imports
@@ -838,6 +852,7 @@ impl Renderer {
         self.shared_desc = None;
         let bound = (self.video_cur, self.video_gen[self.video_cur]);
         let slot = &mut self.slots[self.current];
+        slot.tp10_bound = None;
         if slot.video_bound != Some(bound) || !slot.has_video {
             slot.scene_set_dirty = true;
             slot.video_bound = Some(bound);
@@ -868,10 +883,18 @@ impl Renderer {
                     slot.scene_set_dirty = true;
                 }
                 slot.shared_bound = Some((p.buffer, desc));
+                slot.tp10_bound = None;
                 slot.video_bound = None;
                 slot.has_video = true;
                 self.shared_desc = Some(desc);
                 Ok(())
+            }
+            // HDR scenes are measured in converted planes, so HDR converts.
+            fp_media::PixelLayout::Q10c
+                if self.tp10_eyes.is_some()
+                    && f.color.transfer == fp_media::info::Transfer::Sdr =>
+            {
+                self.sample_shared_q10c(f, p)
             }
             fp_media::PixelLayout::Q10c => {
                 self.convert_shared_q10c(f, p)?;
@@ -882,6 +905,47 @@ impl Renderer {
                 "decoder buffers of {other:?} frames"
             ))),
         }
+    }
+
+    /// Shows the Q10C frame `f` in decoder buffer `p` by sampling it there
+    /// in the eye passes ([`Tp10Eyes`]): no conversion, no image set.
+    fn sample_shared_q10c(
+        &mut self,
+        f: &Arc<VideoFrame>,
+        p: &fp_media::SharedPicture,
+    ) -> Result<()> {
+        let Some(conv) = self.q10c.as_ref() else {
+            return Err(crate::Error::Unsupported(
+                "this GPU can't show 10-bit hardware-decoded (Q10C) frames".into(),
+            ));
+        };
+        let geometry = crate::q10c::Geometry {
+            width: f.width,
+            height: f.height,
+            stride: p.stride,
+            rows: p.rows,
+            uv_offset: p.uv_offset,
+            len: p.len,
+        };
+        let slot = &mut self.slots[self.current];
+        let gpu = &self.gpu;
+        self.imports
+            .tp10(gpu, slot.cmd, p, || conv.sample(gpu, geometry, p.fd))?;
+        let desc = params::FrameDesc {
+            width: f.width,
+            height: f.height,
+            layout: f.layout,
+            color: f.color,
+        };
+        slot.tp10_bound = Some((p.buffer, desc));
+        slot.shared_bound = None;
+        slot.video_bound = None;
+        if !slot.has_video {
+            slot.scene_set_dirty = true;
+        }
+        slot.has_video = true;
+        self.shared_desc = Some(desc);
+        Ok(())
     }
 
     /// Converts the Q10C frame `f` in decoder buffer `p` into the image set
@@ -1374,12 +1438,21 @@ impl Renderer {
             (eyes[1].proj * eyes[1].view).inverse(),
         ];
         let slot_idx = self.current;
-        let frame_desc = match self.slots[slot_idx].shared_bound {
-            Some((_, desc)) if self.slots[slot_idx].has_video => Some(desc),
+        let s = &self.slots[slot_idx];
+        let frame_desc = match (s.tp10_bound, s.shared_bound) {
+            (Some((_, desc)), _) | (None, Some((_, desc))) if s.has_video => Some(desc),
             _ => self.slot_video(slot_idx).map(|v| v.desc),
         };
         let mut p = params::build(video, frame_desc.as_ref(), inv);
         p.hdr = params::hdr_levels(self.hdr_peak.peak_nits());
+        let tp10 = match (self.slots[slot_idx].tp10_bound, self.tp10_eyes.as_mut()) {
+            (Some((buffer, desc)), Some(t)) => self.imports.tp10_picture(buffer).map(|pic| {
+                params::sample_tp10(&mut p, desc.height, pic.luma_bands, pic.chroma_bands);
+                t.write(slot_idx, &p, pic);
+            }),
+            _ => None,
+        }
+        .is_some();
         // Quad vertices: two triangles per quad.
         let mut verts: Vec<QuadVertex> = Vec::with_capacity(quads.len() * 6);
         let mut sets = Vec::with_capacity(quads.len());
@@ -1474,18 +1547,27 @@ impl Renderer {
                     }],
                 );
                 d.cmd_set_scissor(cmd, 0, &[area]);
-                d.cmd_bind_pipeline(cmd, vk::PipelineBindPoint::GRAPHICS, self.scene_pipe);
-                d.cmd_bind_descriptor_sets(
-                    cmd,
-                    vk::PipelineBindPoint::GRAPHICS,
-                    self.scene_pl,
-                    0,
-                    &[slot.scene_set],
-                    &[],
-                );
+                let scene_pl = match self.tp10_eyes.as_ref().filter(|_| tp10) {
+                    Some(t) => {
+                        t.bind(gpu, cmd, slot_idx);
+                        t.layout
+                    }
+                    None => {
+                        d.cmd_bind_pipeline(cmd, vk::PipelineBindPoint::GRAPHICS, self.scene_pipe);
+                        d.cmd_bind_descriptor_sets(
+                            cmd,
+                            vk::PipelineBindPoint::GRAPHICS,
+                            self.scene_pl,
+                            0,
+                            &[slot.scene_set],
+                            &[],
+                        );
+                        self.scene_pl
+                    }
+                };
                 d.cmd_push_constants(
                     cmd,
-                    self.scene_pl,
+                    scene_pl,
                     vk::ShaderStageFlags::VERTEX | vk::ShaderStageFlags::FRAGMENT,
                     0,
                     &(eye as u32).to_le_bytes(),
@@ -1546,6 +1628,9 @@ impl Renderer {
         if let Some((buffer, _)) = slot.shared_bound {
             // Acquired in set_video; released to the decoder once read.
             self.imports.release_nv12(&self.gpu, slot.cmd, buffer);
+        }
+        if let Some((buffer, _)) = slot.tp10_bound {
+            self.imports.release_tp10(&self.gpu, slot.cmd, buffer);
         }
         self.stamp(Mark::End);
         let slot = &self.slots[self.current];
@@ -1793,6 +1878,31 @@ impl Renderer {
     }
 }
 
+/// The pipeline that samples 10-bit frames in the decoder's buffers, where
+/// the GPU converts Q10C (`has_q10c`) and reads those buffers in place.
+/// `FRAMEPLAYERX_TP10_EYES=0` converts them as before, for comparisons.
+fn tp10_eyes(
+    gpu: &Gpu,
+    color_format: vk::Format,
+    sampler: vk::Sampler,
+    has_q10c: bool,
+) -> Option<Tp10Eyes> {
+    let allowed = std::env::var("FRAMEPLAYERX_TP10_EYES").map_or(true, |v| v.trim() != "0");
+    if !has_q10c || gpu.memory_fd.is_none() || !allowed {
+        return None;
+    }
+    match Tp10Eyes::new(gpu, color_format, sampler, SLOTS) {
+        Ok(t) => {
+            log::info!("10-bit HEVC read in place is sampled by the eye passes, not converted");
+            Some(t)
+        }
+        Err(e) => {
+            log::warn!("10-bit HEVC read in place is converted: {e}");
+            None
+        }
+    }
+}
+
 fn usage_sampled() -> vk::ImageUsageFlags {
     vk::ImageUsageFlags::SAMPLED | vk::ImageUsageFlags::TRANSFER_DST
 }
@@ -1891,6 +2001,9 @@ impl Drop for Renderer {
                 p.destroy(&gpu);
             }
             if let Some(mut t) = self.timer.take() {
+                t.destroy(&gpu);
+            }
+            if let Some(mut t) = self.tp10_eyes.take() {
                 t.destroy(&gpu);
             }
             self.imports.destroy(&gpu);
