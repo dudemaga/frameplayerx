@@ -3,6 +3,7 @@
 /third_party/
 /.claude/
 /dist/
+.wrangler/
 *.key
 *.pub
 __pycache__/

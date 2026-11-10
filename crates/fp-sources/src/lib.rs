@@ -15,6 +15,7 @@
 //! | DLNA/UPnP | [`dlna`] | `dlna:<object id>` folders, `http://` media |
 //! | DeoVR / HereSphere feeds | [`feed`] | feed and scene URLs |
 //! | SMB2/3 | [`smb`] | `smb://host/share/path` |
+//! | SFTP | [`sftp`] | `source:` locations relative to its folder |
 //! | Jellyfin / Emby | [`mediabrowser`] | `mb:<url>#<kind>=<id>` |
 //! | Plex | [`plex`] | `plex://source/<source>/<machine>/<kind>/<id>` |
 //!
@@ -35,6 +36,7 @@ pub mod local;
 pub mod location;
 pub mod mediabrowser;
 pub mod plex;
+pub mod sftp;
 pub mod sidecar;
 pub mod smb;
 #[cfg(test)]
@@ -54,8 +56,8 @@ pub use catalog::{
 };
 pub use config::{
     CardRef, Credentials, DlnaConfig, FeedConfig, HttpConfig, LibraryConfig, LocalConfig,
-    MediaBrowserConfig, PlexConfig, SmbConfig, SourceConfig, SourceKind, default_config_path,
-    load_configs, save_configs,
+    MediaBrowserConfig, PlexConfig, SftpConfig, SmbConfig, SourceConfig, SourceKind,
+    default_config_path, load_configs, save_configs,
 };
 pub use dlna::{DlnaDevice, DlnaSource, SsdpResponse, discover};
 pub use error::{Error, Result};
@@ -67,6 +69,7 @@ pub use mediabrowser::{
     MbFacets, MbFilter, MbHome, MbItem, MbKind, MbPage, MbQuery, MbSort, MbVersion,
     MediaBrowserSource, QuickConnectState, quick_connect_initiate_url, quick_connect_poll_url,
 };
+pub use sftp::SftpSource;
 pub use sidecar::{ScriptFile, Sidecars, SubtitleFile, match_sidecars};
 pub use smb::SmbSource;
 pub use transcode::TranscodeTarget;
@@ -264,6 +267,7 @@ pub fn build(config: &SourceConfig) -> Result<Box<dyn Source>> {
         SourceConfig::DeoVr(c) => Box::new(FeedSource::deovr(c)?),
         SourceConfig::HereSphere(c) => Box::new(FeedSource::heresphere(c)?),
         SourceConfig::Smb(c) => Box::new(SmbSource::new(c)?),
+        SourceConfig::Sftp(c) => Box::new(SftpSource::new(c)?),
         SourceConfig::MediaBrowser(c) => Box::new(MediaBrowserSource::new(c)?),
         SourceConfig::Plex(c) => Box::new(plex::PlexSource::new(c)?),
     })

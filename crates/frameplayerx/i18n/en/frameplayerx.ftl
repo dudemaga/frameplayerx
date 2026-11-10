@@ -587,6 +587,10 @@ source-address = Address
 source-sign-in-with = Sign in with
 source-sign-in-with-desc = Jellyfin's Quick Connect pairs using a 6-digit code on another device.
 source-password = Password
+source-key-file = Key file
+source-key-file-desc = A private key on the headset to sign in with, OpenSSH or PuTTY (.ppk), tried before the password. Keys in ~/.ssh and Downloads are listed below.
+source-key-passphrase = Key passphrase
+source-key-passphrase-desc = This key file is password-protected. Enter the passphrase it was saved with, not the account password.
 source-user-name = User name
 source-user-name-desc = If the server asks for one.
 source-self-signed = Accept self-signed certificates
@@ -610,6 +614,10 @@ pin-set = Set a PIN
 source-error-no-address = Enter an address
 source-error-http = Address must start with http:// or https://
 source-error-smb = Use smb://server/, smb://server/share or smb://server/share/folder
+source-error-sftp = Use sftp://server/, sftp://server/~/folder or sftp://server/path/to/folder
+source-error-sftp-user = Enter the user name to sign in as
+source-error-sftp-sign-in = Enter a password or choose a key file
+source-error-key-passphrase = This key file is password-protected: enter its passphrase
 source-error-port = Bad port
 source-error-approve-code = Approve the code in your Jellyfin/Emby app
 # Get pairing code is the button above: use its translation.
@@ -631,6 +639,8 @@ source-kind-deovr = DeoVR feed
 source-kind-heresphere = HereSphere API
 # Short: a kind of source; keep SMB.
 source-kind-smb = SMB share
+# Short: a kind of source; keep SFTP.
+source-kind-sftp = SFTP server
 sources-library-not-inserted = Library · Not inserted
 # Short: after a source's address, it is unlocked until the app restarts.
 sources-unlocked = Unlocked
@@ -644,6 +654,7 @@ source-kind-heresphere-desc = The URL of any server's HereSphere API, e.g. http:
 source-kind-webdav-desc = WebDAV share URL (Nextcloud, NAS), e.g. https://nas.local/dav/videos/
 source-kind-http-desc = Web server folder listing, e.g. http://192.168.1.10:8080/videos/
 source-kind-smb-desc = Windows / Samba server or share, e.g. smb://nas.local/ or smb://nas.local/videos
+source-kind-sftp-desc = A folder on any computer with SSH (Linux, macOS, many NAS), e.g. sftp://pc.local/~/Videos
 source-kind-dlna-desc = DLNA media server on your network (Plex, Jellyfin, Emby, Serviio)
 # A name field's hint.
 source-name-hint-jellyfin = Optional (e.g. Jellyfin)
@@ -652,6 +663,7 @@ source-name-hint-heresphere = Optional (e.g. HereSphere API)
 source-name-hint-webdav = Optional (e.g. Nextcloud)
 source-name-hint-http = Optional (e.g. Video server)
 source-name-hint-smb = Optional (e.g. Home NAS)
+source-name-hint-sftp = Optional (e.g. Desktop PC)
 source-name-hint-library = Optional (e.g. Movies)
 source-name-hint = Optional
 source-edit-title = Edit { $name }
@@ -1279,6 +1291,10 @@ error-parse = cannot parse { $what }: { $error }
 error-unsupported = not supported: { $what }
 error-smb = SMB error: { $error }
 error-smb-unavailable = SMB unavailable: { $error }
+error-sftp = SFTP error: { $error }
+error-sftp-unavailable = SFTP unavailable: { $error }
+error-host-key-changed = { $server } answered with a different identity key than when it was added. If the server was reinstalled, remove the source and add it again; otherwise another machine may be answering in its place.
+error-key-passphrase = { $file } is password-protected and the saved passphrase doesn't unlock it. Edit the source and enter the key's passphrase.
 error-config = invalid source configuration: { $error }
 # $context is what FFmpeg was doing, in English.
 error-ffmpeg = { $context }: { $error }

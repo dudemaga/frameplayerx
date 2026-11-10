@@ -660,6 +660,15 @@ pub struct SourceForm {
     pub address: String,
     pub username: String,
     pub password: String,
+    /// An SFTP source's private key file and its passphrase.
+    pub key_file: String,
+    pub key_passphrase: String,
+    /// Key files found on the headset, offered for an SFTP source; looked
+    /// for once, when the form first shows them.
+    pub key_files: Option<Vec<String>>,
+    /// Whether the key file is password-protected, with the path it was
+    /// checked at; checked again when the path changes.
+    pub key_locked: Option<(String, Option<bool>)>,
     pub insecure_tls: bool,
     pub parallel_downloads: bool,
     /// Signing in to a Jellyfin/Emby server with Quick Connect rather than a
@@ -699,6 +708,10 @@ impl Default for SourceForm {
             address: String::new(),
             username: String::new(),
             password: String::new(),
+            key_file: String::new(),
+            key_passphrase: String::new(),
+            key_files: None,
+            key_locked: None,
             insecure_tls: false,
             parallel_downloads: false,
             use_quick_connect: true,
