@@ -15,7 +15,6 @@ pub struct XrReport {
     pub runtime_interface_version: Option<u32>,
     pub negotiated_api_version: Option<String>,
     pub extensions: Vec<(String, u32)>,
-    pub api_layers: Vec<String>,
     pub instance_api_version: Option<String>,
     pub runtime_name: Option<String>,
     pub runtime_version: Option<String>,
@@ -128,10 +127,8 @@ pub fn probe(want_session: bool) -> XrReport {
             .push(format!("xrEnumerateInstanceExtensionProperties: {}", xe(e)));
         Vec::new()
     });
-    r.api_layers = entry
-        .enumerate_layers()
-        .map(|l| l.into_iter().map(|l| l.layer_name).collect())
-        .unwrap_or_default();
+    // API layers are the Khronos loader's, and the runtime is loaded without
+    // it, as FramePlayerX loads it: SteamVR has no xrEnumerateApiLayers.
 
     let avail = match entry.enumerate_extensions() {
         Ok(a) => a,

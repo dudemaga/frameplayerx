@@ -18,17 +18,17 @@ A VR video player for the Valve Steam Frame. It plays flat, 180°, 360° and fis
 
 ## Features
 
-- **VR and flat videos**: plays 180°, 360°, fisheye and flat videos, in 2D or 3D. The format is detected automatically, and you can change it for any video
-- **Hardware decoding**: HEVC (H.265) in 8 and 10 bits and H.264, both up to 8K, play on the Frame's own video decoder. Anything else, AV1 and VP9 included, plays with software decoding
-- **3D Blu-ray**: disc images (`.iso`), MKV rips and the disc's `.ssif` files play in full 3D (H.264 MVC) on the hardware decoder
-- **Frame sequential 3D**: files whose eyes take turns frame by frame play in full 3D at the film's own frame rate
-- **Picture adjustments**: position, zoom, depth, picture settings and fisheye lens calibration, saved for each video, and a screen that follows your head for watching lying down
+- **Video formats**: 180°, 360°, fisheye and flat videos, in 2D or 3D: side by side or top/bottom at full or half size, frame sequential, and 3D Blu-ray (disc images, MKV rips and `.ssif` files) in full 3D. The format is detected automatically, and you can change it for any video
+- **Hardware decoding**: HEVC (H.265) in 8 and 10 bits and H.264, up to 8K, play on the Frame's own video decoder, and its pictures are shown without being copied. AV1, VP9 and anything else play with software decoding
+- **HDR**: HDR10 and HLG videos are fitted to the Frame's screen scene by scene, and colours it can't show are toned down instead of cut off
+- **Display**: up to 3744 pixels per eye at 120 Hz, with foveated rendering that follows your eyes. Refresh rate, resolution and foveation can be changed in Settings while a video plays
+- **Adjustments**: position, zoom, depth, picture settings and fisheye lens calibration, saved for each video, and a screen that follows your head for watching lying down
+- **Passthrough videos**: see your room around the people in passthrough videos, and behind green or blue screens
+- **Subtitles and spatial audio**: subtitles from a file or inside the video, picked in your language and shown in any script, and 360° audio that follows your head
 - **Videos on the headset**: browse any folder on the headset, a microSD card or a USB drive, including cards formatted on Windows or a Mac, and make libraries of your folders, with thumbnails, filters and sorting
 - **Media servers**: browse and play from Jellyfin, Emby, Plex, any server with a DeoVR feed or HereSphere API, network shares (SMB), WebDAV, DLNA servers and web folders. Server transcoding and watch state sync are supported
 - **Watch history, Up next and playlists**: carry on where you left off, queue what plays next, shuffle the queue, autoplay it, loop a video or the whole queue, keep playlists of videos from any source, and mark favorites and ratings
 - **PIN locks**: hide a source behind a PIN until you unlock it
-- **Passthrough videos**: see your room around the people in passthrough videos, and behind green or blue screens
-- **Subtitles and spatial audio**: subtitles from a file or inside the video, picked in your language and shown in any script, and 360° audio that follows your head
 - **Haptic devices**: optional, off until turned on; syncs supported haptic devices with videos that have scripts
 - **Phone remote**: open the address the headset shows on your phone and enter its code, then control the player and type into the headset from the phone. Apps made for DeoVR's remote work too
 - **Custom controls**: choose what each controller button does
@@ -83,7 +83,7 @@ To update later, open **Settings › Updates** and press **Download and install*
 
 | Guide | What's in it |
 |---|---|
-| [User guide](docs/USER-GUIDE.md) | Installing, updating and uninstalling, sources, browsing, PIN locks, video formats, controls, passthrough, haptics, remote control and troubleshooting |
+| [User guide](docs/USER-GUIDE.md) | Installing, updating and uninstalling, sources, browsing, PIN locks, video formats, display settings, controls, passthrough, haptics, remote control and troubleshooting |
 | [Development](docs/DEVELOPMENT.md) | Building and testing, how the code is organised, running without a headset (Monado and the preview harness), and releasing |
 | [Contributing](CONTRIBUTING.md) | What to do before opening a pull request, what it has to say and how to test it |
 
@@ -105,7 +105,7 @@ FramePlayerX comes in English, German, Spanish, French, Japanese and Simplified 
 |---|---|
 | Language | Rust |
 | VR | OpenXR, talking to the runtime directly (no Khronos loader) |
-| Graphics | Vulkan through [ash](https://github.com/ash-rs/ash); the projections are drawn per pixel in a shader |
+| Graphics | Vulkan through [ash](https://github.com/ash-rs/ash); the projections are drawn per pixel in a shader, straight from the decoder's buffers, and foveated through variable-rate shading guided by eye tracking |
 | Interface | [egui](https://github.com/emilk/egui) panels in VR, with the [Inter](https://rsms.me/inter/) font and [Phosphor](https://phosphoricons.com/) icons; subtitle text set by [cosmic-text](https://github.com/pop-os/cosmic-text) |
 | Video | [FFmpeg](https://ffmpeg.org/) 7.1 for demuxing and software decoding, the Frame's V4L2 hardware decoder (H.264, and 8- and 10-bit HEVC), [dav1d](https://code.videolan.org/videolan/dav1d) for AV1 |
 | Audio | ALSA |
@@ -134,7 +134,7 @@ No. FramePlayerX is built only for the Steam Frame, so it can use the Frame's de
 
 ### Why does a video stutter?
 
-Usually because it's AV1 or 4:2:2, which the Frame's hardware decoder can't play, so it's decoded on the CPU. The control bar says so. Converting it to HEVC once on a PC makes it play smoothly; the [user guide](docs/USER-GUIDE.md#videos-that-stutter-av1-and-422) has the commands.
+Usually because it's AV1 or 4:2:2, which the Frame's hardware decoder can't play, so it's decoded on the CPU. The control bar says so. Converting it to HEVC once on a PC makes it play smoothly; the [user guide](docs/USER-GUIDE.md#videos-that-stutter-av1-and-422) has the commands. With foveated rendering off at the highest resolution, 8K 10-bit video can also be too much for the GPU: see [Display](docs/USER-GUIDE.md#display).
 
 ---
 

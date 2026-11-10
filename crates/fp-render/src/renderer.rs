@@ -6,12 +6,13 @@
 //! garbage list and are destroyed when the slot comes round again, by which
 //! time no submitted frame can still read them.
 
+use crate::foveation::{Foveation, RateMaps};
 use crate::gpu::Gpu;
 use crate::hdr::PeakDetector;
 use crate::mem::{self, Buffer, Image};
 use crate::params::{self, SceneParams, VideoParams};
 use crate::peak::PeakPass;
-use crate::pipeline::{self, PipelineDesc};
+use crate::pipeline::{self, PipelineDesc, ShadingRate};
 use crate::q10c::Converter;
 use crate::timing::{FrameTimer, GpuTimes, Mark};
 use crate::tp10_eyes::Tp10Eyes;
@@ -189,6 +190,11 @@ pub struct Renderer {
     q10c: Option<Converter>,
     /// Samples 10-bit frames read in place without converting them.
     tp10_eyes: Option<Tp10Eyes>,
+    /// Each eye's shading rates, where the GPU takes them.
+    rates: Option<RateMaps>,
+    foveation: Foveation,
+    /// Where the eyes look, in the play space ([`Renderer::set_gaze`]).
+    gaze: Option<Vec3>,
     /// Measures HDR frames for `hdr_peak`; without it HDR keeps the
     /// default peak.
     peak: Option<PeakPass>,
@@ -260,6 +266,13 @@ impl Renderer {
                 )
                 .ctx("sampler")?;
 
+            // Fewer fragments away from the gaze, where the GPU allows it.
+            let foveatable = gpu.shading_rates.is_some();
+            let (video_rate, panel_rate) = if foveatable {
+                (ShadingRate::Attachment, ShadingRate::Full)
+            } else {
+                (ShadingRate::Unused, ShadingRate::Unused)
+            };
             let scene_layout = pipeline::set_layout(
                 &gpu,
                 &[
@@ -281,6 +294,7 @@ impl Renderer {
                     attributes: &[],
                     blend: false,
                     descriptor_buffer: false,
+                    shading_rate: video_rate,
                 },
             )?;
             let tex_layout = pipeline::set_layout(
@@ -321,6 +335,7 @@ impl Renderer {
                     attributes: &quad_attrs,
                     blend: true,
                     descriptor_buffer: false,
+                    shading_rate: panel_rate,
                 },
             )?;
             let egui_pl = pipeline::layout(&gpu, tex_layout, 8)?;
@@ -354,6 +369,7 @@ impl Renderer {
                     attributes: &egui_attrs,
                     blend: true,
                     descriptor_buffer: false,
+                    shading_rate: ShadingRate::Unused,
                 },
             )?;
 
@@ -391,6 +407,9 @@ impl Renderer {
                 video_gen: [0, 0],
                 q10c: Converter::new(&gpu),
                 tp10_eyes: None,
+                rates: RateMaps::new(&gpu, SLOTS),
+                foveation: Foveation::Off,
+                gaze: None,
                 peak: PeakPass::new(&gpu, SLOTS)
                     .inspect_err(|e| log::warn!("HDR scenes aren't measured: {e}"))
                     .ok(),
@@ -439,7 +458,16 @@ impl Renderer {
                     );
                 }
             })?;
-            r.tp10_eyes = tp10_eyes(&r.gpu, color_format, r.sampler, r.q10c.is_some());
+            r.tp10_eyes = tp10_eyes(
+                &r.gpu,
+                color_format,
+                r.sampler,
+                r.q10c.is_some(),
+                video_rate,
+            );
+            if !foveatable {
+                log::info!("eye passes can't be foveated: no fragment shading rate attachments");
+            }
             for _ in 0..SLOTS {
                 let slot = r.new_slot()?;
                 r.slots.push(slot);
@@ -1411,6 +1439,22 @@ impl Renderer {
         slot.scene_set_dirty = false;
     }
 
+    /// How much the next [`Renderer::draw`]s give up away from the gaze;
+    /// nothing where the GPU can't shade at lower rates.
+    pub fn set_foveation(&mut self, level: Foveation) {
+        if level != self.foveation {
+            log::info!("eye passes foveated: {level:?}");
+            self.foveation = level;
+        }
+    }
+
+    /// The direction the eyes look, in the play space, for the next
+    /// [`Renderer::draw`]s: foveated eye passes are sharp around it. `None`
+    /// (no eye tracking) looks straight ahead through each lens.
+    pub fn set_gaze(&mut self, gaze: Option<Vec3>) {
+        self.gaze = gaze;
+    }
+
     /// Records both eye passes.
     pub fn draw(
         &mut self,
@@ -1525,15 +1569,33 @@ impl Renderer {
                 offset: vk::Offset2D::default(),
                 extent: t.extent,
             };
+            let level = self.foveation;
+            let mut rate = match self.rates.as_mut().filter(|_| level != Foveation::Off) {
+                Some(m) => Some(
+                    m.prepare(
+                        gpu,
+                        cmd,
+                        slot_idx,
+                        eye,
+                        t.extent,
+                        eyes[eye].proj.inverse(),
+                        self.gaze
+                            .map_or(Vec3::NEG_Z, |g| eyes[eye].view.transform_vector3(g)),
+                        level,
+                    )?,
+                ),
+                None => None,
+            };
+            let mut rendering = vk::RenderingInfo::default()
+                .render_area(area)
+                .layer_count(1)
+                .color_attachments(&attachment);
+            if let Some(rate) = rate.as_mut() {
+                rendering = rendering.push_next(rate);
+            }
             // SAFETY: recording with valid pipelines, sets and buffers.
             unsafe {
-                d.cmd_begin_rendering(
-                    cmd,
-                    &vk::RenderingInfo::default()
-                        .render_area(area)
-                        .layer_count(1)
-                        .color_attachments(&attachment),
-                );
+                d.cmd_begin_rendering(cmd, &rendering);
                 d.cmd_set_viewport(
                     cmd,
                     0,
@@ -1886,12 +1948,13 @@ fn tp10_eyes(
     color_format: vk::Format,
     sampler: vk::Sampler,
     has_q10c: bool,
+    shading_rate: ShadingRate,
 ) -> Option<Tp10Eyes> {
     let allowed = std::env::var("FRAMEPLAYERX_TP10_EYES").map_or(true, |v| v.trim() != "0");
     if !has_q10c || gpu.memory_fd.is_none() || !allowed {
         return None;
     }
-    match Tp10Eyes::new(gpu, color_format, sampler, SLOTS) {
+    match Tp10Eyes::new(gpu, color_format, sampler, SLOTS, shading_rate) {
         Ok(t) => {
             log::info!("10-bit HEVC read in place is sampled by the eye passes, not converted");
             Some(t)
@@ -2005,6 +2068,9 @@ impl Drop for Renderer {
             }
             if let Some(mut t) = self.tp10_eyes.take() {
                 t.destroy(&gpu);
+            }
+            if let Some(mut m) = self.rates.take() {
+                m.destroy(&gpu);
             }
             self.imports.destroy(&gpu);
             for mut s in self.slots.drain(..) {

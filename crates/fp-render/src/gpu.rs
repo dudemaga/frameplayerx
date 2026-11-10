@@ -95,6 +95,38 @@ pub struct Gpu {
     /// The queue family owning memory the video decoder writes: foreign
     /// when the driver has `VK_EXT_queue_family_foreign`, else external.
     pub(crate) decoder_family: u32,
+    /// Fragment shading rate attachments, for foveated eye passes
+    /// ([`crate::foveation`]).
+    pub(crate) shading_rates: Option<ShadingRateCaps>,
+}
+
+/// What [`crate::foveation`] needs to know of the GPU's shading rates.
+#[derive(Clone, Copy, Debug)]
+pub(crate) struct ShadingRateCaps {
+    /// The pixels one texel of a shading rate attachment covers.
+    pub texel: vk::Extent2D,
+}
+
+/// Whether `pdev` takes a fragment shading rate attachment, and how.
+fn shading_rate_caps(
+    instance: &ash::Instance,
+    pdev: vk::PhysicalDevice,
+) -> Option<ShadingRateCaps> {
+    if !has_extension(instance, pdev, ash::khr::fragment_shading_rate::NAME) {
+        return None;
+    }
+    let mut features = vk::PhysicalDeviceFragmentShadingRateFeaturesKHR::default();
+    let mut f2 = vk::PhysicalDeviceFeatures2::default().push_next(&mut features);
+    let mut props = vk::PhysicalDeviceFragmentShadingRatePropertiesKHR::default();
+    let mut p2 = vk::PhysicalDeviceProperties2::default().push_next(&mut props);
+    // SAFETY: valid physical device; the chains hold initialised structs.
+    unsafe {
+        instance.get_physical_device_features2(pdev, &mut f2);
+        instance.get_physical_device_properties2(pdev, &mut p2);
+    }
+    (features.attachment_fragment_shading_rate == vk::TRUE).then_some(ShadingRateCaps {
+        texel: props.min_fragment_shading_rate_attachment_texel_size,
+    })
 }
 
 /// Device extensions [`crate::q10c`] needs.
@@ -204,27 +236,39 @@ impl Gpu {
                 .all(|n| has_extension(&instance, pdev, n));
         let foreign =
             shared && has_extension(&instance, pdev, ash::ext::queue_family_foreign::NAME);
-        let mut q10c_exts: Vec<_> = Q10C_EXTENSIONS.map(std::ffi::CStr::as_ptr).into();
+        let shading_rates = shading_rate_caps(&instance, pdev);
+        let mut exts: Vec<*const std::ffi::c_char> = Vec::new();
+        if q10c_features {
+            exts.extend(Q10C_EXTENSIONS.map(std::ffi::CStr::as_ptr));
+        }
         if shared {
-            q10c_exts.extend(SHARED_EXTENSIONS.map(std::ffi::CStr::as_ptr));
+            exts.extend(SHARED_EXTENSIONS.map(std::ffi::CStr::as_ptr));
         }
         if foreign {
-            q10c_exts.push(ash::ext::queue_family_foreign::NAME.as_ptr());
+            exts.push(ash::ext::queue_family_foreign::NAME.as_ptr());
+        }
+        if shading_rates.is_some() {
+            exts.push(ash::khr::fragment_shading_rate::NAME.as_ptr());
         }
         let mut f12 = vk::PhysicalDeviceVulkan12Features::default().buffer_device_address(true);
         let mut fdb =
             vk::PhysicalDeviceDescriptorBufferFeaturesEXT::default().descriptor_buffer(true);
+        let mut fsr = vk::PhysicalDeviceFragmentShadingRateFeaturesKHR::default()
+            .attachment_fragment_shading_rate(true);
         let features =
             vk::PhysicalDeviceFeatures::default().shader_storage_image_extended_formats(true);
         let mut dci = vk::DeviceCreateInfo::default()
             .queue_create_infos(&qci)
+            .enabled_extension_names(&exts)
             .push_next(&mut f13);
         if q10c_features {
             dci = dci
-                .enabled_extension_names(&q10c_exts)
                 .enabled_features(&features)
                 .push_next(&mut f12)
                 .push_next(&mut fdb);
+        }
+        if shading_rates.is_some() {
+            dci = dci.push_next(&mut fsr);
         }
         let raw_dev = creator.create_device(&instance, pdev, &dci)?;
         // SAFETY: raw_dev was created from this instance.
@@ -263,6 +307,7 @@ impl Gpu {
             } else {
                 vk::QUEUE_FAMILY_EXTERNAL
             },
+            shading_rates,
         })
     }
 

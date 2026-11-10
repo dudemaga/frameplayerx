@@ -94,6 +94,8 @@ pub struct Settings {
     pub check_updates: bool,
     /// UI text size multiplier, in [`UI_SCALES`].
     pub ui_scale: f32,
+    /// Refresh rate, render resolution and foveated rendering.
+    pub display: fp_core::display::Display,
     /// Room for server pictures kept on the headset, in MB
     /// ([`crate::image_cache`]).
     pub image_cache_mb: u32,
@@ -219,6 +221,7 @@ impl Default for Settings {
             },
             check_updates: true,
             ui_scale: 1.0,
+            display: Default::default(),
             image_cache_mb: 500,
             make_thumbnails: true,
             resume_frames: true,
@@ -267,6 +270,7 @@ impl Settings {
         match std::fs::read_to_string(path) {
             Ok(text) => match serde_json::from_str::<Settings>(&text) {
                 Ok(mut s) => {
+                    s.display = s.display.offered();
                     // Saved before the global chroma key existed: its key
                     // was never chosen, so take the current default.
                     if s.default_view.key_own.is_none() {

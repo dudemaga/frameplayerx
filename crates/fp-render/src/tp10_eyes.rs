@@ -8,7 +8,7 @@
 
 use crate::gpu::Gpu;
 use crate::params::SceneParams;
-use crate::pipeline::{self, PipelineDesc};
+use crate::pipeline::{self, PipelineDesc, ShadingRate};
 use crate::q10c::{self, MAX_CHROMA_BANDS, MAX_LUMA_BANDS, Sampled};
 use crate::{Error, Result, VkContext};
 use ash::vk;
@@ -53,6 +53,7 @@ impl Tp10Eyes {
         color_format: vk::Format,
         sampler: vk::Sampler,
         slots: usize,
+        shading_rate: ShadingRate,
     ) -> Result<Tp10Eyes> {
         let mut t = Tp10Eyes {
             db: ash::ext::descriptor_buffer::Device::new(&gpu.instance, &gpu.device),
@@ -64,7 +65,7 @@ impl Tp10Eyes {
             sampled_size: 0,
             slots: Vec::new(),
         };
-        if let Err(e) = t.create(gpu, color_format, sampler, slots) {
+        if let Err(e) = t.create(gpu, color_format, sampler, slots, shading_rate) {
             t.destroy(gpu);
             return Err(e);
         }
@@ -77,6 +78,7 @@ impl Tp10Eyes {
         color_format: vk::Format,
         sampler: vk::Sampler,
         slots: usize,
+        shading_rate: ShadingRate,
     ) -> Result<()> {
         let mut dbp = vk::PhysicalDeviceDescriptorBufferPropertiesEXT::default();
         let mut p2 = vk::PhysicalDeviceProperties2::default().push_next(&mut dbp);
@@ -141,6 +143,7 @@ impl Tp10Eyes {
                 attributes: &[],
                 blend: false,
                 descriptor_buffer: true,
+                shading_rate,
             },
         )?;
         for _ in 0..slots {

@@ -187,8 +187,7 @@ fn location(arg: &str) -> String {
         .unwrap_or_else(|_| arg.to_string())
 }
 
-fn make_app() -> Result<App, Error> {
-    let settings = Settings::load(&Settings::path());
+fn make_app(settings: Settings) -> Result<App, Error> {
     let library = fp_library::Library::open_default()?;
     Ok(App::new(settings, library))
 }
@@ -418,7 +417,8 @@ fn run_xr(args: &Args) -> Result<(), Error> {
     log::info!("OpenXR runtime {} on {}", ctx.runtime, ctx.system_name);
     let gpu = Arc::new(Gpu::new(&ctx.creator(), "FramePlayerX")?);
     log::info!("GPU {} ({})", gpu.device_name, gpu.driver);
-    let mut session = XrSession::new(ctx.clone(), gpu.clone())?;
+    let settings = Settings::load(&Settings::path());
+    let mut session = XrSession::new(ctx.clone(), gpu.clone(), settings.display.eye_resolution)?;
     log::info!(
         "eye buffers {:?} {:?}; controller bindings {:?}",
         session.extent,
@@ -428,7 +428,7 @@ fn run_xr(args: &Args) -> Result<(), Error> {
     let mut renderer = Renderer::new(gpu.clone(), session.format)?;
     fp_media::set_hevc_10bit_hardware(renderer.shows_q10c());
     fp_media::set_shared_frames(renderer.reads_decoder_buffers());
-    let mut app = make_app()?;
+    let mut app = make_app(settings)?;
     app.set_about(vec![
         ("OpenXR runtime".into(), ctx.runtime.clone()),
         ("Headset".into(), ctx.system_name.clone()),
@@ -444,10 +444,6 @@ fn run_xr(args: &Args) -> Result<(), Error> {
                 "no (VR only)"
             }
             .into(),
-        ),
-        (
-            "Eye resolution".into(),
-            format!("{}×{}", session.extent.width, session.extent.height),
         ),
         (
             "Controllers".into(),
@@ -475,6 +471,11 @@ fn run_xr(args: &Args) -> Result<(), Error> {
     let mut gpu_ms = perf::GpuWindow::default();
     let mut last_frame_ms = None;
     let mut timing_since = Instant::now();
+    // The refresh rate, resolution and foveation in use.
+    let mut display: Option<fp_core::display::Display> = None;
+    // Each frame's gaze angle from where the head faces, when eye tracking
+    // gave one.
+    let mut gaze_deg: Vec<f32> = Vec::new();
     let layers = session.supports_quad_layers();
     log::info!(
         "UI as compositor quad layers: {}",
@@ -501,6 +502,10 @@ fn run_xr(args: &Args) -> Result<(), Error> {
         let recentred = session.recentred_by(frame.state.predicted_display_time);
         let work = Instant::now();
         let input = session.input(frame.state.predicted_display_time);
+        if let (Some((_, gaze)), Some((_, head))) = (input.gaze, frame.head) {
+            let ahead = head * glam::Vec3::NEG_Z;
+            gaze_deg.push((gaze * glam::Vec3::NEG_Z).angle_between(ahead).to_degrees());
+        }
         let dt = last.elapsed().as_secs_f32().min(0.1);
         last = Instant::now();
         renderer.begin_frame()?;
@@ -529,6 +534,7 @@ fn run_xr(args: &Args) -> Result<(), Error> {
         }
         let mut submits = Vec::new();
         if let (Some(targets), Some(eyes)) = (frame.targets, frame.eyes) {
+            renderer.set_gaze(input.gaze.map(|(_, q)| q * glam::Vec3::NEG_Z));
             renderer.draw(&targets, &eyes, &out.video, &out.quads)?;
             for l in &out.layers {
                 match *l {
@@ -580,6 +586,17 @@ fn run_xr(args: &Args) -> Result<(), Error> {
         frame_ms.push(ms);
         last_frame_ms = Some(ms);
         session.end_frame(frame, &submits)?;
+        let want = app.settings.display;
+        if display != Some(want) {
+            if display.map(|d| d.refresh_rate) != Some(want.refresh_rate) {
+                session.set_refresh_rate(want.refresh_rate);
+            }
+            if let Err(e) = session.set_eye_resolution(want.eye_resolution) {
+                log::warn!("eye pictures {} across: {e}", want.eye_resolution);
+            }
+            renderer.set_foveation(want.foveation);
+            display = Some(want);
+        }
         if timing_since.elapsed() > Duration::from_secs(10) && !frame_ms.is_empty() {
             frame_ms.sort_by(f32::total_cmp);
             let at = |q: f32| frame_ms[((frame_ms.len() - 1) as f32 * q) as usize];
@@ -593,6 +610,18 @@ fn run_xr(args: &Args) -> Result<(), Error> {
             );
             if let Some(line) = gpu_ms.take_line() {
                 log::info!("{line}");
+            }
+            if !gaze_deg.is_empty() {
+                gaze_deg.sort_by(f32::total_cmp);
+                let at = |q: f32| gaze_deg[((gaze_deg.len() - 1) as f32 * q) as usize];
+                log::info!(
+                    "eye gaze in {}% of frames, from where the head faces: median {:.0}°, 95% {:.0}°, max {:.0}°",
+                    100 * gaze_deg.len() / frame_ms.len(),
+                    at(0.5),
+                    at(0.95),
+                    at(1.0)
+                );
+                gaze_deg.clear();
             }
             if let Some(pb) = &app.playback {
                 let st = pb.player.stats();

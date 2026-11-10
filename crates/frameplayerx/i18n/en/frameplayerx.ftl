@@ -66,6 +66,19 @@ settings-follow = Screen follows you
 settings-follow-desc = Flat videos and the menus stay in front of you as you turn, lie back or roll onto your side.
 settings-haptic-devices = Haptic devices
 settings-haptic-devices-desc = Sync connected haptic devices with videos that have scripts.
+settings-display = Display
+settings-refresh-rate = Refresh rate
+settings-refresh-rate-desc = 120 Hz shows 24, 30 and 60 fps video evenly. A lower rate gives each frame more time and saves battery.
+settings-render-resolution = Render resolution
+settings-render-resolution-desc = Pixels across each eye's picture. Higher is sharper and shimmers less, and works the GPU harder.
+settings-foveation = Foveated rendering
+settings-foveation-desc = Less detail where you aren't looking, following your eyes, so high resolutions keep up. High gives up more.
+# Short: a chip.
+foveation-off = Off
+# Short: a chip.
+foveation-low = Low
+# Short: a chip.
+foveation-high = High
 settings-thumbnails = Thumbnails
 settings-make-thumbnails = Make thumbnails
 settings-make-thumbnails-desc = For videos whose server has no picture: a frame of the video, made on the headset while nothing plays.
