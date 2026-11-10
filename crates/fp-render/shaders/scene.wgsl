@@ -54,17 +54,20 @@ struct Params {
     display: vec4<u32>,
     // HDR, as PQ codes: x the scene's peak, y the screen's white
     hdr: vec4<f32>,
+    // A Q10C picture's overlapping bands (planes_tp10.wgsl), luma then
+    // chroma: x first-row step, y rows, z the plane's rows, w count
+    tp10: vec4<f32>,
+    tp10_uv: vec4<f32>,
 };
 
 struct PushConstants {
     eye: u32,
 };
 
+// The video planes and `sample_yuv` / `luma_at` come from planes.wgsl, or
+// planes_tp10.wgsl for the pipeline sampling Q10C in place (build.rs).
 @group(0) @binding(0) var<uniform> params: Params;
 @group(0) @binding(1) var samp: sampler;
-@group(0) @binding(2) var plane0: texture_2d<f32>;
-@group(0) @binding(3) var plane1: texture_2d<f32>;
-@group(0) @binding(4) var plane2: texture_2d<f32>;
 var<immediate> pc: PushConstants;
 
 struct VsOut {
@@ -244,22 +247,6 @@ fn stored_uv(uv: vec2<f32>) -> vec2<f32> {
         case 3u: { return vec2<f32>(1.0 - uv.y, uv.x); }
         default: { return uv; }
     }
-}
-
-fn sample_yuv(uv: vec2<f32>) -> vec3<f32> {
-    let y = textureSampleLevel(plane0, samp, uv, 0.0).r;
-    var c: vec2<f32>;
-    if (params.mode.w == 0u) {
-        c = vec2<f32>(textureSampleLevel(plane1, samp, uv, 0.0).r, textureSampleLevel(plane2, samp, uv, 0.0).r);
-    } else {
-        c = textureSampleLevel(plane1, samp, uv, 0.0).rg;
-    }
-    let yuv = vec3<f32>(y, c) * params.yuv_offset.w - params.yuv_offset.xyz;
-    return vec3<f32>(dot(params.yuv_r.xyz, yuv), dot(params.yuv_g.xyz, yuv), dot(params.yuv_b.xyz, yuv));
-}
-
-fn luma_at(uv: vec2<f32>) -> f32 {
-    return textureSampleLevel(plane0, samp, uv, 0.0).r * params.yuv_offset.w;
 }
 
 // BT.2390's EETF on PQ code `e`, for a source peaking at PQ `src` and a

@@ -12,6 +12,8 @@ pub(crate) struct PipelineDesc<'a> {
     pub attributes: &'a [vk::VertexInputAttributeDescription],
     /// Premultiplied-alpha blending.
     pub blend: bool,
+    /// Its descriptors come from descriptor buffers, not sets.
+    pub descriptor_buffer: bool,
 }
 
 pub(crate) fn create(gpu: &Gpu, d: &PipelineDesc) -> Result<vk::Pipeline> {
@@ -68,7 +70,13 @@ pub(crate) fn create(gpu: &Gpu, d: &PipelineDesc) -> Result<vk::Pipeline> {
     let formats = [d.color_format];
     let mut rendering =
         vk::PipelineRenderingCreateInfo::default().color_attachment_formats(&formats);
+    let flags = if d.descriptor_buffer {
+        vk::PipelineCreateFlags::DESCRIPTOR_BUFFER_EXT
+    } else {
+        vk::PipelineCreateFlags::empty()
+    };
     let info = vk::GraphicsPipelineCreateInfo::default()
+        .flags(flags)
         .stages(&stages)
         .vertex_input_state(&vertex_input)
         .input_assembly_state(&ia)
