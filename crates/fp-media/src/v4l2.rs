@@ -1285,7 +1285,8 @@ mod linux {
             par: *const ff::AVCodecParameters,
             time_base: ff::AVRational,
         ) -> Result<()> {
-            // SAFETY: standard bitstream filter setup on our own context.
+            // SAFETY: standard bitstream filter setup on our own context; the
+            // allocated filter is null or valid.
             unsafe {
                 let f = ff::av_bsf_get_by_name(self.codec.annexb_filter().as_ptr());
                 if f.is_null() {
@@ -1294,11 +1295,16 @@ mod linux {
                     ));
                 }
                 crate::check(ff::av_bsf_alloc(f, &mut self.bsf), "bsf alloc")?;
+                let Some(bsf) = self.bsf.as_mut() else {
+                    return Err(Error::Unsupported(
+                        "Annex B bitstream filter not allocated".into(),
+                    ));
+                };
                 crate::check(
-                    ff::avcodec_parameters_copy((*self.bsf).par_in, par),
+                    ff::avcodec_parameters_copy(bsf.par_in, par),
                     "bsf parameters",
                 )?;
-                (*self.bsf).time_base_in = time_base;
+                bsf.time_base_in = time_base;
                 crate::check(ff::av_bsf_init(self.bsf), "bsf init")?;
             }
             if self.codec != Codec::Hevc {
