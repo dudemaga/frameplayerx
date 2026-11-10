@@ -11,9 +11,6 @@
 
 A VR video player for the Valve Steam Frame. It plays flat, 180°, 360° and fisheye videos, in 2D or 3D, from the headset, a microSD card, a USB drive or a media server. It runs natively on the headset.
 
-> [!NOTE]
-> FramePlayerX is a fork of [FramePlayer](https://github.com/yellkell/frameplayer) by [yellkell](https://github.com/yellkell), who created the original player and released it as open source. Thank you, yellkell, for the work this project is built on.
-
 ---
 
 ## Features
@@ -121,6 +118,28 @@ FramePlayerX is licensed under the [Apache License, Version 2.0](LICENSE). It's 
 FramePlayerX is an independent project, not affiliated with or endorsed by Valve. Steam and Steam Frame are trademarks of Valve Corporation.
 
 Unless you explicitly state otherwise, any contribution intentionally submitted for inclusion in FramePlayerX by you shall be licensed under the Apache License, Version 2.0, without any additional terms or conditions.
+
+---
+
+## Credits
+
+FramePlayerX began as a fork of [FramePlayer](https://github.com/yellkell/frameplayer) by [yellkell](https://github.com/yellkell), who created the original player and released it as open source. Thank you, yellkell, for the work this project is built on.
+
+### Acknowledgements
+
+- Reading hardware-decoded frames straight from the decoder's buffers, without copying them, follows [VideoFrameVR](https://github.com/seaweeduk/VideoFrameVR)'s approach ([#122](https://github.com/remotesojourner/frameplayerx/pull/122))
+- HDR tone mapping is modelled on [mpv](https://mpv.io)'s: the BT.2390 curve, fitted to each scene's measured peak
+- [Frame Control](https://github.com/saphid/steam-frame) by saphid installs FramePlayerX from a PC, and FramePlayerX's install links follow its format
+- The DeoVR remote API, the DeoVR feed and the HereSphere API come from those players; FramePlayerX implements them so the servers and phone apps made for them work with it
+- [FFmpeg](https://ffmpeg.org) and [dav1d](https://code.videolan.org/videolan/dav1d) decode the video, and the libraries and fonts in [Technology Stack](#technology-stack) do much of the rest. FramePlayerX uses code of FFmpeg licensed under the LGPL 2.1 or later; where to download its source, and every bundled component with its licence, is in [packaging/licenses](packaging/licenses/THIRD-PARTY.txt)
+- The pictures and videos in the screenshots are AI-generated
+
+### Players that inspired FramePlayerX
+
+Thanks to the developers of these players for showing what the Steam Frame can do. FramePlayerX is written independently, but their work spurred us on, and they're well worth a try:
+
+- [MatineeVR](https://embedding-shapes.itch.io/matineevr) by embedding-shapes
+- [VideoFrameVR](https://github.com/seaweeduk/VideoFrameVR) by seaweeduk
 
 ---
 
