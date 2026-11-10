@@ -266,6 +266,7 @@ impl Sim {
                         "general" => SettingsTab::General,
                         "playback" => SettingsTab::Playback,
                         "position" => SettingsTab::VideoPosition,
+                        "picture" => SettingsTab::Picture,
                         "sound" => SettingsTab::Sound,
                         "passthrough" => SettingsTab::Passthrough,
                         "controller" => SettingsTab::Controller,
@@ -318,6 +319,47 @@ impl Sim {
                 if let Some(tab) = parts.get(1).and_then(|t| t.parse().ok()) {
                     self.app.ui.adjust_tab = tab;
                 }
+                self.app.repaint_all();
+                self.run_frames(3)?;
+            }
+            // One adjustment of the playing video, by its name in
+            // settings.json: `view brightness -0.2`.
+            Some("view") => {
+                let key = parts.get(1).ok_or("view needs an adjustment")?;
+                let value: serde_json::Value = parts
+                    .get(2)
+                    .and_then(|v| serde_json::from_str(v).ok())
+                    .ok_or("view needs a value")?;
+                if let Some(p) = &mut self.app.playback {
+                    let mut v = serde_json::to_value(p.settings).map_err(|e| e.to_string())?;
+                    v[*key] = value;
+                    p.settings = serde_json::from_value(v).map_err(|e| e.to_string())?;
+                    p.settings_dirty = true;
+                }
+                self.app.repaint_all();
+                self.run_frames(2)?;
+            }
+            // The playing video's adjustments as a preset, as New preset
+            // saves them, under the rest of the line: `save-preset Night`.
+            Some("save-preset") => {
+                self.app.apply(crate::ui::Action::SavePreset);
+                let name = line.trim().strip_prefix("save-preset").unwrap_or("").trim();
+                if let Some(p) = self
+                    .app
+                    .settings
+                    .presets
+                    .last_mut()
+                    .filter(|_| !name.is_empty())
+                {
+                    p.name = name.to_string();
+                }
+                self.app.repaint_all();
+                self.run_frames(2)?;
+            }
+            // The adjust panel's presets listed to rename or delete, as Edit
+            // shows them: `edit-presets`.
+            Some("edit-presets") => {
+                self.app.ui.presets_editing = true;
                 self.app.repaint_all();
                 self.run_frames(3)?;
             }

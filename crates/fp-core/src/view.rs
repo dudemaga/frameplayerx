@@ -1,5 +1,6 @@
 //! Per-video picture and placement corrections (HereSphere-style).
 
+use crate::format::VideoFormat;
 use serde::{Deserialize, Serialize};
 
 /// The colour around a flat screen to start with, a near-black grey.
@@ -194,6 +195,39 @@ impl ViewSettings {
     }
 }
 
+/// A named set of adjustments any video can take on: everything saved for a
+/// video but its keyframes, which belong to its timeline.
+#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct Preset {
+    pub name: String,
+    /// The format picked for the video it was saved from; none when that
+    /// video was on Automatic, so the format stays the detected one.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub format: Option<VideoFormat>,
+    pub view: ViewSettings,
+}
+
+impl Preset {
+    /// The adjustments it gives a video now showing `current`: all of its
+    /// own, but a flat screen stays where it was moved to (its yaw and
+    /// pitch), as that isn't saved for a video either.
+    pub fn view_for(&self, current: &ViewSettings, flat: bool) -> ViewSettings {
+        let mut view = self.view;
+        if flat {
+            view.yaw = current.yaw;
+            view.pitch = current.pitch;
+        }
+        view
+    }
+
+    /// Whether a video showing `current`, with `picked` its picked format
+    /// (none on Automatic), has everything this preset gives it.
+    pub fn matches(&self, current: &ViewSettings, picked: Option<VideoFormat>, flat: bool) -> bool {
+        self.view_for(current, flat) == *current && self.format.is_none_or(|f| picked == Some(f))
+    }
+}
+
 /// Settings that change over the video's timeline.
 #[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
 pub struct Keyframes {
@@ -239,6 +273,56 @@ impl Keyframes {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_preset_gives_everything_but_a_flat_screens_place() {
+        let saved = ViewSettings {
+            yaw: 30.0,
+            zoom: 1.4,
+            brightness: -0.2,
+            lens_k1: 0.1,
+            chroma_key: true,
+            ..ViewSettings::default()
+        };
+        let sbs = VideoFormat::new(
+            crate::Projection::EQUIRECT_180,
+            crate::StereoLayout::SideBySide,
+        );
+        let preset = Preset {
+            name: "Night".into(),
+            format: Some(sbs),
+            view: saved,
+        };
+        let moved = ViewSettings {
+            yaw: -90.0,
+            pitch: 10.0,
+            ..ViewSettings::default()
+        };
+        // A 180° video takes all of it, turn included.
+        let vr = preset.view_for(&moved, false);
+        assert_eq!(vr, saved);
+        assert!(preset.matches(&vr, Some(sbs), false));
+        assert!(
+            !preset.matches(&vr, None, false),
+            "its format is part of it"
+        );
+        // A flat screen keeps where it was moved to.
+        let flat = preset.view_for(&moved, true);
+        assert_eq!((flat.yaw, flat.pitch, flat.zoom), (-90.0, 10.0, 1.4));
+        assert!(flat.chroma_key && flat.lens_k1 == 0.1);
+        // Saved on Automatic, it matches whatever the format is.
+        let automatic = Preset {
+            format: None,
+            ..preset.clone()
+        };
+        assert!(automatic.matches(&vr, None, false));
+        // A preset saved before a field existed reads back with its default.
+        let old: Preset = serde_json::from_str(r#"{"name":"Old","view":{"zoom":2.0}}"#).unwrap();
+        assert_eq!(
+            (old.view.zoom, old.view.contrast, old.format),
+            (2.0, 1.0, None)
+        );
+    }
 
     #[test]
     fn keyframes_interpolate_and_clamp() {

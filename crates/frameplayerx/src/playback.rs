@@ -1059,6 +1059,28 @@ impl Playback {
         self.key_pending = true;
     }
 
+    /// The format picked for this video: none on Automatic.
+    pub fn picked_format(&self) -> Option<VideoFormat> {
+        (self.evidence == Evidence::User).then_some(self.format)
+    }
+
+    /// What a preset keeps of this video: its adjustments as they are saved
+    /// with it, and the format picked.
+    pub fn preset_parts(&self) -> (ViewSettings, Option<VideoFormat>) {
+        (
+            kept_with_video(self.settings, self.format),
+            self.picked_format(),
+        )
+    }
+
+    /// The first of `presets` this video has everything of.
+    pub fn matching_preset(&self, presets: &[fp_core::view::Preset]) -> Option<usize> {
+        let flat = self.format.projection == format::Projection::Flat;
+        presets
+            .iter()
+            .position(|p| p.matches(&self.settings, self.picked_format(), flat))
+    }
+
     pub fn add_bookmark(&mut self, library: &Library) -> fp_library::Result<()> {
         let t = self.player.position();
         let name = tr!("bookmark-name", time = crate::ui::fmt_time(t));

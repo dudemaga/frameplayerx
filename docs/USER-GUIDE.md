@@ -575,6 +575,30 @@ detail. Colours richer than the screen can show are toned down smoothly
 instead of being cut off, and the most vivid ones it can show lose a
 little saturation to make room for them.
 
+### Presets
+
+A preset keeps everything a video saves, to use on any video: the
+format, if you picked one, and the Position, Stereo, Picture and
+Passthrough tabs. A flat screen's place, where you moved it, isn't saved
+for a video, so a preset leaves it too. Presets sit at the top of the
+adjust panel, above the tabs:
+
+- **New preset** saves the playing video's as Preset 1, Preset 2 and so
+  on, up to 8. Saved from a video left on **Automatic**, a preset keeps
+  no format and leaves each video's to detection.
+- Press a preset to give the video all of it at once. It's lit while the
+  video has everything of it, and **Save for this video** keeps it with
+  the video, as with any change.
+- **Edit** lists the presets in place of the tab's page to rename or
+  delete them; Delete asks again first. **Done** or any tab goes back.
+- While you watch, hold the left grip and press D-pad left for the next
+  preset; a message names it. Settings › Controller can move it to another
+  button.
+
+Where videos start is set in Settings: **Video position** for the screen,
+zoom, height and background, **Picture** for the picture and a 3D video's
+depth and eye alignment, and Sound and subtitles for subtitle depth.
+
 ### Fisheye lenses
 
 A fisheye format shows **Fisheye lens** under the format list. Its presets
@@ -818,7 +842,7 @@ picture. Play/pause and seeking are under either thumb.
 | Menu / View | Browse | Recenter |
 | Bumper | Forward 1 minute | Back 1 minute |
 | Grip + thumbstick | Up / down raises or lowers you | Left / right turns the picture, down zooms in, up zooms out |
-| Grip + X / Y | Previous / next chapter or bookmark (back within 3 s of one's start goes to the one before) | As without the grip |
+| Grip + X / Y | Previous / next chapter or bookmark (back within 3 s of one's start goes to the one before) | Grip + D-pad left: the next [preset](#presets); D-pad up as without the grip |
 | Grip + A | Bookmark where you are | As without the grip |
 | Grip + thumbstick press | Subtitles off, or back on: the ones you had, else those in your language | As without the grip |
 | Hold grip + trigger, move | Drag the picture (a flat screen or the dome follows your hand) | The same |

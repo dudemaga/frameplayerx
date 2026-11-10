@@ -37,6 +37,7 @@ settings-general = General
 settings-playback = Playback
 # Short: a tab.
 settings-video-position = Video position
+settings-picture = Picture
 # Short: a tab.
 settings-sound = Sound and subtitles
 # Short: a tab.
@@ -120,12 +121,18 @@ settings-fisheye-presets-desc = The angles offered under Fisheye lens. Add one f
 # Before the fisheye presets: the angle a video gets when Fisheye is picked for it.
 settings-fisheye-start = Fisheye starts at
 settings-video-position-desc = Where videos start. A video you adjust in the player keeps its own.
+settings-picture-desc = How videos look until you adjust them. A video you adjust in the player keeps its own.
+adjust-preset-rename = Rename
+adjust-preset-delete = Delete
+adjust-preset-delete-confirm = Delete it?
 settings-flat-videos = Flat videos
 settings-screen-distance = Screen distance
 settings-screen-width = Screen width
 settings-screen-width-desc = Its longer side: a portrait video's height.
 settings-screen-curvature = Screen curvature
 settings-vr-videos = 180° and 360° videos
+settings-all-videos = All videos
+settings-3d-videos = 3D videos
 settings-height = Height
 settings-height-desc = Raise or lower yourself in videos without their own.
 settings-background = Background
@@ -376,6 +383,11 @@ adjust-field-of-view-hint = A preset sets this. For any other angle, slide it, t
 # Short: before buttons that set a fisheye lens's field of view.
 adjust-lens-presets = Presets
 adjust-lens-add-preset = Add to the presets
+adjust-presets = Presets
+adjust-preset-new = New preset
+adjust-preset-new-tip = Saves this video's adjustments, and its format if you picked one, as a preset for any video
+adjust-preset-edit = Edit
+preset-name = Preset { $n }
 adjust-edge-stretch = Edge stretch
 adjust-edge-stretch-desc = For a lens that doesn't spread its view evenly: straight lines bend as you look around.
 adjust-rim-stretch = Rim stretch
@@ -906,6 +918,7 @@ action-show-hide = Show / hide controls
 action-adjust = Adjust panel
 action-room = Show your room
 action-recenter = Recenter
+action-next-preset = Next preset
 # Very short: a label beside the controller picture.
 action-short-play-pause = Play/pause
 # Very short: a label beside the controller picture.
@@ -926,6 +939,7 @@ action-short-reset = Reset view
 action-short-show-hide = Show/hide UI
 # Very short: a label beside the controller picture.
 action-short-adjust = Adjust
+action-short-next-preset = Next preset
 # Very short: a label beside the controller picture.
 action-short-room = Room
 # What a thumbstick direction does.
@@ -1108,6 +1122,9 @@ crash-show-report = Show the report
 crash-dont-send = Don't send
 crash-report-heading = The report, exactly as it would be sent
 toast-adjustments-saved = Adjustments saved
+toast-preset-saved = Saved as { $name }
+toast-preset = Preset: { $name }
+toast-no-presets = No presets yet: save one at the top of the adjust panel
 toast-bookmark-added = Bookmark added
 toast-history-cleared = Watch history cleared
 # Play next and Add to queue are buttons: use their translations.

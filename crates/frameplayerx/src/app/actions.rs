@@ -120,6 +120,17 @@ impl App {
                 p.settings = s.new_video_view();
                 p.keyframes = Default::default();
             }),
+            Action::SavePreset => {
+                if let Some(p) = &self.playback {
+                    let (view, format) = p.preset_parts();
+                    if let Some(name) = self.settings.add_preset(view, format) {
+                        self.ui.toast(tr!("toast-preset-saved", name = name));
+                    }
+                }
+            }
+            Action::ApplyPreset(i) => {
+                self.apply_preset(i);
+            }
             Action::AddKeyframe => self.edit_view(|p, _| {
                 p.keyframes.insert(p.player.position(), p.settings);
             }),
@@ -445,6 +456,39 @@ impl App {
             edit(p, &self.settings);
             p.settings_dirty = true;
         }
+    }
+
+    /// Sets the preset after the one the playing video matches, and names it.
+    pub(super) fn next_preset(&mut self) {
+        let Some(p) = &self.playback else { return };
+        let next = self
+            .settings
+            .next_preset(p.matching_preset(&self.settings.presets));
+        match next.and_then(|i| self.apply_preset(i)) {
+            Some(name) => self.ui.toast(tr!("toast-preset", name = name)),
+            None => self.ui.toast(tr!("toast-no-presets")),
+        }
+    }
+
+    /// Gives the playing video preset `i`, and its name: the adjustments, a
+    /// changed chroma key saved at once as the Passthrough tab saves it,
+    /// then the format, last since a format change can open the video again.
+    fn apply_preset(&mut self, i: usize) -> Option<String> {
+        let preset = self.settings.presets.get(i)?.clone();
+        let p = self.playback.as_mut()?;
+        let flat = preset.format.unwrap_or(p.format).projection == Projection::Flat;
+        let key = (p.settings.key(), p.settings.key_own);
+        p.settings = preset.view_for(&p.settings, flat);
+        p.settings_dirty = true;
+        if (p.settings.key(), p.settings.key_own) != key {
+            p.key_changed();
+        }
+        if let Some(f) = preset.format
+            && p.picked_format() != Some(f)
+        {
+            self.apply(Action::SetFormat(Some(f)));
+        }
+        Some(preset.name)
     }
 
     fn add_bookmark(&mut self) {

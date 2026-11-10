@@ -8,7 +8,7 @@ use super::{Action, SettingsTab, View, icons};
 use crate::settings::HapticDeviceConfig;
 use egui::{Align2, Color32, RichText, Sense, Vec2};
 
-fn tabs() -> [(SettingsTab, &'static str, &'static str); 10] {
+fn tabs() -> [(SettingsTab, &'static str, &'static str); 11] {
     [
         (
             SettingsTab::General,
@@ -25,6 +25,7 @@ fn tabs() -> [(SettingsTab, &'static str, &'static str); 10] {
             icons::FRAME_CORNERS,
             tr!("settings-video-position"),
         ),
+        (SettingsTab::Picture, icons::SUN, tr!("settings-picture")),
         (
             SettingsTab::Sound,
             icons::SPEAKER_HIGH,
@@ -103,6 +104,7 @@ pub fn settings(ui: &mut egui::Ui, v: &mut View) {
                     SettingsTab::General => general(ui, v),
                     SettingsTab::Playback => playback(ui, v),
                     SettingsTab::VideoPosition => video_position(ui, v),
+                    SettingsTab::Picture => picture(ui, v),
                     SettingsTab::Sound => sound(ui, v),
                     SettingsTab::Passthrough => passthrough(ui, v),
                     SettingsTab::Controller => controller(ui, v),
@@ -518,6 +520,15 @@ fn video_position(ui: &mut egui::Ui, v: &mut View) {
     heading(ui, tr!("settings-vr-videos"));
     widgets::rows(ui, |r| {
         r.slider(
+            tr!("adjust-zoom"),
+            None,
+            &mut d.zoom,
+            0.5..=2.5,
+            1.0,
+            "×",
+            2,
+        );
+        r.slider(
             tr!("settings-height"),
             Some(tr!("settings-height-desc")),
             &mut d.height,
@@ -526,9 +537,29 @@ fn video_position(ui: &mut egui::Ui, v: &mut View) {
             " m",
             2,
         );
+        r.slider(
+            tr!("adjust-forward"),
+            Some(tr!("adjust-forward-desc")),
+            &mut d.forward,
+            -1.0..=1.0,
+            0.0,
+            " m",
+            2,
+        );
     });
     heading(ui, tr!("settings-background"));
     super::player::background_controls(ui, &mut d.background);
+}
+
+/// How videos look until they are adjusted: the picture, and a 3D video's
+/// depth and eye alignment.
+fn picture(ui: &mut egui::Ui, v: &mut View) {
+    let d = &mut v.settings.default_view;
+    note(ui, tr!("settings-picture-desc"));
+    heading(ui, tr!("settings-all-videos"));
+    super::player::picture_tab(ui, d);
+    heading(ui, tr!("settings-3d-videos"));
+    super::player::stereo_tab(ui, d, false);
 }
 
 fn sound(ui: &mut egui::Ui, v: &mut View) {

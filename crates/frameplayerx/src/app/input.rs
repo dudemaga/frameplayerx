@@ -180,6 +180,7 @@ impl App {
                     self.ui.toast(tr!("toast-view-reset"));
                 }
             }
+            Cmd::NextPreset => self.next_preset(),
             Cmd::DragBegin => {
                 self.drag_start = self
                     .playback
