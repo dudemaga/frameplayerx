@@ -261,6 +261,10 @@ pub enum Action {
     /// The Passthrough tab changed this video's chroma key: saved at once.
     SaveKey,
     ResetView,
+    /// Saves the playing video's adjustments as a new preset.
+    SavePreset,
+    /// Sets this preset's adjustments on the playing video.
+    ApplyPreset(usize),
     AddKeyframe,
     ClearKeyframes,
     AddBookmark,
@@ -431,6 +435,8 @@ pub enum SettingsTab {
     General,
     Playback,
     VideoPosition,
+    /// How videos look until adjusted: picture, and 3D depth and alignment.
+    Picture,
     /// Sound and subtitles.
     Sound,
     Passthrough,
@@ -805,6 +811,12 @@ pub struct UiState {
     /// Delete was pressed once on the open playlist: pressing again within
     /// a few seconds deletes it.
     pub delete_armed: Option<std::time::Instant>,
+    /// The adjust panel lists the presets to rename or delete.
+    pub presets_editing: bool,
+    /// The preset being renamed, with the name as typed.
+    pub preset_renaming: Option<(usize, String)>,
+    /// Delete was pressed once on this preset, as for playlists.
+    pub preset_delete_armed: Option<(usize, std::time::Instant)>,
     /// Videos being added to a playlist (the picker shows instead of the
     /// screen).
     pub picking: Option<Picking>,
@@ -874,6 +886,9 @@ impl Default for UiState {
             playlist_name: String::new(),
             renaming: false,
             delete_armed: None,
+            presets_editing: false,
+            preset_renaming: None,
+            preset_delete_armed: None,
             picking: None,
             up_next: None,
             source: None,

@@ -19,7 +19,7 @@ A VR video player for the Valve Steam Frame. It plays flat, 180°, 360° and fis
 - **Hardware decoding**: HEVC (H.265) in 8 and 10 bits and H.264, up to 8K, play on the Frame's own video decoder, and its pictures are shown without being copied. AV1, VP9 and anything else play with software decoding
 - **HDR**: HDR10 and HLG videos are fitted to the Frame's screen scene by scene, and colours it can't show are toned down instead of cut off
 - **Display**: up to 3744 pixels per eye at 120 Hz, with foveated rendering that follows your eyes. Refresh rate, resolution and foveation can be changed in Settings while a video plays
-- **Adjustments**: position, zoom, depth, picture settings and fisheye lens calibration, saved for each video, and a screen that follows your head for watching lying down
+- **Adjustments**: position, zoom, depth, picture settings and fisheye lens calibration, saved for each video or as presets for any video, and a screen that follows your head for watching lying down
 - **Passthrough videos**: see your room around the people in passthrough videos, and behind green or blue screens
 - **Subtitles and spatial audio**: subtitles from a file or inside the video, picked in your language and shown in any script, and 360° audio that follows your head
 - **Videos on the headset**: browse any folder on the headset, a microSD card or a USB drive, including cards formatted on Windows or a Mac, and make libraries of your folders, with thumbnails, filters and sorting

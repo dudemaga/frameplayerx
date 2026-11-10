@@ -1,7 +1,7 @@
 //! Persistent user settings (`~/.config/frameplayerx/settings.json`).
 //! Source credentials live separately in `sources.json` (mode 0600).
 
-use fp_core::view::ViewSettings;
+use fp_core::view::{Preset, ViewSettings};
 use fp_haptics::HapticsSettings;
 use fp_remote::config::RemoteConfig;
 use serde::{Deserialize, Serialize};
@@ -67,6 +67,8 @@ pub struct Settings {
     pub language: Option<String>,
     /// Defaults for videos without saved adjustments.
     pub default_view: ViewSettings,
+    /// Adjustments saved to apply to any video, in the order they were made.
+    pub presets: Vec<Preset>,
     /// Show the real world around flat screens and the UI.
     pub passthrough: bool,
     /// Resume videos where they were left.
@@ -187,7 +189,39 @@ impl Settings {
     pub fn fisheye_presets_changed(&self) -> bool {
         self.fisheye_presets != FISHEYE_PRESETS || self.fisheye_start != FISHEYE_START
     }
+
+    /// Saves `view` and the `format` picked (none on Automatic) as a preset
+    /// named "Preset" and the first number no preset has; its name, or none
+    /// when presets are full.
+    pub fn add_preset(
+        &mut self,
+        view: ViewSettings,
+        format: Option<fp_core::format::VideoFormat>,
+    ) -> Option<String> {
+        if self.presets.len() >= MAX_PRESETS {
+            return None;
+        }
+        let name = (1..)
+            .map(|n| tr!("preset-name", n = n))
+            .find(|name| self.presets.iter().all(|p| p.name != *name))?;
+        self.presets.push(Preset {
+            name: name.clone(),
+            format,
+            view,
+        });
+        Some(name)
+    }
+
+    /// The preset after the one at `current` (the first a video matches),
+    /// or the first.
+    pub fn next_preset(&self, current: Option<usize>) -> Option<usize> {
+        let next = current.map_or(0, |i| (i + 1) % self.presets.len().max(1));
+        (next < self.presets.len()).then_some(next)
+    }
 }
+
+/// How many presets there can be: one row at the top of the adjust panel.
+pub const MAX_PRESETS: usize = 8;
 
 impl Default for Settings {
     fn default() -> Self {
@@ -202,6 +236,7 @@ impl Default for Settings {
                 .to_string(),
             language: None,
             default_view: ViewSettings::default(),
+            presets: Vec::new(),
             passthrough: false,
             resume: true,
             default_format: fp_core::format::VideoFormat::FALLBACK,
@@ -313,6 +348,32 @@ impl Settings {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn presets_get_free_names_and_next_goes_round() {
+        let mut s = Settings::default();
+        let view = |zoom| ViewSettings {
+            zoom,
+            ..ViewSettings::default()
+        };
+        assert_eq!(s.next_preset(None), None);
+        let first = s.add_preset(view(1.2), None).unwrap();
+        let second = s.add_preset(view(1.5), None).unwrap();
+        assert_ne!(first, second);
+        s.presets.remove(0);
+        assert_eq!(
+            s.add_preset(view(2.0), None),
+            Some(first),
+            "a freed name is reused"
+        );
+        // Next: after the one matching, round to the first, the first when
+        // none matches.
+        assert_eq!(s.next_preset(Some(0)), Some(1));
+        assert_eq!(s.next_preset(Some(1)), Some(0));
+        assert_eq!(s.next_preset(None), Some(0));
+        while s.add_preset(view(1.0), None).is_some() {}
+        assert_eq!(s.presets.len(), MAX_PRESETS);
+    }
 
     #[test]
     fn round_trip_and_partial_files() {

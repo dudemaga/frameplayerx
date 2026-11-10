@@ -1110,18 +1110,36 @@ pub fn adjust_panel(ctx: &egui::Context, v: &mut View) {
                 .color(theme::TEXT),
         );
         ui.add_space(4.0);
+        if v.settings.presets.is_empty() {
+            v.state.presets_editing = false;
+        }
+        presets_row(
+            ui,
+            &v.settings.presets,
+            pb,
+            &mut v.state.presets_editing,
+            v.actions,
+        );
         // Haptics is the last tab, left out while haptics are off.
         let all = tabs();
         let tabs = &all[..all.len() - usize::from(!v.settings.haptics_enabled)];
         if v.state.adjust_tab >= tabs.len() {
             v.state.adjust_tab = 0;
         }
-        if let Some(i) = widgets::segmented(ui, tabs, v.state.adjust_tab) {
+        // No tab is lit while the presets are listed in place of its page.
+        let lit = if v.state.presets_editing {
+            usize::MAX
+        } else {
+            v.state.adjust_tab
+        };
+        if let Some(i) = widgets::segmented(ui, tabs, lit) {
             v.state.adjust_tab = i;
+            v.state.presets_editing = false;
         }
         ui.add_space(10.0);
+        let editing = v.state.presets_editing;
         // Save and reset stay at the bottom while the page scrolls.
-        let footer = v.state.adjust_tab <= 4;
+        let footer = !editing && v.state.adjust_tab <= 4;
         let footer_h = if footer { 64.0 } else { 0.0 };
         let page = ui.available_height() - footer_h;
         egui::ScrollArea::vertical()
@@ -1129,6 +1147,10 @@ pub fn adjust_panel(ctx: &egui::Context, v: &mut View) {
             .auto_shrink([false, false])
             .show_list(ui, |ui| {
                 ui.spacing_mut().item_spacing.y = 10.0;
+                if editing {
+                    presets_list(ui, &mut v.settings.presets, v.state);
+                    return;
+                }
                 let before = pb.settings;
                 match v.state.adjust_tab {
                     0 => format_tab(ui, pb, v.settings, v.actions),
@@ -1138,7 +1160,7 @@ pub fn adjust_panel(ctx: &egui::Context, v: &mut View) {
                             || (flat && (pb.settings.yaw, pb.settings.pitch) != (0.0, 0.0));
                         position_tab(ui, &mut pb.settings, flat, moved, v.actions);
                     }
-                    2 => stereo_tab(ui, &mut pb.settings),
+                    2 => stereo_tab(ui, &mut pb.settings, true),
                     3 => picture_tab(ui, &mut pb.settings),
                     4 => {
                         widgets::section_label(ui, tr!("settings-passthrough-videos"));
@@ -1166,6 +1188,125 @@ pub fn adjust_panel(ctx: &egui::Context, v: &mut View) {
             adjust_footer(ui, pb, v.actions);
         }
     });
+}
+
+/// The presets, above the tabs since one gives a video everything saved for
+/// it; lit while the video has everything of one. New preset saves the
+/// video's, and Edit lists them to rename or delete in place of the page.
+fn presets_row(
+    ui: &mut egui::Ui,
+    presets: &[fp_core::view::Preset],
+    pb: &crate::playback::Playback,
+    editing: &mut bool,
+    actions: &mut Vec<Action>,
+) {
+    let matching = pb.matching_preset(presets);
+    ui.horizontal_wrapped(|ui| {
+        ui.spacing_mut().item_spacing = Vec2::new(8.0, 8.0);
+        ui.label(RichText::new(tr!("adjust-presets")).color(theme::TEXT_2));
+        for (i, preset) in presets.iter().enumerate() {
+            if widgets::chip(ui, &preset.name, matching == Some(i)).clicked() {
+                actions.push(Action::ApplyPreset(i));
+            }
+        }
+        if presets.len() < crate::settings::MAX_PRESETS
+            && widgets::chip_icon(ui, Some(icons::PLUS), tr!("adjust-preset-new"), false)
+                .tip(tr!("adjust-preset-new-tip"))
+                .clicked()
+        {
+            actions.push(Action::SavePreset);
+        }
+        if !presets.is_empty()
+            && widgets::chip_icon(
+                ui,
+                Some(icons::PENCIL_SIMPLE),
+                tr!("adjust-preset-edit"),
+                *editing,
+            )
+            .clicked()
+        {
+            *editing = !*editing;
+        }
+    });
+    ui.add_space(8.0);
+}
+
+/// The presets to rename or delete, in place of the tab's page while Edit
+/// is on; Delete asks again first, as a playlist's does.
+fn presets_list(
+    ui: &mut egui::Ui,
+    presets: &mut Vec<fp_core::view::Preset>,
+    state: &mut super::UiState,
+) {
+    let armed = state
+        .preset_delete_armed
+        .filter(|(_, at)| at.elapsed().as_secs_f32() < 4.0)
+        .map(|(i, _)| i);
+    let (mut delete, mut renamed) = (None, false);
+    widgets::rows(ui, |r| {
+        for (i, preset) in presets.iter_mut().enumerate() {
+            let title = preset.name.clone();
+            r.row(&title, None, |ui| match &mut state.preset_renaming {
+                Some((at, typed)) if *at == i => {
+                    let name = typed.trim().to_string();
+                    let save = ui.add_enabled_ui(!name.is_empty(), |ui| {
+                        widgets::button(ui, Some(icons::CHECK), tr!("common-save"), Kind::Primary)
+                    });
+                    ui.add(
+                        egui::TextEdit::singleline(typed)
+                            .margin(egui::Margin::symmetric(12, 9))
+                            .font(theme::font(Weight::Regular, 17.0))
+                            .desired_width(200.0),
+                    );
+                    if save.inner.clicked() {
+                        preset.name = name;
+                        renamed = true;
+                    }
+                }
+                _ => {
+                    let (label, kind) = if armed == Some(i) {
+                        (tr!("adjust-preset-delete-confirm"), Kind::Danger)
+                    } else {
+                        (tr!("adjust-preset-delete"), Kind::Secondary)
+                    };
+                    if widgets::button(ui, Some(icons::TRASH), label, kind).clicked() {
+                        if armed == Some(i) {
+                            delete = Some(i);
+                        } else {
+                            state.preset_delete_armed = Some((i, std::time::Instant::now()));
+                        }
+                    }
+                    if widgets::button(
+                        ui,
+                        Some(icons::PENCIL_SIMPLE),
+                        tr!("adjust-preset-rename"),
+                        Kind::Secondary,
+                    )
+                    .clicked()
+                    {
+                        state.preset_renaming = Some((i, preset.name.clone()));
+                    }
+                }
+            });
+        }
+    });
+    if armed.is_some() {
+        ui.ctx()
+            .request_repaint_after(std::time::Duration::from_millis(500));
+    }
+    if let Some(i) = delete {
+        presets.remove(i);
+        state.preset_delete_armed = None;
+        state.preset_renaming = None;
+    }
+    if renamed {
+        state.preset_renaming = None;
+    }
+    ui.add_space(6.0);
+    if widgets::button(ui, Some(icons::CHECK), tr!("common-done"), Kind::Primary).clicked() {
+        state.presets_editing = false;
+        state.preset_renaming = None;
+    }
 }
 
 /// Format tab: the format list, the eye order, and a fisheye's lens with
@@ -1414,7 +1555,9 @@ fn position_tab(
     background_controls(ui, &mut s.background);
 }
 
-fn stereo_tab(ui: &mut egui::Ui, s: &mut ViewSettings) {
+/// Depth and eye alignment, with subtitle depth unless `subtitles` is off
+/// (Settings has it with the subtitles).
+pub(super) fn stereo_tab(ui: &mut egui::Ui, s: &mut ViewSettings, subtitles: bool) {
     let d = ViewSettings::default();
     widgets::rows(ui, |r| {
         r.slider(
@@ -1444,19 +1587,21 @@ fn stereo_tab(ui: &mut egui::Ui, s: &mut ViewSettings) {
             "°",
             1,
         );
-        r.slider(
-            tr!("settings-subtitle-depth"),
-            None,
-            &mut s.subtitle_distance,
-            0.8..=10.0,
-            d.subtitle_distance,
-            " m",
-            1,
-        );
+        if subtitles {
+            r.slider(
+                tr!("settings-subtitle-depth"),
+                None,
+                &mut s.subtitle_distance,
+                0.8..=10.0,
+                d.subtitle_distance,
+                " m",
+                1,
+            );
+        }
     });
 }
 
-fn picture_tab(ui: &mut egui::Ui, s: &mut ViewSettings) {
+pub(super) fn picture_tab(ui: &mut egui::Ui, s: &mut ViewSettings) {
     widgets::rows(ui, |r| {
         r.slider(
             tr!("adjust-brightness"),
