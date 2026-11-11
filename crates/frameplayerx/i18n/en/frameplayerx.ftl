@@ -440,6 +440,7 @@ adjust-chroma-desc = Makes one colour of the video see-through, so your room sho
 adjust-chroma-desc-dark = Makes one colour of the video see-through. This headset doesn't share passthrough with apps, so it turns dark instead.
 adjust-chroma-colour-heading = Background colour
 adjust-chroma-colour = Colour
+adjust-chroma-found = Found in this video.
 adjust-red = Red
 adjust-green = Green
 adjust-blue = Blue

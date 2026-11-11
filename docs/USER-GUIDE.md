@@ -926,8 +926,18 @@ videos can carry a mask.
 ### Green and blue screens (chroma key)
 
 Videos filmed against a green or blue screen can show your room instead of
-the screen. Turn on **Remove the background** and pick the colour (green
-screen, blue screen, or any colour with the red/green/blue sliders).
+the screen: turn on **Remove the background**.
+
+For a video without its own mask and with no Passthrough settings of its
+own yet, the colour to remove is found in the video itself, usually a
+second or two after it starts playing. It comes from a frame in the middle of the video,
+so a studio's intro doesn't decide it, and is used at full strength like
+the one-tap colours. The Colour row then says "Found in this video". Until
+then, or if no screen colour is found in that frame, the colour from
+**Settings > Passthrough** is used.
+
+To use another colour, pick green screen, blue screen or magenta, or set one
+with the red/green/blue sliders; that replaces the found one.
 **Similarity** sets how close a colour must be to disappear, **Edge softness**
 feathers the cut, and **Spill removal** takes the screen's tint off hair and
 edges. A keyed video turns passthrough on by itself, whatever its format.
@@ -937,6 +947,7 @@ open the adjust panel's **Passthrough** tab while it plays: changing anything
 there gives that video its own settings (save them like any other
 adjustment), and turning **Own settings for this video** off makes it follow
 Settings again.
+
 ## Haptics
 
 Haptics are off until you turn on **Settings › General › Haptic devices**.

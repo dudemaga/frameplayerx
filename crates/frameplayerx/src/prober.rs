@@ -67,7 +67,7 @@ impl FfmpegProber {
 
 /// Lowers the calling thread's priority, once: thumbnails are background
 /// work, and the interface and the audio come first.
-fn background() {
+pub(crate) fn background() {
     thread_local! {
         static LOWERED: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
     }

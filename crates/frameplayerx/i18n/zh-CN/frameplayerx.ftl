@@ -330,6 +330,7 @@ adjust-chroma-desc = 让视频中的一种颜色变透明，使你的房间显�
 adjust-chroma-desc-dark = 让视频中的一种颜色变透明。此头显不与应用共享透视，所以它会变暗。
 adjust-chroma-colour-heading = 背景颜色
 adjust-chroma-colour = 颜色
+adjust-chroma-found = 已在此视频中找到。
 adjust-red = 红
 adjust-green = 绿
 adjust-blue = 蓝

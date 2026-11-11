@@ -12,7 +12,10 @@
 //! - `q10c`: shows the Steam Frame decoder's 10-bit (Q10C) pictures.
 //! - [`hdr`]: HDR on the SDR screen: tone curve, gamut compression and the
 //!   scene peak, which `peak` measures from the frames.
+//! - [`backdrop`]: finds the green or blue screen behind a video in a
+//!   picture of one of its frames, the colour its chroma key starts with.
 
+pub mod backdrop;
 pub mod capture;
 mod foveation;
 pub mod gpu;

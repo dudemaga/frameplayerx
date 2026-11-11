@@ -336,6 +336,7 @@ adjust-chroma-desc = Rend une couleur de la vidéo transparente, pour que votre 
 adjust-chroma-desc-dark = Rend une couleur de la vidéo transparente. Ce casque ne partage pas le passthrough avec les applications, elle devient donc sombre.
 adjust-chroma-colour-heading = Couleur d’arrière-plan
 adjust-chroma-colour = Couleur
+adjust-chroma-found = Trouvée dans cette vidéo.
 adjust-red = Rouge
 adjust-green = Vert
 adjust-blue = Bleu

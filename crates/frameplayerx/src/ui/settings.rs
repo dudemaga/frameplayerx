@@ -682,7 +682,7 @@ fn passthrough(ui: &mut egui::Ui, v: &mut View) {
     widgets::section_label(ui, tr!("settings-passthrough-videos"));
     ui.label(RichText::new(tr!("settings-passthrough-videos-desc")).color(theme::TEXT_2));
     ui.add_space(6.0);
-    super::player::chroma_controls(ui, &mut s.default_view, available);
+    super::player::chroma_controls(ui, &mut s.default_view, available, false);
 }
 
 /// The kinds of haptic device, each with the hint its address field shows.

@@ -336,6 +336,7 @@ adjust-chroma-desc = Macht eine Farbe des Videos durchsichtig, sodass Ihr Raum d
 adjust-chroma-desc-dark = Macht eine Farbe des Videos durchsichtig. Dieses Headset teilt Passthrough nicht mit Apps, daher wird sie stattdessen dunkel.
 adjust-chroma-colour-heading = Hintergrundfarbe
 adjust-chroma-colour = Farbe
+adjust-chroma-found = In diesem Video gefunden.
 adjust-red = Rot
 adjust-green = Grün
 adjust-blue = Blau

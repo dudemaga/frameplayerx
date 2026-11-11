@@ -16,7 +16,8 @@ use fp_media::{Cue, Player, PlayerConfig, PlayerState, StreamInfo};
 use fp_sources::sidecar::subtitle_file;
 use fp_sources::urlutil::last_segment;
 use fp_sources::{Source, TranscodeTarget};
-use std::sync::{Arc, Mutex};
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::{Arc, Mutex, mpsc};
 use std::thread::JoinHandle;
 use std::time::{Duration, Instant};
 
@@ -104,6 +105,11 @@ pub struct Playback {
     /// and when it was last saved: slider drags save twice a second.
     key_pending: bool,
     key_saved_at: Instant,
+    pub backdrop: BackdropSearch,
+    /// No colour is picked for this video's chroma key, so it starts with
+    /// the one found in it: none had its own key when opened, and none was
+    /// picked since.
+    colour_open: bool,
     pub heatmap: Option<Heatmap>,
     pub markers: Vec<(f64, String)>,
     pub subtitle_files: Vec<SubtitleFile>,
@@ -125,6 +131,140 @@ pub struct Playback {
     /// What the server is transcoding it to; `None` for the file as it is.
     pub transcoding: Option<TranscodeTarget>,
     pub source_tracks: Vec<fp_sources::PlaybackTrack>,
+}
+
+/// The size, each way, the backdrop's picture is scaled to fit: plenty of
+/// samples to tell a backdrop, cheap to decode into.
+const BACKDROP_PICTURE: u32 = 160;
+
+/// Where the search for a video's backdrop colour has got to.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub enum Backdrop {
+    /// Not started yet, or its picture is being decoded.
+    Looking,
+    /// Its colour at full strength ([`fp_render::backdrop::pure`]).
+    Found([f32; 3]),
+    /// The middle of the video shows none.
+    NotFound,
+}
+
+/// The search for a video's backdrop colour, the colour its chroma key
+/// starts with: the keyframe in the middle of the video, so a studio's
+/// intro doesn't decide it, decoded in software by a second reader of the
+/// file playback opened (for a transcode, the original).
+pub struct BackdropSearch {
+    source_id: Option<String>,
+    location: String,
+    pub state: Backdrop,
+    answer: Option<mpsc::Receiver<Option<[f32; 3]>>>,
+    /// Stops the search's reads when the video closes.
+    stop: Arc<AtomicBool>,
+}
+
+impl BackdropSearch {
+    pub fn new(source_id: Option<String>, location: String) -> BackdropSearch {
+        BackdropSearch {
+            source_id,
+            location,
+            state: Backdrop::Looking,
+            answer: None,
+            stop: Arc::new(AtomicBool::new(false)),
+        }
+    }
+
+    /// Starts the search on a thread of its own, once. `duration` stands in
+    /// when the file doesn't say how long it is.
+    pub fn start(&mut self, opener: Arc<Opener>, duration: f64) {
+        if self.answer.is_some() || self.state != Backdrop::Looking {
+            return;
+        }
+        let (tx, rx) = mpsc::channel();
+        let (source_id, location, stop) = (
+            self.source_id.clone(),
+            self.location.clone(),
+            self.stop.clone(),
+        );
+        let spawned = std::thread::Builder::new()
+            .name("backdrop".into())
+            .spawn(move || {
+                crate::prober::background();
+                let began = Instant::now();
+                let found =
+                    middle_backdrop(&opener, source_id.as_deref(), &location, duration, stop)
+                        .unwrap_or_else(|e| {
+                            log::warn!("looking for the backdrop of {location}: {e}");
+                            None
+                        });
+                log::info!(
+                    "backdrop search: {:.2} s, {}",
+                    began.elapsed().as_secs_f64(),
+                    if found.is_some() { "found" } else { "none" }
+                );
+                let _ = tx.send(found);
+            });
+        match spawned {
+            Ok(_) => self.answer = Some(rx),
+            Err(e) => {
+                log::warn!("looking for the backdrop: {e}");
+                self.state = Backdrop::NotFound;
+            }
+        }
+    }
+
+    /// Takes the search's answer once it has one.
+    pub fn poll(&mut self) {
+        let Some(rx) = &self.answer else {
+            return;
+        };
+        let found = match rx.try_recv() {
+            Ok(found) => found,
+            Err(mpsc::TryRecvError::Empty) => return,
+            Err(mpsc::TryRecvError::Disconnected) => None,
+        };
+        self.answer = None;
+        self.state = match found {
+            Some(c) => {
+                let pure = fp_render::backdrop::pure(c);
+                log::info!("the video's backdrop is sRGB {c:.2?}, keyed as {pure:.2?}");
+                Backdrop::Found(pure)
+            }
+            None => Backdrop::NotFound,
+        };
+    }
+}
+
+impl Drop for BackdropSearch {
+    fn drop(&mut self) {
+        self.stop.store(true, Ordering::Release);
+    }
+}
+
+/// The backdrop in the keyframe at the middle of `location`, the file read
+/// anew through `opener`; `stop` makes its reads fail.
+fn middle_backdrop(
+    opener: &Opener,
+    source_id: Option<&str>,
+    location: &str,
+    duration: f64,
+    stop: Arc<AtomicBool>,
+) -> Result<Option<[f32; 3]>, String> {
+    let src = opener.open_in(source_id, location)?;
+    let mut grabber = fp_media::thumb::Grabber::open(src, &last_segment(location), stop)
+        .map_err(|e| e.to_string())?;
+    let length = Some(grabber.info().duration)
+        .filter(|d| *d > 0.0)
+        .unwrap_or(duration);
+    // A still or a moment's clip has no middle to seek to.
+    let middle = if length > 1.0 { length / 2.0 } else { 0.0 };
+    let picture = grabber
+        .grab(
+            middle,
+            BACKDROP_PICTURE,
+            BACKDROP_PICTURE,
+            fp_media::thumb::Crop::Full,
+        )
+        .map_err(|e| e.to_string())?;
+    Ok(fp_render::backdrop::find(&picture.pixels))
 }
 
 /// The result of opening on a background thread.
@@ -542,6 +682,7 @@ pub fn open(
             None => Watch::start(reports, src, &video, start_at),
         }
     });
+    let backdrop = BackdropSearch::new(req.source_id.clone(), location.clone());
     Ok(Opened {
         playback: Playback {
             player,
@@ -563,6 +704,8 @@ pub fn open(
             saved_settings: settings_v,
             key_pending: false,
             key_saved_at: Instant::now(),
+            backdrop,
+            colour_open: !settings_v.own_key(),
             keyframes,
             settings_dirty: false,
             heatmap,
@@ -868,9 +1011,50 @@ impl Playback {
     }
 
     /// What is shown now: [`Self::current_settings`] with the global chroma
-    /// key unless this video has its own.
+    /// key unless this video has its own, and the backdrop's colour once
+    /// found, until a colour is picked for this video.
     pub fn shown_settings(&self, global: &ViewSettings) -> ViewSettings {
-        self.current_settings().with_global_key(global)
+        let mut s = self.current_settings().with_global_key(global);
+        if let Some(c) = self.found_colour() {
+            s.key_color = c;
+        }
+        s
+    }
+
+    /// The colour found for this video's chroma key, while none is picked.
+    pub fn found_colour(&self) -> Option<[f32; 3]> {
+        match self.backdrop.state {
+            Backdrop::Found(c) if self.colour_open => Some(c),
+            _ => None,
+        }
+    }
+
+    /// A colour was picked for this video: the one found no longer applies.
+    pub fn colour_picked(&mut self) {
+        self.colour_open = false;
+    }
+
+    /// Whether the backdrop is to be searched for: the chroma key is on, no
+    /// colour is picked for this video, and its own mask isn't in use, its
+    /// red corners being no backdrop.
+    pub fn wants_backdrop(&self, global: &ViewSettings) -> bool {
+        let s = self.current_settings().with_global_key(global);
+        self.colour_open && s.chroma_key && self.format.alpha_pack_scale().is_none()
+    }
+
+    /// Takes the search's answer once it has one. A video with its own
+    /// chroma key, turned on in this session with no colour picked, keeps
+    /// the colour found, saved as the Passthrough tab saves it.
+    pub fn poll_backdrop(&mut self) {
+        let before = self.backdrop.state;
+        self.backdrop.poll();
+        if before == Backdrop::Looking
+            && let Some(c) = self.found_colour()
+            && self.settings.own_key()
+        {
+            self.settings.key_color = c;
+            self.key_changed();
+        }
     }
 
     /// Saves progress every few seconds and at the end.
@@ -1310,6 +1494,44 @@ pub(crate) fn slow_decode_notice(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn the_backdrop_is_found_in_a_second_read_of_the_file() {
+        let dir = std::env::temp_dir().join(format!("fpx-backdrop-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        // A person in front of a green screen, as a still picture.
+        let path = dir.join("screen.png");
+        image::RgbImage::from_fn(320, 180, |x, y| {
+            if (140..180).contains(&x) && y > 50 {
+                image::Rgb([170, 130, 110])
+            } else {
+                image::Rgb([40, 190, 70])
+            }
+        })
+        .save(&path)
+        .unwrap();
+        let search = |location: &std::path::Path| {
+            let mut s = BackdropSearch::new(None, location.to_string_lossy().into_owned());
+            s.start(Arc::new(Opener::new()), 0.0);
+            let until = Instant::now() + Duration::from_secs(20);
+            while s.state == Backdrop::Looking && Instant::now() < until {
+                std::thread::sleep(Duration::from_millis(20));
+                s.poll();
+            }
+            s.state
+        };
+        // The green at full strength.
+        let Backdrop::Found([r, g, b]) = search(&path) else {
+            panic!("no backdrop found");
+        };
+        assert!(
+            r < 0.02 && g > 0.98 && (b - 0.2).abs() < 0.03,
+            "{:?}",
+            [r, g, b]
+        );
+        assert_eq!(search(&dir.join("gone.mp4")), Backdrop::NotFound);
+        std::fs::remove_dir_all(&dir).ok();
+    }
 
     #[test]
     fn source_owned_requests_bind_the_owner_without_a_library_record() {
@@ -1783,7 +2005,7 @@ mod tests {
 
     #[test]
     fn opening_waits_for_closing_videos_but_not_forever() {
-        let (tx, rx) = std::sync::mpsc::channel::<()>();
+        let (tx, rx) = mpsc::channel::<()>();
         let slow = std::thread::spawn(move || {
             let _ = rx.recv();
         });
