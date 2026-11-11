@@ -21,6 +21,7 @@ pub mod bench;
 pub(crate) mod bluray;
 pub mod clock;
 pub(crate) mod decode;
+pub(crate) mod deinterlace;
 pub mod frame;
 pub(crate) mod frame_seq;
 pub mod info;

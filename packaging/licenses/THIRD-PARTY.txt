@@ -1,6 +1,7 @@
 FramePlayerX bundles these libraries as separate shared objects in lib/:
 
-FFmpeg 7.1.1 (libavformat, libavcodec, libavutil, libswresample, libswscale)
+FFmpeg 7.1.1 (libavformat, libavcodec, libavfilter, libavutil, libswresample,
+  libswscale)
   Licence: GNU Lesser General Public License 2.1 or later (LGPL-2.1-or-later),
   full text in LGPL-2.1.txt. Built without any GPL or non-free components.
   Source: https://ffmpeg.org/releases/ffmpeg-7.1.1.tar.xz
@@ -8,8 +9,8 @@ FFmpeg 7.1.1 (libavformat, libavcodec, libavutil, libswresample, libswscale)
   Exact build recipe and configure flags: tools/build-ffmpeg.sh in the
   FramePlayerX repository, https://github.com/remotesojourner/frameplayerx
   You may replace the libraries in lib/ with your own build of the same
-  major versions (libavcodec.so.61, libavformat.so.61, libavutil.so.59,
-  libswresample.so.5, libswscale.so.8).
+  major versions (libavcodec.so.61, libavfilter.so.10, libavformat.so.61,
+  libavutil.so.59, libswresample.so.5, libswscale.so.8).
 
 dav1d 1.5.3 (statically linked into libavcodec)
   Licence: BSD 2-Clause, text in dav1d-COPYING.txt.

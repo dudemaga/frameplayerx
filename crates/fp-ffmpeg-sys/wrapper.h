@@ -2,6 +2,9 @@
 #include <libavformat/avio.h>
 #include <libavcodec/avcodec.h>
 #include <libavcodec/bsf.h>
+#include <libavfilter/avfilter.h>
+#include <libavfilter/buffersink.h>
+#include <libavfilter/buffersrc.h>
 #include <libavutil/avutil.h>
 #include <libavutil/channel_layout.h>
 #include <libavutil/display.h>

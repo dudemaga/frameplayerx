@@ -1030,6 +1030,11 @@ pub const AV_HWACCEL_FLAG_ALLOW_PROFILE_MISMATCH: u32 = 4;
 pub const AV_HWACCEL_FLAG_UNSAFE_OUTPUT: u32 = 8;
 pub const AV_SUBTITLE_FLAG_FORCED: u32 = 1;
 pub const AV_PARSER_PTS_NB: u32 = 4;
+pub const LIBAVFILTER_VERSION_MAJOR: u32 = 10;
+pub const LIBAVFILTER_VERSION_MINOR: u32 = 4;
+pub const LIBAVFILTER_VERSION_MICRO: u32 = 100;
+pub const AV_BUFFERSINK_FLAG_PEEK: u32 = 1;
+pub const AV_BUFFERSINK_FLAG_NO_REQUEST: u32 = 2;
 pub const AV_PIX_FMT_FLAG_BE: u32 = 1;
 pub const AV_PIX_FMT_FLAG_PAL: u32 = 2;
 pub const AV_PIX_FMT_FLAG_BITSTREAM: u32 = 4;
@@ -1100,6 +1105,7 @@ pub const SWS_CS_SMPTE240M: u32 = 7;
 pub const SWS_CS_DEFAULT: u32 = 5;
 pub const SWS_CS_BT2020: u32 = 9;
 pub type __gnuc_va_list = __BindgenOpaqueArray8<[u8; 32usize]>;
+pub type __uint64_t = ::core::ffi::c_ulong;
 pub type __off_t = ::core::ffi::c_long;
 pub type __off64_t = ::core::ffi::c_long;
 pub type FILE = _IO_FILE;
@@ -1137,7 +1143,8 @@ pub struct _IO_FILE {
     pub _markers: *mut _IO_marker,
     pub _chain: *mut _IO_FILE,
     pub _fileno: ::core::ffi::c_int,
-    pub _flags2: ::core::ffi::c_int,
+    pub _bitfield_1: __BindgenBitfieldUnit<[u8; 3usize]>,
+    pub _short_backupbuf: [::core::ffi::c_char; 1usize],
     pub _old_offset: __off_t,
     pub _cur_column: ::core::ffi::c_ushort,
     pub _vtable_offset: ::core::ffi::c_schar,
@@ -1148,9 +1155,58 @@ pub struct _IO_FILE {
     pub _wide_data: *mut _IO_wide_data,
     pub _freeres_list: *mut _IO_FILE,
     pub _freeres_buf: *mut ::core::ffi::c_void,
-    pub __pad5: usize,
+    pub _prevchain: *mut *mut _IO_FILE,
     pub _mode: ::core::ffi::c_int,
-    pub _unused2: [::core::ffi::c_char; 20usize],
+    pub _unused3: ::core::ffi::c_int,
+    pub _total_written: __uint64_t,
+    pub _unused2: [::core::ffi::c_char; 8usize],
+}
+impl _IO_FILE {
+    #[inline]
+    #[allow(unnecessary_transmutes)]
+    pub fn _flags2(&self) -> ::core::ffi::c_int {
+        unsafe { ::core::mem::transmute(self._bitfield_1.get_const::<0usize, 24u8>() as u32) }
+    }
+    #[inline]
+    #[allow(unnecessary_transmutes)]
+    pub fn set__flags2(&mut self, val: ::core::ffi::c_int) {
+        unsafe {
+            let val: u32 = ::core::mem::transmute(val);
+            self._bitfield_1.set_const::<0usize, 24u8>(val as u64)
+        }
+    }
+    #[inline]
+    #[allow(unnecessary_transmutes)]
+    pub unsafe fn _flags2_raw(this: *const Self) -> ::core::ffi::c_int {
+        unsafe {
+            ::core::mem::transmute(<__BindgenBitfieldUnit<[u8; 3usize]>>::raw_get_const::<
+                0usize,
+                24u8,
+            >(::core::ptr::addr_of!((*this)._bitfield_1))
+                as u32)
+        }
+    }
+    #[inline]
+    #[allow(unnecessary_transmutes)]
+    pub unsafe fn set__flags2_raw(this: *mut Self, val: ::core::ffi::c_int) {
+        unsafe {
+            let val: u32 = ::core::mem::transmute(val);
+            <__BindgenBitfieldUnit<[u8; 3usize]>>::raw_set_const::<0usize, 24u8>(
+                ::core::ptr::addr_of_mut!((*this)._bitfield_1),
+                val as u64,
+            )
+        }
+    }
+    #[inline]
+    #[allow(unnecessary_transmutes)]
+    pub fn new_bitfield_1(_flags2: ::core::ffi::c_int) -> __BindgenBitfieldUnit<[u8; 3usize]> {
+        let mut __bindgen_bitfield_unit: __BindgenBitfieldUnit<[u8; 3usize]> = Default::default();
+        __bindgen_bitfield_unit.set_const::<0usize, 24u8>({
+            let _flags2: u32 = unsafe { ::core::mem::transmute(_flags2) };
+            _flags2 as u64
+        });
+        __bindgen_bitfield_unit
+    }
 }
 pub type va_list = __gnuc_va_list;
 unsafe extern "C" {
@@ -5610,6 +5666,550 @@ unsafe extern "C" {
     pub fn av_bsf_get_null_filter(bsf: *mut *mut AVBSFContext) -> ::core::ffi::c_int;
 }
 unsafe extern "C" {
+    pub fn avfilter_version() -> ::core::ffi::c_uint;
+}
+unsafe extern "C" {
+    pub fn avfilter_configuration() -> *const ::core::ffi::c_char;
+}
+unsafe extern "C" {
+    pub fn avfilter_license() -> *const ::core::ffi::c_char;
+}
+#[repr(C)]
+#[derive(Debug)]
+pub struct AVFilterPad {
+    _unused: [u8; 0],
+}
+#[repr(C)]
+#[derive(Debug)]
+pub struct AVFilterFormats {
+    _unused: [u8; 0],
+}
+#[repr(C)]
+#[derive(Debug)]
+pub struct AVFilterChannelLayouts {
+    _unused: [u8; 0],
+}
+unsafe extern "C" {
+    pub fn avfilter_pad_get_name(
+        pads: *const AVFilterPad,
+        pad_idx: ::core::ffi::c_int,
+    ) -> *const ::core::ffi::c_char;
+}
+unsafe extern "C" {
+    pub fn avfilter_pad_get_type(
+        pads: *const AVFilterPad,
+        pad_idx: ::core::ffi::c_int,
+    ) -> AVMediaType;
+}
+#[repr(C)]
+#[derive(Debug, Copy, Clone)]
+pub struct AVFilterFormatsConfig {
+    pub formats: *mut AVFilterFormats,
+    pub samplerates: *mut AVFilterFormats,
+    pub channel_layouts: *mut AVFilterChannelLayouts,
+    pub color_spaces: *mut AVFilterFormats,
+    pub color_ranges: *mut AVFilterFormats,
+}
+#[repr(C)]
+#[derive(Copy, Clone)]
+pub struct AVFilter {
+    pub name: *const ::core::ffi::c_char,
+    pub description: *const ::core::ffi::c_char,
+    pub inputs: *const AVFilterPad,
+    pub outputs: *const AVFilterPad,
+    pub priv_class: *const AVClass,
+    pub flags: ::core::ffi::c_int,
+    pub nb_inputs: u8,
+    pub nb_outputs: u8,
+    pub formats_state: u8,
+    pub preinit: ::core::option::Option<
+        unsafe extern "C" fn(ctx: *mut AVFilterContext) -> ::core::ffi::c_int,
+    >,
+    pub init: ::core::option::Option<
+        unsafe extern "C" fn(ctx: *mut AVFilterContext) -> ::core::ffi::c_int,
+    >,
+    pub uninit: ::core::option::Option<unsafe extern "C" fn(ctx: *mut AVFilterContext)>,
+    pub formats: AVFilter__bindgen_ty_1,
+    pub priv_size: ::core::ffi::c_int,
+    pub flags_internal: ::core::ffi::c_int,
+    pub process_command: ::core::option::Option<
+        unsafe extern "C" fn(
+            arg1: *mut AVFilterContext,
+            cmd: *const ::core::ffi::c_char,
+            arg: *const ::core::ffi::c_char,
+            res: *mut ::core::ffi::c_char,
+            res_len: ::core::ffi::c_int,
+            flags: ::core::ffi::c_int,
+        ) -> ::core::ffi::c_int,
+    >,
+    pub activate: ::core::option::Option<
+        unsafe extern "C" fn(ctx: *mut AVFilterContext) -> ::core::ffi::c_int,
+    >,
+}
+#[repr(C)]
+#[derive(Copy, Clone)]
+pub union AVFilter__bindgen_ty_1 {
+    pub query_func: ::core::option::Option<
+        unsafe extern "C" fn(arg1: *mut AVFilterContext) -> ::core::ffi::c_int,
+    >,
+    pub query_func2: ::core::option::Option<
+        unsafe extern "C" fn(
+            arg1: *const AVFilterContext,
+            cfg_in: *mut *mut AVFilterFormatsConfig,
+            cfg_out: *mut *mut AVFilterFormatsConfig,
+        ) -> ::core::ffi::c_int,
+    >,
+    pub pixels_list: *const AVPixelFormat,
+    pub samples_list: *const AVSampleFormat,
+    pub pix_fmt: AVPixelFormat,
+    pub sample_fmt: AVSampleFormat,
+}
+unsafe extern "C" {
+    pub fn avfilter_filter_pad_count(
+        filter: *const AVFilter,
+        is_output: ::core::ffi::c_int,
+    ) -> ::core::ffi::c_uint;
+}
+#[repr(C)]
+#[derive(Debug, Copy, Clone)]
+pub struct AVFilterContext {
+    pub av_class: *const AVClass,
+    pub filter: *const AVFilter,
+    pub name: *mut ::core::ffi::c_char,
+    pub input_pads: *mut AVFilterPad,
+    pub inputs: *mut *mut AVFilterLink,
+    pub nb_inputs: ::core::ffi::c_uint,
+    pub output_pads: *mut AVFilterPad,
+    pub outputs: *mut *mut AVFilterLink,
+    pub nb_outputs: ::core::ffi::c_uint,
+    pub priv_: *mut ::core::ffi::c_void,
+    pub graph: *mut AVFilterGraph,
+    pub thread_type: ::core::ffi::c_int,
+    pub nb_threads: ::core::ffi::c_int,
+    pub command_queue: *mut AVFilterCommand,
+    pub enable_str: *mut ::core::ffi::c_char,
+    pub enable: *mut ::core::ffi::c_void,
+    pub var_values: *mut f64,
+    pub is_disabled: ::core::ffi::c_int,
+    pub hw_device_ctx: *mut AVBufferRef,
+    pub ready: ::core::ffi::c_uint,
+    pub extra_hw_frames: ::core::ffi::c_int,
+}
+#[repr(C)]
+#[derive(Copy, Clone)]
+pub struct AVFilterLink {
+    pub src: *mut AVFilterContext,
+    pub srcpad: *mut AVFilterPad,
+    pub dst: *mut AVFilterContext,
+    pub dstpad: *mut AVFilterPad,
+    pub type_: AVMediaType,
+    pub format: ::core::ffi::c_int,
+    pub w: ::core::ffi::c_int,
+    pub h: ::core::ffi::c_int,
+    pub sample_aspect_ratio: AVRational,
+    pub colorspace: AVColorSpace,
+    pub color_range: AVColorRange,
+    pub sample_rate: ::core::ffi::c_int,
+    pub ch_layout: AVChannelLayout,
+    pub time_base: AVRational,
+    pub incfg: AVFilterFormatsConfig,
+    pub outcfg: AVFilterFormatsConfig,
+}
+unsafe extern "C" {
+    pub fn avfilter_link(
+        src: *mut AVFilterContext,
+        srcpad: ::core::ffi::c_uint,
+        dst: *mut AVFilterContext,
+        dstpad: ::core::ffi::c_uint,
+    ) -> ::core::ffi::c_int;
+}
+unsafe extern "C" {
+    pub fn avfilter_link_free(link: *mut *mut AVFilterLink);
+}
+unsafe extern "C" {
+    pub fn avfilter_config_links(filter: *mut AVFilterContext) -> ::core::ffi::c_int;
+}
+unsafe extern "C" {
+    pub fn avfilter_process_command(
+        filter: *mut AVFilterContext,
+        cmd: *const ::core::ffi::c_char,
+        arg: *const ::core::ffi::c_char,
+        res: *mut ::core::ffi::c_char,
+        res_len: ::core::ffi::c_int,
+        flags: ::core::ffi::c_int,
+    ) -> ::core::ffi::c_int;
+}
+unsafe extern "C" {
+    pub fn av_filter_iterate(opaque: *mut *mut ::core::ffi::c_void) -> *const AVFilter;
+}
+unsafe extern "C" {
+    pub fn avfilter_get_by_name(name: *const ::core::ffi::c_char) -> *const AVFilter;
+}
+unsafe extern "C" {
+    pub fn avfilter_init_str(
+        ctx: *mut AVFilterContext,
+        args: *const ::core::ffi::c_char,
+    ) -> ::core::ffi::c_int;
+}
+unsafe extern "C" {
+    pub fn avfilter_init_dict(
+        ctx: *mut AVFilterContext,
+        options: *mut *mut AVDictionary,
+    ) -> ::core::ffi::c_int;
+}
+unsafe extern "C" {
+    pub fn avfilter_free(filter: *mut AVFilterContext);
+}
+unsafe extern "C" {
+    pub fn avfilter_insert_filter(
+        link: *mut AVFilterLink,
+        filt: *mut AVFilterContext,
+        filt_srcpad_idx: ::core::ffi::c_uint,
+        filt_dstpad_idx: ::core::ffi::c_uint,
+    ) -> ::core::ffi::c_int;
+}
+unsafe extern "C" {
+    pub fn avfilter_get_class() -> *const AVClass;
+}
+pub type avfilter_action_func = ::core::option::Option<
+    unsafe extern "C" fn(
+        ctx: *mut AVFilterContext,
+        arg: *mut ::core::ffi::c_void,
+        jobnr: ::core::ffi::c_int,
+        nb_jobs: ::core::ffi::c_int,
+    ) -> ::core::ffi::c_int,
+>;
+pub type avfilter_execute_func = ::core::option::Option<
+    unsafe extern "C" fn(
+        ctx: *mut AVFilterContext,
+        func: avfilter_action_func,
+        arg: *mut ::core::ffi::c_void,
+        ret: *mut ::core::ffi::c_int,
+        nb_jobs: ::core::ffi::c_int,
+    ) -> ::core::ffi::c_int,
+>;
+#[repr(C)]
+#[derive(Debug, Copy, Clone)]
+pub struct AVFilterGraph {
+    pub av_class: *const AVClass,
+    pub filters: *mut *mut AVFilterContext,
+    pub nb_filters: ::core::ffi::c_uint,
+    pub scale_sws_opts: *mut ::core::ffi::c_char,
+    pub thread_type: ::core::ffi::c_int,
+    pub nb_threads: ::core::ffi::c_int,
+    pub opaque: *mut ::core::ffi::c_void,
+    pub execute: avfilter_execute_func,
+    pub aresample_swr_opts: *mut ::core::ffi::c_char,
+}
+unsafe extern "C" {
+    pub fn avfilter_graph_alloc() -> *mut AVFilterGraph;
+}
+unsafe extern "C" {
+    pub fn avfilter_graph_alloc_filter(
+        graph: *mut AVFilterGraph,
+        filter: *const AVFilter,
+        name: *const ::core::ffi::c_char,
+    ) -> *mut AVFilterContext;
+}
+unsafe extern "C" {
+    pub fn avfilter_graph_get_filter(
+        graph: *mut AVFilterGraph,
+        name: *const ::core::ffi::c_char,
+    ) -> *mut AVFilterContext;
+}
+unsafe extern "C" {
+    pub fn avfilter_graph_create_filter(
+        filt_ctx: *mut *mut AVFilterContext,
+        filt: *const AVFilter,
+        name: *const ::core::ffi::c_char,
+        args: *const ::core::ffi::c_char,
+        opaque: *mut ::core::ffi::c_void,
+        graph_ctx: *mut AVFilterGraph,
+    ) -> ::core::ffi::c_int;
+}
+unsafe extern "C" {
+    pub fn avfilter_graph_set_auto_convert(graph: *mut AVFilterGraph, flags: ::core::ffi::c_uint);
+}
+unsafe extern "C" {
+    pub fn avfilter_graph_config(
+        graphctx: *mut AVFilterGraph,
+        log_ctx: *mut ::core::ffi::c_void,
+    ) -> ::core::ffi::c_int;
+}
+unsafe extern "C" {
+    pub fn avfilter_graph_free(graph: *mut *mut AVFilterGraph);
+}
+#[repr(C)]
+#[derive(Debug, Copy, Clone)]
+pub struct AVFilterInOut {
+    pub name: *mut ::core::ffi::c_char,
+    pub filter_ctx: *mut AVFilterContext,
+    pub pad_idx: ::core::ffi::c_int,
+    pub next: *mut AVFilterInOut,
+}
+unsafe extern "C" {
+    pub fn avfilter_inout_alloc() -> *mut AVFilterInOut;
+}
+unsafe extern "C" {
+    pub fn avfilter_inout_free(inout: *mut *mut AVFilterInOut);
+}
+unsafe extern "C" {
+    pub fn avfilter_graph_parse(
+        graph: *mut AVFilterGraph,
+        filters: *const ::core::ffi::c_char,
+        inputs: *mut AVFilterInOut,
+        outputs: *mut AVFilterInOut,
+        log_ctx: *mut ::core::ffi::c_void,
+    ) -> ::core::ffi::c_int;
+}
+unsafe extern "C" {
+    pub fn avfilter_graph_parse_ptr(
+        graph: *mut AVFilterGraph,
+        filters: *const ::core::ffi::c_char,
+        inputs: *mut *mut AVFilterInOut,
+        outputs: *mut *mut AVFilterInOut,
+        log_ctx: *mut ::core::ffi::c_void,
+    ) -> ::core::ffi::c_int;
+}
+unsafe extern "C" {
+    pub fn avfilter_graph_parse2(
+        graph: *mut AVFilterGraph,
+        filters: *const ::core::ffi::c_char,
+        inputs: *mut *mut AVFilterInOut,
+        outputs: *mut *mut AVFilterInOut,
+    ) -> ::core::ffi::c_int;
+}
+#[repr(C)]
+#[derive(Debug, Copy, Clone)]
+pub struct AVFilterPadParams {
+    pub label: *mut ::core::ffi::c_char,
+}
+#[repr(C)]
+#[derive(Debug, Copy, Clone)]
+pub struct AVFilterParams {
+    pub filter: *mut AVFilterContext,
+    pub filter_name: *mut ::core::ffi::c_char,
+    pub instance_name: *mut ::core::ffi::c_char,
+    pub opts: *mut AVDictionary,
+    pub inputs: *mut *mut AVFilterPadParams,
+    pub nb_inputs: ::core::ffi::c_uint,
+    pub outputs: *mut *mut AVFilterPadParams,
+    pub nb_outputs: ::core::ffi::c_uint,
+}
+#[repr(C)]
+#[derive(Debug, Copy, Clone)]
+pub struct AVFilterChain {
+    pub filters: *mut *mut AVFilterParams,
+    pub nb_filters: usize,
+}
+#[repr(C)]
+#[derive(Debug, Copy, Clone)]
+pub struct AVFilterGraphSegment {
+    pub graph: *mut AVFilterGraph,
+    pub chains: *mut *mut AVFilterChain,
+    pub nb_chains: usize,
+    pub scale_sws_opts: *mut ::core::ffi::c_char,
+}
+unsafe extern "C" {
+    pub fn avfilter_graph_segment_parse(
+        graph: *mut AVFilterGraph,
+        graph_str: *const ::core::ffi::c_char,
+        flags: ::core::ffi::c_int,
+        seg: *mut *mut AVFilterGraphSegment,
+    ) -> ::core::ffi::c_int;
+}
+unsafe extern "C" {
+    pub fn avfilter_graph_segment_create_filters(
+        seg: *mut AVFilterGraphSegment,
+        flags: ::core::ffi::c_int,
+    ) -> ::core::ffi::c_int;
+}
+unsafe extern "C" {
+    pub fn avfilter_graph_segment_apply_opts(
+        seg: *mut AVFilterGraphSegment,
+        flags: ::core::ffi::c_int,
+    ) -> ::core::ffi::c_int;
+}
+unsafe extern "C" {
+    pub fn avfilter_graph_segment_init(
+        seg: *mut AVFilterGraphSegment,
+        flags: ::core::ffi::c_int,
+    ) -> ::core::ffi::c_int;
+}
+unsafe extern "C" {
+    pub fn avfilter_graph_segment_link(
+        seg: *mut AVFilterGraphSegment,
+        flags: ::core::ffi::c_int,
+        inputs: *mut *mut AVFilterInOut,
+        outputs: *mut *mut AVFilterInOut,
+    ) -> ::core::ffi::c_int;
+}
+unsafe extern "C" {
+    pub fn avfilter_graph_segment_apply(
+        seg: *mut AVFilterGraphSegment,
+        flags: ::core::ffi::c_int,
+        inputs: *mut *mut AVFilterInOut,
+        outputs: *mut *mut AVFilterInOut,
+    ) -> ::core::ffi::c_int;
+}
+unsafe extern "C" {
+    pub fn avfilter_graph_segment_free(seg: *mut *mut AVFilterGraphSegment);
+}
+unsafe extern "C" {
+    pub fn avfilter_graph_send_command(
+        graph: *mut AVFilterGraph,
+        target: *const ::core::ffi::c_char,
+        cmd: *const ::core::ffi::c_char,
+        arg: *const ::core::ffi::c_char,
+        res: *mut ::core::ffi::c_char,
+        res_len: ::core::ffi::c_int,
+        flags: ::core::ffi::c_int,
+    ) -> ::core::ffi::c_int;
+}
+unsafe extern "C" {
+    pub fn avfilter_graph_queue_command(
+        graph: *mut AVFilterGraph,
+        target: *const ::core::ffi::c_char,
+        cmd: *const ::core::ffi::c_char,
+        arg: *const ::core::ffi::c_char,
+        flags: ::core::ffi::c_int,
+        ts: f64,
+    ) -> ::core::ffi::c_int;
+}
+unsafe extern "C" {
+    pub fn avfilter_graph_dump(
+        graph: *mut AVFilterGraph,
+        options: *const ::core::ffi::c_char,
+    ) -> *mut ::core::ffi::c_char;
+}
+unsafe extern "C" {
+    pub fn avfilter_graph_request_oldest(graph: *mut AVFilterGraph) -> ::core::ffi::c_int;
+}
+unsafe extern "C" {
+    pub fn av_buffersink_get_frame_flags(
+        ctx: *mut AVFilterContext,
+        frame: *mut AVFrame,
+        flags: ::core::ffi::c_int,
+    ) -> ::core::ffi::c_int;
+}
+unsafe extern "C" {
+    pub fn av_buffersink_set_frame_size(ctx: *mut AVFilterContext, frame_size: ::core::ffi::c_uint);
+}
+unsafe extern "C" {
+    pub fn av_buffersink_get_type(ctx: *const AVFilterContext) -> AVMediaType;
+}
+unsafe extern "C" {
+    pub fn av_buffersink_get_time_base(ctx: *const AVFilterContext) -> AVRational;
+}
+unsafe extern "C" {
+    pub fn av_buffersink_get_format(ctx: *const AVFilterContext) -> ::core::ffi::c_int;
+}
+unsafe extern "C" {
+    pub fn av_buffersink_get_frame_rate(ctx: *const AVFilterContext) -> AVRational;
+}
+unsafe extern "C" {
+    pub fn av_buffersink_get_w(ctx: *const AVFilterContext) -> ::core::ffi::c_int;
+}
+unsafe extern "C" {
+    pub fn av_buffersink_get_h(ctx: *const AVFilterContext) -> ::core::ffi::c_int;
+}
+unsafe extern "C" {
+    pub fn av_buffersink_get_sample_aspect_ratio(ctx: *const AVFilterContext) -> AVRational;
+}
+unsafe extern "C" {
+    pub fn av_buffersink_get_colorspace(ctx: *const AVFilterContext) -> AVColorSpace;
+}
+unsafe extern "C" {
+    pub fn av_buffersink_get_color_range(ctx: *const AVFilterContext) -> AVColorRange;
+}
+unsafe extern "C" {
+    pub fn av_buffersink_get_channels(ctx: *const AVFilterContext) -> ::core::ffi::c_int;
+}
+unsafe extern "C" {
+    pub fn av_buffersink_get_ch_layout(
+        ctx: *const AVFilterContext,
+        ch_layout: *mut AVChannelLayout,
+    ) -> ::core::ffi::c_int;
+}
+unsafe extern "C" {
+    pub fn av_buffersink_get_sample_rate(ctx: *const AVFilterContext) -> ::core::ffi::c_int;
+}
+unsafe extern "C" {
+    pub fn av_buffersink_get_hw_frames_ctx(ctx: *const AVFilterContext) -> *mut AVBufferRef;
+}
+unsafe extern "C" {
+    pub fn av_buffersink_get_frame(
+        ctx: *mut AVFilterContext,
+        frame: *mut AVFrame,
+    ) -> ::core::ffi::c_int;
+}
+unsafe extern "C" {
+    pub fn av_buffersink_get_samples(
+        ctx: *mut AVFilterContext,
+        frame: *mut AVFrame,
+        nb_samples: ::core::ffi::c_int,
+    ) -> ::core::ffi::c_int;
+}
+pub const AV_BUFFERSRC_FLAG_NO_CHECK_FORMAT: _bindgen_ty_6 = 1;
+pub const AV_BUFFERSRC_FLAG_PUSH: _bindgen_ty_6 = 4;
+pub const AV_BUFFERSRC_FLAG_KEEP_REF: _bindgen_ty_6 = 8;
+pub type _bindgen_ty_6 = ::core::ffi::c_uint;
+unsafe extern "C" {
+    pub fn av_buffersrc_get_nb_failed_requests(
+        buffer_src: *mut AVFilterContext,
+    ) -> ::core::ffi::c_uint;
+}
+#[repr(C)]
+#[derive(Copy, Clone)]
+pub struct AVBufferSrcParameters {
+    pub format: ::core::ffi::c_int,
+    pub time_base: AVRational,
+    pub width: ::core::ffi::c_int,
+    pub height: ::core::ffi::c_int,
+    pub sample_aspect_ratio: AVRational,
+    pub frame_rate: AVRational,
+    pub hw_frames_ctx: *mut AVBufferRef,
+    pub sample_rate: ::core::ffi::c_int,
+    pub ch_layout: AVChannelLayout,
+    pub color_space: AVColorSpace,
+    pub color_range: AVColorRange,
+}
+unsafe extern "C" {
+    pub fn av_buffersrc_parameters_alloc() -> *mut AVBufferSrcParameters;
+}
+unsafe extern "C" {
+    pub fn av_buffersrc_parameters_set(
+        ctx: *mut AVFilterContext,
+        param: *mut AVBufferSrcParameters,
+    ) -> ::core::ffi::c_int;
+}
+unsafe extern "C" {
+    pub fn av_buffersrc_write_frame(
+        ctx: *mut AVFilterContext,
+        frame: *const AVFrame,
+    ) -> ::core::ffi::c_int;
+}
+unsafe extern "C" {
+    pub fn av_buffersrc_add_frame(
+        ctx: *mut AVFilterContext,
+        frame: *mut AVFrame,
+    ) -> ::core::ffi::c_int;
+}
+unsafe extern "C" {
+    pub fn av_buffersrc_add_frame_flags(
+        buffer_src: *mut AVFilterContext,
+        frame: *mut AVFrame,
+        flags: ::core::ffi::c_int,
+    ) -> ::core::ffi::c_int;
+}
+unsafe extern "C" {
+    pub fn av_buffersrc_close(
+        ctx: *mut AVFilterContext,
+        pts: i64,
+        flags: ::core::ffi::c_uint,
+    ) -> ::core::ffi::c_int;
+}
+unsafe extern "C" {
     pub fn av_display_rotation_get(matrix: *const i32) -> f64;
 }
 unsafe extern "C" {
@@ -5622,8 +6222,8 @@ unsafe extern "C" {
         vflip: ::core::ffi::c_int,
     );
 }
-pub const AV_DRM_MAX_PLANES: _bindgen_ty_5 = 4;
-pub type _bindgen_ty_5 = ::core::ffi::c_uint;
+pub const AV_DRM_MAX_PLANES: _bindgen_ty_7 = 4;
+pub type _bindgen_ty_7 = ::core::ffi::c_uint;
 #[repr(C)]
 #[derive(Debug, Copy, Clone)]
 pub struct AVDRMObjectDescriptor {
@@ -6170,8 +6770,8 @@ unsafe extern "C" {
         rval: *mut *mut ::core::ffi::c_char,
     ) -> ::core::ffi::c_int;
 }
-pub const AV_OPT_FLAG_IMPLICIT_KEY: _bindgen_ty_6 = 1;
-pub type _bindgen_ty_6 = ::core::ffi::c_uint;
+pub const AV_OPT_FLAG_IMPLICIT_KEY: _bindgen_ty_8 = 1;
+pub type _bindgen_ty_8 = ::core::ffi::c_uint;
 unsafe extern "C" {
     pub fn av_set_options_string(
         ctx: *mut ::core::ffi::c_void,
@@ -6949,5 +7549,10 @@ unsafe extern "C" {
 #[repr(C)]
 #[derive(Debug, Copy, Clone)]
 pub struct AVCodecInternal {
+    pub _address: u8,
+}
+#[repr(C)]
+#[derive(Debug, Copy, Clone)]
+pub struct AVFilterCommand {
     pub _address: u8,
 }

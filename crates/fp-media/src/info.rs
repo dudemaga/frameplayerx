@@ -45,8 +45,12 @@ pub struct StreamInfo {
     /// FFmpeg's name for the pixel format (`yuv420p`, `yuv420p10le`), empty
     /// when unknown.
     pub pixel_format: String,
-    /// Coded as fields (1080i Blu-ray and TV), as far as FFmpeg can tell.
+    /// Coded as fields (1080i Blu-ray and TV), by its headers.
     pub interlaced: bool,
+    /// Decodes deinterlaced, each field a picture of its own, as the viewer
+    /// said or else as [`Self::interlaced`] says: `fps` is then the
+    /// fields', twice the frames'.
+    pub deinterlaced: bool,
     pub transfer: Transfer,
     /// Clockwise turn that shows the picture upright, from its display
     /// matrix: 0, 90, 180 or 270 degrees. Phones store portrait clips
@@ -68,13 +72,15 @@ pub struct StreamInfo {
     pub ambisonic: bool,
 }
 
-/// The stream is coded as fields: its field order is known and isn't
-/// progressive.
+/// The stream is coded as fields: its field order says so, or its H.264
+/// parameter sets allow field pictures (PAFF, MBAFF). FFmpeg reads an H.264
+/// field order from the first picture alone, and none from a field picture.
 pub(crate) fn interlaced(par: &ff::AVCodecParameters) -> bool {
     !matches!(
         par.field_order,
         ff::AV_FIELD_UNKNOWN | ff::AV_FIELD_PROGRESSIVE
-    )
+    ) || (par.codec_id == ff::AV_CODEC_ID_H264
+        && crate::mvc::field_coded(crate::mvc::extradata(par)))
 }
 
 impl StreamInfo {
@@ -317,6 +323,7 @@ pub fn read_info(input: &Input) -> MediaInfo {
             bit_depth: 8,
             pixel_format: String::new(),
             interlaced: false,
+            deinterlaced: false,
             transfer: Transfer::Sdr,
             rotation: 0,
             pixel_aspect: 1.0,
@@ -362,6 +369,19 @@ pub fn read_info(input: &Input) -> MediaInfo {
                         s.frame_sequential = true;
                         s.width *= 2;
                         s.fps /= 2.0;
+                    }
+                    if crate::deinterlace::wanted(input, index).is_some() {
+                        s.deinterlaced = true;
+                        // Twice the codec's frame rate where it gives one: some
+                        // MP4s of 1080i store a field a sample, and give the
+                        // fields' rate.
+                        let frames = q2d(par.framerate);
+                        s.fps = 2.0
+                            * if (1.0..=240.0).contains(&frames) {
+                                frames
+                            } else {
+                                s.fps
+                            };
                     }
                     if let Some(right_first) = crate::frame_seq::labelled(input, index) {
                         hints.stereo = Some(StereoLayout::FrameSequential);

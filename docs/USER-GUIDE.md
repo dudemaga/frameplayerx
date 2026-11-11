@@ -546,6 +546,18 @@ the format list corrects it. A file nothing labels can be set to
 **3D FS** (frame sequential) in the format list, and a mislabelled one to any other
 format.
 
+Interlaced video (1080i TV recordings and camcorder clips, DVDs) stores
+each frame as two fields, every other line each, taken a field's time
+apart, so anything moving shows comb lines. It is deinterlaced as it
+plays: each field becomes a whole picture, so 25 frames a second become
+50 pictures. It is found from the video's header. For a video in your
+library whose header doesn't say so, the **Interlaced** switch under the
+format list turns it on, and turns it off for one wrongly marked; that
+opens the video
+again where it was, and is remembered for that video. Interlaced video
+plays with software decoding, as the Frame's hardware decoder doesn't take
+interlaced H.264.
+
 A disc image, 2D or 3D, plays its main title (its longest playlist) with
 its chapters (under **⚙ › Chapters**) and its audio and subtitle languages.
 Menus, extras and other titles aren't offered.

@@ -86,15 +86,18 @@ impl App {
                     if !was_flat {
                         p.place_flat(self.offsets.main[0]);
                     }
-                    // Frame sequential video decodes differently.
-                    let paired = p
-                        .player
-                        .info()
-                        .video_stream()
-                        .is_some_and(|v| v.frame_sequential);
+                    // Frame sequential and deinterlaced video decode
+                    // differently.
+                    let v = p.player.info().video_stream();
+                    let paired = v.is_some_and(|v| v.frame_sequential);
+                    let sequential =
+                        p.format.stereo == fp_core::format::StereoLayout::FrameSequential;
+                    let deinterlaced = v.is_some_and(|v| v.deinterlaced);
+                    let interlaced = v.is_some_and(|v| {
+                        !v.mvc && !sequential && p.format.interlaced.unwrap_or(v.interlaced)
+                    });
                     reopen = p.record_id.is_some()
-                        && paired
-                            != (p.format.stereo == fp_core::format::StereoLayout::FrameSequential);
+                        && (paired != sequential || deinterlaced != interlaced);
                 }
                 if reopen {
                     self.reopen();

@@ -1,8 +1,9 @@
 #!/usr/bin/env bash
 # Build the FFmpeg libraries FramePlayerX bundles: LGPL, decode-only, no
 # network protocols (all I/O goes through Rust), with dav1d for software AV1,
-# zlib for compressed Matroska tracks (mkvmerge compresses PGS subtitles)
-# and the V4L2 memory-to-memory decoders for Qualcomm hardware decode.
+# zlib for compressed Matroska tracks (mkvmerge compresses PGS subtitles),
+# the V4L2 memory-to-memory decoders for Qualcomm hardware decode, and one
+# filter, bwdif, to deinterlace.
 #
 # Usage: tools/build-ffmpeg.sh [aarch64|x86_64]...   (default: both)
 # Output: third_party/ffmpeg/<arch>/{include,lib}
@@ -117,10 +118,11 @@ INI
     --pkg-config=pkg-config --pkg-config-flags=--static \
     --enable-shared --disable-static --enable-pic \
     --disable-programs --disable-doc --disable-debug \
-    --disable-autodetect --disable-network --disable-avdevice --disable-avfilter --disable-postproc \
+    --disable-autodetect --disable-network --disable-avdevice --disable-postproc \
     --disable-everything \
     --enable-libdav1d --enable-zlib --enable-v4l2-m2m \
     --enable-swscale --enable-swresample \
+    --enable-avfilter --enable-filter=buffer,buffersink,bwdif \
     --enable-protocol=file \
     --enable-demuxer=mov,matroska,mpegts,avi,flv,ogg,mp3,aac,wav,flac,srt,ass,webvtt,hls,image2,mjpeg \
     --enable-decoder=h264,hevc,vp8,vp9,av1,libdav1d,mpeg4,mpeg2video,vc1,wmv3,prores,mjpeg,png \
@@ -136,6 +138,7 @@ INI
   # configure's link test still finds the symbol; FFmpeg never needs it on Linux.
   sed -i 's/^#define HAVE_SYSCTL 1$/#define HAVE_SYSCTL 0/' "$ff_dir/config.h"
   grep -q '^#define CONFIG_ZLIB 1$' "$ff_dir/config.h" || { echo "FFmpeg configured without zlib" >&2; exit 1; }
+  grep -q '^#define CONFIG_BWDIF_FILTER 1$' "$ff_dir/config_components.h" || { echo "FFmpeg configured without bwdif" >&2; exit 1; }
   make -C "$ff_dir" -j"$(nproc)" >"$work/make.log" 2>&1 || { tail -40 "$work/make.log"; exit 1; }
   make -C "$ff_dir" install >/dev/null
   rm -rf "$out/share" "$out/lib/pkgconfig"

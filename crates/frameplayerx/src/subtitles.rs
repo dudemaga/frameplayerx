@@ -424,6 +424,7 @@ mod tests {
             bit_depth: 8,
             pixel_format: String::new(),
             interlaced: false,
+            deinterlaced: false,
             transfer: Default::default(),
             rotation: 0,
             pixel_aspect: 1.0,
