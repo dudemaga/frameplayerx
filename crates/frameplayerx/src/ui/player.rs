@@ -80,8 +80,8 @@ fn shows(choice: &VideoFormat, current: &VideoFormat) -> bool {
     projection && full(choice.stereo) == full(current.stereo)
 }
 
-/// `choice` picked in place of `current`: the eye order, a packed mask and
-/// a fisheye lens stay.
+/// `choice` picked in place of `current`: the eye order, a packed mask, the
+/// interlaced choice and a fisheye lens stay.
 fn picked(choice: VideoFormat, current: &VideoFormat) -> VideoFormat {
     let projection = match (choice.projection, current.projection) {
         (Projection::Fisheye { .. }, Projection::Fisheye { fov }) => Projection::Fisheye { fov },
@@ -91,6 +91,7 @@ fn picked(choice: VideoFormat, current: &VideoFormat) -> VideoFormat {
         projection,
         eyes_swapped: current.eyes_swapped,
         alpha_packed: current.alpha_packed,
+        interlaced: current.interlaced,
         ..choice
     }
 }
@@ -1330,13 +1331,36 @@ fn format_tab(
     } else if let Some(f) = format_list(ui, &pb.format, pb.record_id.is_some(), fisheye_start) {
         actions.push(Action::SetFormat(Some(f)));
     }
-    if pb.format.stereo.is_stereo() {
+    // Interlaced is on while deinterlacing; a change reopens the video,
+    // which needs it in the library to remember.
+    let interlaced = pb
+        .player
+        .info()
+        .video_stream()
+        .filter(|v| pb.record_id.is_some() && !blu_ray && !v.frame_sequential)
+        .map(|v| v.deinterlaced);
+    let stereo = pb.format.stereo.is_stereo();
+    if stereo || interlaced.is_some() {
         widgets::rows(ui, |r| {
-            r.switch(
-                tr!("adjust-swap-eyes"),
-                Some(tr!("adjust-swap-eyes-desc")),
-                &mut s.swap_eyes,
-            );
+            if stereo {
+                r.switch(
+                    tr!("adjust-swap-eyes"),
+                    Some(tr!("adjust-swap-eyes-desc")),
+                    &mut s.swap_eyes,
+                );
+            }
+            if let Some(mut on) = interlaced
+                && r.switch(
+                    tr!("adjust-interlaced"),
+                    Some(tr!("adjust-interlaced-desc")),
+                    &mut on,
+                )
+            {
+                actions.push(Action::SetFormat(Some(VideoFormat {
+                    interlaced: Some(on),
+                    ..pb.format
+                })));
+            }
         });
     }
     if let Projection::Fisheye { fov } = pb.format.projection {

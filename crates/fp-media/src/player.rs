@@ -80,6 +80,9 @@ pub struct PlayerConfig {
     /// Whether the viewer says the video is frame sequential 3D; None goes
     /// by its labels.
     pub frame_sequential: Option<bool>,
+    /// Whether the viewer says the video is interlaced; None goes by its
+    /// headers.
+    pub deinterlace: Option<bool>,
 }
 
 impl Default for PlayerConfig {
@@ -96,6 +99,7 @@ impl Default for PlayerConfig {
             volume: 1.0,
             timeline: None,
             frame_sequential: None,
+            deinterlace: None,
         }
     }
 }
@@ -301,6 +305,7 @@ impl Player {
         let quit = Arc::new(AtomicBool::new(false));
         let mut input = Input::open(src, name, quit.clone())?;
         input.set_frame_sequential(config.frame_sequential);
+        input.set_deinterlace(config.deinterlace);
         if let Some(tl) = &config.timeline {
             input.start_at(tl.start);
         }
@@ -1017,6 +1022,7 @@ fn reopen(restart: &Restart, current: &Input, at: f64, quit: Arc<AtomicBool>) ->
     let src = restart(at).map_err(Error::Unsupported)?;
     let mut next = Input::open(src, &current.name, quit)?;
     next.set_frame_sequential(current.frame_sequential());
+    next.set_deinterlace(current.deinterlace());
     next.start_at(at);
     if next.streams().len() != current.streams().len() {
         return Err(Error::Unsupported(format!(

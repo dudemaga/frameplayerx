@@ -43,7 +43,7 @@ rm -rf "$root/dist/stage" && mkdir -p "$stage/lib" "$stage/licenses" "$stage/ass
 # Cargo already left out the debug info; the symbols stay, so that crash
 # reports' backtraces name functions.
 cp "target/$target/release/frameplayerx" "$stage/"
-for l in avformat.so.61 avcodec.so.61 avutil.so.59 swresample.so.5 swscale.so.8; do
+for l in avformat.so.61 avcodec.so.61 avfilter.so.10 avutil.so.59 swresample.so.5 swscale.so.8; do
   cp -L "$ffmpeg/lib$l" "$stage/lib/lib$l"
 done
 cp packaging/frameplayerx.sh packaging/README.txt LICENSE NOTICE "$stage/"

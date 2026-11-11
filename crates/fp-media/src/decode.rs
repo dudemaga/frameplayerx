@@ -169,6 +169,9 @@ enum Candidate {
 /// `ten_bit_hevc`: whether 10-bit HEVC may use the native path (see
 /// [`set_hevc_10bit_hardware`]); FFmpeg's wrapper only gets 8-bit streams,
 /// as it would ask for NV12, which the decoder fills with clamped samples.
+/// `interlaced`: coded as fields ([`crate::info::interlaced`]), which the
+/// hardware decoder doesn't take for H.264: FFmpeg's wrapper is refused every
+/// packet of 1080i, and the native path gives up after seconds.
 fn candidates(
     video: bool,
     codec: ff::AVCodecID,
@@ -176,9 +179,10 @@ fn candidates(
     hw: HwDecode,
     native: bool,
     ten_bit_hevc: bool,
+    interlaced: bool,
 ) -> Vec<Candidate> {
     let mut c = Vec::new();
-    let hw = if hw == HwDecode::Stills {
+    let hw = if hw == HwDecode::Stills || (interlaced && codec == ff::AV_CODEC_ID_H264) {
         HwDecode::Off
     } else {
         hw
@@ -218,7 +222,7 @@ fn candidates(
 /// where 8K60 AV1 decodes at 61 fps with nothing else running and falls
 /// behind once the compositor and renderer share them; the other three add
 /// ~7%. SteamVR's tracking there runs at nice -10, so it still comes first.
-fn on_all_cpus<T>(f: impl FnOnce() -> T) -> T {
+pub(crate) fn on_all_cpus<T>(f: impl FnOnce() -> T) -> T {
     #[cfg(target_os = "linux")]
     // SAFETY: plain affinity calls on the calling thread with owned sets.
     unsafe {
@@ -330,11 +334,13 @@ pub struct Decoder {
     pub(crate) left_out: u64,
 }
 
-/// The ways of decoding 3D through another decoder, pairing its pictures.
+/// The ways of decoding through another decoder and reworking its pictures:
+/// 3D's eyes paired, or interlaced fields made whole.
 enum Paired {
     /// 3D Blu-ray (MVC).
     Mvc(Box<crate::mvc::MvcDecoder>),
     FrameSequential(Box<crate::frame_seq::FrameSeqDecoder>),
+    Deinterlace(Box<crate::deinterlace::Deinterlacer>),
 }
 
 impl Paired {
@@ -342,6 +348,7 @@ impl Paired {
         match self {
             Paired::Mvc(m) => &mut m.inner,
             Paired::FrameSequential(f) => &mut f.inner,
+            Paired::Deinterlace(d) => &mut d.inner,
         }
     }
 }
@@ -349,7 +356,7 @@ impl Paired {
 /// What a precise seek leaves out: frames shown mostly before its target.
 #[derive(Clone, Copy, Debug)]
 pub(crate) struct Skip {
-    /// The target in the stream's time base.
+    /// The target in the decoder's time base.
     target: f64,
     /// The duration of frames without one, in the same units.
     frame_duration: f64,
@@ -360,7 +367,7 @@ pub(crate) struct Skip {
 
 impl Skip {
     /// Whether a frame at `pts` lasting `duration` (0 when unknown), both
-    /// in the stream's time base, shows mostly before the target.
+    /// in the decoder's time base, shows mostly before the target.
     pub(crate) fn drops(self, pts: i64, duration: i64) -> bool {
         let pts = if pts == ff::AV_NOPTS_VALUE {
             self.start
@@ -392,7 +399,9 @@ impl Drop for Decoder {
 impl Decoder {
     /// Opens a decoder for stream `index` of `input`. Video tries the
     /// hardware decoders first when `hw` allows, and AV1 uses dav1d in
-    /// software.
+    /// software. Video to deinterlace decodes in software, as bwdif takes
+    /// pictures in memory; stills aren't deinterlaced, being keyframes
+    /// alone with no fields around them.
     pub(crate) fn open(input: &Input, index: usize, hw: HwDecode) -> Result<Decoder> {
         let stream = input.streams()[index];
         // SAFETY: stream belongs to an open input.
@@ -402,7 +411,15 @@ impl Decoder {
             dec.origin = input.origin();
             return Ok(dec);
         }
-        let mut dec = Self::open_with(par, time_base, hw, crate::v4l2::enabled())?;
+        let deinterlace = (hw != HwDecode::Stills)
+            .then(|| crate::deinterlace::wanted(input, index))
+            .flatten();
+        let decode_hw = if deinterlace.is_some() {
+            HwDecode::Off
+        } else {
+            hw
+        };
+        let mut dec = Self::open_with(par, time_base, decode_hw, crate::v4l2::enabled())?;
         dec.origin = input.origin();
         // SAFETY: as above; extradata holds extradata_size bytes.
         dec.nal = unsafe {
@@ -421,7 +438,35 @@ impl Decoder {
                 hw == HwDecode::Stills,
             ));
         }
+        if let Some(frames) = deinterlace {
+            return Ok(Self::open_deinterlaced(dec, frames));
+        }
         Ok(dec)
+    }
+
+    /// A decoder deinterlacing what `inner` decodes, its pictures timed in
+    /// fields.
+    fn open_deinterlaced(inner: Decoder, frames: crate::deinterlace::Frames) -> Decoder {
+        let d = crate::deinterlace::Deinterlacer::new(inner, frames);
+        let mut dec = Decoder {
+            ctx: std::ptr::null_mut(),
+            #[cfg(target_os = "linux")]
+            native: None,
+            replay: Default::default(),
+            replay_end: false,
+            name: String::new(),
+            hardware: false,
+            hardware_error: None,
+            hardware_holders: Default::default(),
+            time_base: d.time_base(),
+            origin: d.inner.origin,
+            nal: None,
+            skip: None,
+            paired: Some(Paired::Deinterlace(Box::new(d))),
+            left_out: 0,
+        };
+        dec.follow_paired();
+        dec
     }
 
     /// A decoder pairing a frame sequential stream's eyes, around `inner`.
@@ -509,6 +554,7 @@ impl Decoder {
             Some(Paired::Mvc(m)) if m.two_d.is_some() => (&m.inner, "3D Blu-ray as 2D"),
             Some(Paired::Mvc(m)) => (&m.inner, "3D Blu-ray"),
             Some(Paired::FrameSequential(f)) => (&f.inner, "frame sequential 3D"),
+            Some(Paired::Deinterlace(d)) => (&d.inner, "deinterlaced"),
         };
         self.name = format!("{} ({what})", inner.name);
         self.hardware = inner.hardware;
@@ -529,7 +575,17 @@ impl Decoder {
         let mut hardware_error = None;
         let mut hardware_holders = crate::SessionHolders::default();
         let video = kind == ff::AVMEDIA_TYPE_VIDEO;
-        for cand in candidates(video, codec_id, format, hw, native, hevc_10bit_hardware()) {
+        // SAFETY: as above.
+        let interlaced = video && crate::info::interlaced(unsafe { &*par });
+        for cand in candidates(
+            video,
+            codec_id,
+            format,
+            hw,
+            native,
+            hevc_10bit_hardware(),
+            interlaced,
+        ) {
             let hardware = matches!(cand, Candidate::NativeV4l2 | Candidate::Named(_, true));
             let r = match cand {
                 Candidate::NativeV4l2 => Self::open_native(par, time_base, hw),
@@ -766,6 +822,7 @@ impl Decoder {
         let sent = match self.paired.as_mut() {
             Some(Paired::Mvc(m)) => Some(m.send(pkt)),
             Some(Paired::FrameSequential(f)) => Some(f.inner.send(pkt)),
+            Some(Paired::Deinterlace(d)) => Some(d.inner.send(pkt)),
             None => None,
         };
         if let Some(r) = sent {
@@ -831,6 +888,7 @@ impl Decoder {
         let received = match self.paired.as_mut() {
             Some(Paired::Mvc(m)) => Some(m.receive(frame)),
             Some(Paired::FrameSequential(f)) => Some(f.receive(frame)),
+            Some(Paired::Deinterlace(d)) => Some(d.receive(frame)),
             None => None,
         };
         if let Some(r) = received {
@@ -919,6 +977,14 @@ impl Decoder {
                 f.inner
                     .skip_before(target - frame_duration / 2.0, frame_duration);
             }
+            // Fields are left out as they come; frames a frame early, as
+            // bwdif takes in the frame before the one it makes fields of.
+            // `frame_duration` is then a field's.
+            Some(Paired::Deinterlace(d)) => {
+                d.skip = self.skip.take();
+                d.inner
+                    .skip_before(target - 2.0 * frame_duration, 2.0 * frame_duration);
+            }
             None => {}
         }
     }
@@ -976,6 +1042,7 @@ impl Decoder {
         match self.paired.as_mut() {
             Some(Paired::Mvc(m)) => return m.flush(),
             Some(Paired::FrameSequential(f)) => return f.flush(),
+            Some(Paired::Deinterlace(d)) => return d.flush(),
             None => {}
         }
         #[cfg(target_os = "linux")]
@@ -1184,43 +1251,48 @@ mod tests {
         let yuv420p10 = ff::AV_PIX_FMT_YUV420P10LE;
         let auto = HwDecode::Auto;
         assert_eq!(
-            candidates(true, hevc, yuv420, auto, true, false),
+            candidates(true, hevc, yuv420, auto, true, false, false),
             vec![NativeV4l2, Named(c"hevc_v4l2m2m", true), Default]
         );
         // 10-bit HEVC: the native decoder (Q10C) when the renderer shows it,
         // never FFmpeg's wrapper.
         assert_eq!(
-            candidates(true, hevc, yuv420p10, auto, true, false),
+            candidates(true, hevc, yuv420p10, auto, true, false, false),
             vec![Default]
         );
         assert_eq!(
-            candidates(true, hevc, yuv420p10, auto, true, true),
+            candidates(true, hevc, yuv420p10, auto, true, true, false),
             vec![NativeV4l2, Default]
         );
         assert_eq!(
-            candidates(true, hevc, yuv420p10, auto, false, true),
+            candidates(true, hevc, yuv420p10, auto, false, true, false),
             vec![Default]
         );
         assert_eq!(
-            candidates(true, hevc, yuv420p10, HwDecode::Off, true, true),
+            candidates(true, hevc, yuv420p10, HwDecode::Off, true, true, false),
             vec![Default]
         );
         let h264 = ff::AV_CODEC_ID_H264;
         assert_eq!(
-            candidates(true, h264, yuv420p10, auto, true, true),
+            candidates(true, h264, yuv420p10, auto, true, true, false),
             vec![Default]
         );
         // After the native decoder fails (or with it disabled).
         assert_eq!(
-            candidates(true, hevc, yuv420, auto, false, false),
+            candidates(true, hevc, yuv420, auto, false, false, false),
             vec![Named(c"hevc_v4l2m2m", true), Default]
         );
         assert_eq!(
-            candidates(true, h264, yuv420, auto, true, false)[0],
+            candidates(true, h264, yuv420, auto, true, false, false)[0],
             NativeV4l2
         );
+        // Interlaced H.264 (1080i): software only.
         assert_eq!(
-            candidates(true, hevc, yuv420, HwDecode::Off, true, false),
+            candidates(true, h264, yuv420, auto, true, false, true),
+            vec![Default]
+        );
+        assert_eq!(
+            candidates(true, hevc, yuv420, HwDecode::Off, true, false, false),
             vec![Default]
         );
         // Only HEVC and H.264 have a hardware path.
@@ -1230,17 +1302,17 @@ mod tests {
             ff::AV_CODEC_ID_MPEG4,
         ] {
             assert_eq!(
-                candidates(true, codec, yuv420, auto, true, false),
+                candidates(true, codec, yuv420, auto, true, false, false),
                 vec![Default]
             );
         }
         assert_eq!(
-            candidates(true, ff::AV_CODEC_ID_AV1, yuv420, auto, true, false),
+            candidates(true, ff::AV_CODEC_ID_AV1, yuv420, auto, true, false, false),
             vec![Named(c"libdav1d", false), Default]
         );
         let aac = ff::AV_CODEC_ID_AAC;
         assert_eq!(
-            candidates(false, aac, ff::AV_PIX_FMT_NONE, auto, true, false),
+            candidates(false, aac, ff::AV_PIX_FMT_NONE, auto, true, false, false),
             vec![Default]
         );
     }

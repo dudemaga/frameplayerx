@@ -521,11 +521,7 @@ pub fn open(
             src.transcode_targets(&video)
         })
         .unwrap_or_default();
-    // Frame sequential or not as the viewer last said, else by the labels.
-    let frame_sequential = record
-        .as_ref()
-        .and_then(|r| r.user_format)
-        .map(|f| f.stereo == format::StereoLayout::FrameSequential);
+    let user_format = record.as_ref().and_then(|r| r.user_format);
     let duration = entry
         .as_ref()
         .and_then(|e| e.duration)
@@ -545,7 +541,7 @@ pub fn open(
                 duration,
                 restart: t.seekable.then_some(restart),
             }),
-            ..player_config(settings, 0.0, frame_sequential)
+            ..player_config(settings, 0.0, user_format)
         };
         open_player(stream, config).map_err(|e| fail(crate::ui::errors::media(&e)))
     };
@@ -580,9 +576,7 @@ pub fn open(
                     .map(Some),
             }
             .map_err(failed)?;
-            match src
-                .map(|src| open_player(src, player_config(settings, start_at, frame_sequential)))
-            {
+            match src.map(|src| open_player(src, player_config(settings, start_at, user_format))) {
                 Some(Ok((p, pick))) => (p, pick, None),
                 Some(Err(e))
                     if e.cannot_play_here()
@@ -744,10 +738,12 @@ fn restart_at(
     })
 }
 
+/// The player's settings for a video, frame sequential and interlaced or not
+/// as the viewer last said in `user_format`, else by its labels and headers.
 fn player_config(
     settings: &Settings,
     start_at: f64,
-    frame_sequential: Option<bool>,
+    user_format: Option<VideoFormat>,
 ) -> PlayerConfig {
     PlayerConfig {
         hw_decode: if settings.hardware_decoding {
@@ -761,7 +757,8 @@ fn player_config(
         },
         start_at,
         volume: settings.volume,
-        frame_sequential,
+        frame_sequential: user_format.map(|f| f.stereo == format::StereoLayout::FrameSequential),
+        deinterlace: user_format.and_then(|f| f.interlaced),
         ..Default::default()
     }
 }
@@ -1446,14 +1443,21 @@ fn has_hardware_decoder(v: &StreamInfo) -> bool {
 }
 
 /// 8-bit 4:2:0 HEVC and H.264, and 10-bit 4:2:0 HEVC when `hevc_10bit` (the
-/// renderer shows it, see [`fp_media::set_hevc_10bit_hardware`]).
+/// renderer shows it, see [`fp_media::set_hevc_10bit_hardware`]). Not
+/// interlaced H.264, nor video being deinterlaced, which takes pictures in
+/// memory.
 fn hardware_decodes(v: &StreamInfo, hevc_10bit: bool) -> bool {
     let depth = v.bit_depth <= 8 || (hevc_10bit && v.codec == "hevc" && v.bit_depth == 10);
-    matches!(v.codec.as_str(), "hevc" | "h264") && depth && v.chroma() == "4:2:0"
+    matches!(v.codec.as_str(), "hevc" | "h264")
+        && depth
+        && v.chroma() == "4:2:0"
+        && !v.deinterlaced
+        && !(v.interlaced && v.codec == "h264")
 }
 
 /// The stream's codec, with its bit depth and chroma when they are not
-/// plain 8-bit 4:2:0 ("10-bit HEVC", "4:2:2 HEVC").
+/// plain 8-bit 4:2:0 ("10-bit HEVC", "4:2:2 HEVC"), and whether it is
+/// interlaced.
 fn stream_desc(v: &StreamInfo) -> String {
     let codec = match v.codec.as_str() {
         "hevc" => "HEVC".to_string(),
@@ -1463,11 +1467,16 @@ fn stream_desc(v: &StreamInfo) -> String {
         c => c.to_uppercase(),
     };
     let chroma = v.chroma();
-    match (v.bit_depth > 8, chroma != "4:2:0") {
+    let desc = match (v.bit_depth > 8, chroma != "4:2:0") {
         (true, true) => format!("{}-bit {chroma} {codec}", v.bit_depth),
         (true, false) => format!("{}-bit {codec}", v.bit_depth),
         (false, true) => format!("{chroma} {codec}"),
         (false, false) => codec,
+    };
+    if v.interlaced || v.deinterlaced {
+        tr!("decoder-stream-interlaced", stream = desc)
+    } else {
+        desc
     }
 }
 
@@ -2185,6 +2194,7 @@ mod tests {
                 "yuv420p".into()
             },
             interlaced: false,
+            deinterlaced: false,
             transfer: Default::default(),
             rotation: 0,
             pixel_aspect: 1.0,
@@ -2279,6 +2289,18 @@ mod tests {
         s422.pixel_format = "yuv422p10le".into();
         assert!(!hardware_decodes(&s422, true));
         assert!(hardware_decodes(&stream("h264", 8), false));
+
+        // Interlaced H.264, and video being deinterlaced, decode in software.
+        let mut tv = stream("h264", 8);
+        tv.interlaced = true;
+        assert!(!hardware_decodes(&tv, false));
+        assert_eq!(
+            software_reason(&tv, true, None),
+            "no hardware decoding for interlaced H.264"
+        );
+        let mut forced = stream("hevc", 8);
+        forced.deinterlaced = true;
+        assert!(!hardware_decodes(&forced, false));
     }
 
     #[test]

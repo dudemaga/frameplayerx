@@ -118,6 +118,10 @@ pub struct VideoFormat {
     /// channel outside the fisheye circles of a side-by-side frame.
     #[serde(default)]
     pub alpha_packed: bool,
+    /// Whether the viewer says the video is interlaced, to deinterlace it;
+    /// None goes by its headers.
+    #[serde(default)]
+    pub interlaced: Option<bool>,
 }
 
 /// Size of an alpha-packed video's masks relative to the eye they belong
@@ -132,6 +136,7 @@ impl Default for VideoFormat {
             stereo: StereoLayout::Mono,
             eyes_swapped: false,
             alpha_packed: false,
+            interlaced: None,
         }
     }
 }
@@ -146,6 +151,7 @@ impl VideoFormat {
         stereo: StereoLayout::SideBySide,
         eyes_swapped: false,
         alpha_packed: false,
+        interlaced: None,
     };
 
     pub const fn new(projection: Projection, stereo: StereoLayout) -> Self {
@@ -154,6 +160,7 @@ impl VideoFormat {
             stereo,
             eyes_swapped: false,
             alpha_packed: false,
+            interlaced: None,
         }
     }
 
@@ -337,6 +344,7 @@ pub fn detect_from_name(name: &str) -> Option<VideoFormat> {
         stereo,
         eyes_swapped: swapped,
         alpha_packed: alpha,
+        interlaced: None,
     })
 }
 
@@ -459,6 +467,7 @@ pub fn resolve(
             stereo,
             eyes_swapped,
             alpha_packed,
+            interlaced: None,
         };
         refine_flat_stereo(&mut format, name, width, height);
         return DetectedFormat {

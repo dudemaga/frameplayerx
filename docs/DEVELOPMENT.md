@@ -322,6 +322,23 @@ from its timestamp, not a count, so a seek or a lost frame can't leave later
 frames on the wrong eye. An odd gap in a file's timestamps would swap them,
 which no file tried has.
 
+**Interlaced video.** `info::interlaced` calls a stream coded as fields
+when FFmpeg's field order says so or, for H.264, when a sequence parameter
+set allows field pictures (`frame_mbs_only_flag` 0, `mvc::field_coded`):
+FFmpeg reads an H.264 field order from the first picture alone, and none
+from field pictures (PAFF camcorder clips). Such H.264 never goes to the
+hardware decoder: FFmpeg's V4L2 wrapper is refused every packet of 1080i,
+and the native path gives up after seconds. `fp-media/src/deinterlace.rs`
+runs a software decoder's frames through libavfilter's bwdif
+(`mode=send_field`), the one filter the FFmpeg build enables: the frames
+the decoder marks interlaced for a stream found by its headers
+(`deint=interlaced`), every frame when the viewer turns it on (`deint=all`).
+Each field comes out a picture, timed in a time base half the stream's, and
+`StreamInfo` reports `deinterlaced` and twice the codec's frame rate.
+`VideoFormat::interlaced` holds the viewer's choice from the Format tab's
+**Interlaced** switch, reaching the player as `PlayerConfig::deinterlace`; a
+change reopens the video, as frame sequential does.
+
 **Pictures.** A card shows `MediaRecord::picture`: the frame where a partly
 watched video was left off, else its server's picture, else a thumbnail the
 metadata worker made (`fp-library/src/worker.rs`; only for videos whose
