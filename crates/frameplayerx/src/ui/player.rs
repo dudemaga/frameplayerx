@@ -1170,8 +1170,7 @@ pub fn adjust_panel(ctx: &egui::Context, v: &mut View) {
                         ui.add_space(6.0);
                         chroma_tab(
                             ui,
-                            &mut pb.settings,
-                            pb.format,
+                            pb,
                             &v.settings.default_view,
                             v.passthrough_available,
                             v.actions,
@@ -1711,15 +1710,18 @@ fn key_colors() -> [(&'static str, [f32; 3]); 3] {
 
 /// Passthrough tab: the video's own packed mask (`_alpha` videos) or a
 /// chroma key, so the room shows where the video's background was. The key
-/// follows Settings > Passthrough until it is changed here for this video.
+/// follows Settings > Passthrough until it is changed here for this video,
+/// its colour the one found in the video until one is picked.
 fn chroma_tab(
     ui: &mut egui::Ui,
-    s: &mut ViewSettings,
-    format: VideoFormat,
+    pb: &mut crate::playback::Playback,
     global: &ViewSettings,
     passthrough_available: bool,
     actions: &mut Vec<Action>,
 ) {
+    let found = pb.found_colour();
+    let format = pb.format;
+    let s = &mut pb.settings;
     widgets::rows(ui, |r| {
         let mut packed = format.alpha_packed;
         let desc = if packed && format.alpha_pack_scale().is_none() {
@@ -1744,26 +1746,38 @@ fn chroma_tab(
             &mut own,
         ) {
             if own {
-                s.set_key(global);
+                s.set_key(&ViewSettings {
+                    key_color: found.unwrap_or(global.key_color),
+                    ..*global
+                });
             }
             s.key_own = Some(own);
             actions.push(Action::SaveKey);
         }
     });
     let mut shown = s.with_global_key(global);
-    if chroma_controls(ui, &mut shown, passthrough_available) {
+    if let Some(c) = found {
+        shown.key_color = c;
+    }
+    let colour = shown.key_color;
+    if chroma_controls(ui, &mut shown, passthrough_available, found.is_some()) {
         s.set_key(&shown);
         s.key_own = Some(true);
         actions.push(Action::SaveKey);
+        if shown.key_color != colour {
+            pb.colour_picked();
+        }
     }
 }
 
 /// "Remove the background" and its colour and fine-tune controls, for one
-/// video or the global default. True when anything changed.
+/// video or the global default; `found` when its colour is the one found
+/// in the video. True when anything changed.
 pub(super) fn chroma_controls(
     ui: &mut egui::Ui,
     s: &mut ViewSettings,
     passthrough_available: bool,
+    found: bool,
 ) -> bool {
     let before = s.key();
     let d = ViewSettings::default();
@@ -1780,7 +1794,13 @@ pub(super) fn chroma_controls(
     });
     if s.chroma_key {
         premium::label(ui, tr!("adjust-chroma-colour-heading"));
-        colour_picker(ui, &key_colors(), &mut s.key_color, d.key_color);
+        colour_picker(
+            ui,
+            &key_colors(),
+            &mut s.key_color,
+            d.key_color,
+            found.then_some(tr!("adjust-chroma-found")),
+        );
         premium::label(ui, tr!("adjust-fine-tune"));
         widgets::rows(ui, |r| {
             r.slider(
@@ -1834,16 +1854,17 @@ pub(super) fn background_controls(ui: &mut egui::Ui, c: &mut [f32; 3]) {
             .font(theme::font(Weight::Regular, 15.0))
             .color(theme::TEXT_3),
     );
-    colour_picker(ui, &backgrounds(), c, fp_core::view::BACKGROUND);
+    colour_picker(ui, &backgrounds(), c, fp_core::view::BACKGROUND, None);
 }
 
-/// A colour, sRGB 0..1: `choices` as one-tap swatches, then a preview and
-/// red, green and blue sliders that reset to `default`.
+/// A colour, sRGB 0..1: `choices` as one-tap swatches, then a preview with
+/// `desc` beside it and red, green and blue sliders that reset to `default`.
 fn colour_picker(
     ui: &mut egui::Ui,
     choices: &[(&str, [f32; 3])],
     c: &mut [f32; 3],
     default: [f32; 3],
+    desc: Option<&str>,
 ) {
     ui.horizontal_wrapped(|ui| {
         ui.spacing_mut().item_spacing = Vec2::new(8.0, 8.0);
@@ -1855,7 +1876,7 @@ fn colour_picker(
         }
     });
     widgets::rows(ui, |r| {
-        r.row(tr!("adjust-chroma-colour"), None, |ui| {
+        r.row(tr!("adjust-chroma-colour"), desc, |ui| {
             let [cr, cg, cb] = c.map(|x| (x.clamp(0.0, 1.0) * 255.0) as u8);
             let (rect, _) = ui.allocate_exact_size(Vec2::new(64.0, 32.0), Sense::hover());
             let p = ui.painter();

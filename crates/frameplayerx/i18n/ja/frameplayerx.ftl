@@ -330,6 +330,7 @@ adjust-chroma-desc = 映像の1色を透明にして、後ろに部屋が見え�
 adjust-chroma-desc-dark = 映像の1色を透明にします。このヘッドセットはアプリとパススルーを共有しないため、代わりに暗くなります。
 adjust-chroma-colour-heading = 背景色
 adjust-chroma-colour = 色
+adjust-chroma-found = この映像から見つけました。
 adjust-red = 赤
 adjust-green = 緑
 adjust-blue = 青

@@ -483,6 +483,9 @@ impl App {
         p.settings_dirty = true;
         if (p.settings.key(), p.settings.key_own) != key {
             p.key_changed();
+            if p.settings.own_key() {
+                p.colour_picked();
+            }
         }
         if let Some(f) = preset.format
             && p.picked_format() != Some(f)

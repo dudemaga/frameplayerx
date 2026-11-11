@@ -336,6 +336,7 @@ adjust-chroma-desc = Hace transparente un color del vídeo, para que tu habitaci
 adjust-chroma-desc-dark = Hace transparente un color del vídeo. Este visor no comparte el passthrough con las aplicaciones, así que se vuelve oscuro.
 adjust-chroma-colour-heading = Color de fondo
 adjust-chroma-colour = Color
+adjust-chroma-found = Encontrado en este vídeo.
 adjust-red = Rojo
 adjust-green = Verde
 adjust-blue = Azul
