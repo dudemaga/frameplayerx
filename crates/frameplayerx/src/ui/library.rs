@@ -342,9 +342,14 @@ fn open_record(r: &MediaRecord) -> Action {
     Action::Open(request(r))
 }
 
-/// Opens `records[i]` with the rest of the list queued for next/previous.
-fn open_in(records: &[MediaRecord], i: usize) -> Action {
-    Action::OpenList(records.iter().map(request).collect(), i)
+/// Every video of `g`'s search and filters, in its order, for Play all.
+pub(super) fn play_all(v: &View, g: &LibraryGrid) -> Vec<OpenRequest> {
+    let q = fp_library::Query {
+        limit: None,
+        ..g.query()
+    };
+    let records = v.services.library.search(&q).unwrap_or_default();
+    records.iter().map(request).collect()
 }
 
 /// The format a video plays in: until something identifies it, the
@@ -397,7 +402,7 @@ fn record_grid(ui: &mut egui::Ui, v: &mut View, records: &[MediaRecord]) {
     page::grid(ui, records.len(), page::LANDSCAPE.x, |ui, i| {
         let c = record_card(ui, v, &records[i]);
         if c.open {
-            v.actions.push(open_in(records, i));
+            v.actions.push(open_record(&records[i]));
         }
         if c.more {
             v.state.details = Some(records[i].id);
@@ -410,7 +415,7 @@ fn record_row(ui: &mut egui::Ui, v: &mut View, title: &str, records: &[MediaReco
     page::carousel(ui, title, Some(records.len()), records.len(), |ui, i| {
         let c = record_card(ui, v, &records[i]);
         if c.open {
-            v.actions.push(open_in(records, i));
+            v.actions.push(open_record(&records[i]));
         }
         if c.more {
             v.state.details = Some(records[i].id);

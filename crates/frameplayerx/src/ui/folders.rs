@@ -87,7 +87,7 @@ pub fn page(ui: &mut egui::Ui, v: &mut View, title: &str, root: &str, b: &mut Br
             .collect()
     };
     if play_all {
-        v.actions.push(Action::OpenList(queue(&videos), 0));
+        v.actions.push(Action::PlayAll(queue(&videos), 0));
     }
     if refresh {
         v.actions.push(Action::Browse {
@@ -121,12 +121,9 @@ pub fn page(ui: &mut egui::Ui, v: &mut View, title: &str, root: &str, b: &mut Br
                     match e.kind {
                         EntryKind::Directory => go = Some(e.location.clone()),
                         _ => {
-                            // Queue the folder's videos for next/previous.
-                            let pos = videos
-                                .iter()
-                                .position(|x| x.location == e.location)
-                                .unwrap_or(0);
-                            v.actions.push(Action::OpenList(queue(&videos), pos));
+                            if let Some(req) = queue(&[e]).pop() {
+                                v.actions.push(Action::Open(req));
+                            }
                         }
                     }
                 }

@@ -5,12 +5,13 @@ use super::*;
 impl App {
     pub(crate) fn apply(&mut self, a: Action) {
         match a {
+            // Up next is this video alone.
             Action::Open(req) => {
-                self.queue.clear();
+                self.queue.set(vec![req.clone()], 0);
                 self.open_request(req);
             }
-            Action::OpenList(list, pos) => self.open_list(list, pos, false),
-            Action::PlayAll(list, pos) => self.open_list(list, pos, true),
+            Action::PlayAll(list, pos) => self.play_all(list, pos),
+            Action::CatalogPlayAll { source, query } => self.catalog_play_all(source, query),
             Action::Queue { req, next } => self.queue_video(req, next),
             Action::QueueJump(i) => {
                 if let Some(req) = self.queue.jump(i).cloned() {
@@ -341,9 +342,9 @@ impl App {
         self.playback.as_ref().map(|p| &p.player)
     }
 
-    fn open_list(&mut self, list: Vec<OpenRequest>, pos: usize, plays_through: bool) {
+    fn play_all(&mut self, list: Vec<OpenRequest>, pos: usize) {
         if let Some(req) = list.get(pos).cloned() {
-            self.queue.set(list, pos, plays_through);
+            self.queue.set(list, pos);
             self.open_request(req);
         }
     }
@@ -354,7 +355,7 @@ impl App {
     fn queue_video(&mut self, req: OpenRequest, next: bool) {
         let title = ui::widgets::display_title(&req.shown_title());
         let Some(playing) = self.playback.as_ref().map(|p| p.request.clone()) else {
-            self.queue.set(vec![req.clone()], 0, true);
+            self.queue.set(vec![req.clone()], 0);
             self.open_request(req);
             return;
         };

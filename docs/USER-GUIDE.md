@@ -226,12 +226,15 @@ are deleted too.
 ### Up next and playlists
 
 **Up next** is the list of videos playing in turn; the button beside
-Browse on the control bar shows it over the video. Opening a video from a
-folder, grid or season makes that list Up next, and **⏮** and **⏭** either
-side of the play button (or X and Y) step through it; pointing at one names
-the video it goes to, and it dims at either end of the list or when the
-video was opened on its own. *Play all*, a playlist and what you queue
-yourself also play through: the next video starts when one ends. *Play
+Browse on the control bar shows it over the video. Opening a video plays it
+alone. **Play all**, at the top of a folder, a library's Videos, a
+Jellyfin, Emby or Plex grid, season or search, a scene grid or a playlist,
+makes that page's videos Up next and plays the first. On a server's grid
+it's the first 300 in the grid's order, as Jellyfin's own Play does;
+pointing at the button says so. **⏮** and **⏭** either side of the play
+button (or X and Y) step through Up next; pointing at one names the video
+it goes to, and it dims at either end of the list or when a video plays
+alone. With **Autoplay** on, the next starts when one ends. *Play
 next* (after the video playing) and *Add to queue* (at the end) are on a
 video's details, a Jellyfin or scene page and a folder row's ⋯; with
 nothing playing, either plays it. On the Up next page, pick a video to play
@@ -244,8 +247,8 @@ The current video keeps playing; press **Shuffle** again for another order.
 To keep this order as a playlist, press **Save as playlist** afterwards.
 
 **Autoplay** (the play sign in a circular arrow, on the control bar) plays
-any list through, one opened from a folder, grid or season too: the next
-video starts when one ends.
+Up next through: the next video starts when one ends. Off, a video stops
+at its end, and ⏭ plays the next.
 **Loop** on the Up next page plays the first video again after the last,
 and ⏮ and ⏭ step round the list past either end. The repeat key beside Up
 next on the control bar loops the video playing instead: it starts again

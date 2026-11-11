@@ -27,7 +27,7 @@
 //! | `quality NAME` | play `automatic`, `original` or a transcode by its label (`1440p`) |
 //! | `loop video` / `loop playlist` | turn Loop video or Up next's Loop on or off |
 //! | `autoplay` | turn Autoplay on or off |
-//! | `open-list` | open the library's videos as a grid does, from the first |
+//! | `open-list` | play the library's videos as Play all does, from the first |
 //! | `shuffle` | shuffle Up next, keeping the current video first |
 //! | `shot NAME` | save the left eye as OUT_DIR/NAME.png |
 //! | `sbs NAME` | save both eyes side by side |
@@ -391,10 +391,10 @@ impl Sim {
                 self.app.apply(crate::ui::Action::ClosePlayback);
                 self.run_frames(3)?;
             }
-            // The library's videos as a grid opens them, from the first.
+            // The library's videos as Play all plays them, from the first.
             Some("open-list") => {
                 let list = self.library_requests();
-                self.app.apply(crate::ui::Action::OpenList(list, 0));
+                self.app.apply(crate::ui::Action::PlayAll(list, 0));
                 self.run_frames(3)?;
             }
             Some("autoplay") => {
