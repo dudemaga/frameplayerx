@@ -36,6 +36,7 @@
 //! | `tracks` | open the audio and subtitles picker |
 //! | `filters` | open the Filters drawer of the source page shown (a Jellyfin grid, a feed) |
 //! | `chroma` | turn chroma key on for the open video |
+//! | `bookmark` | press Bookmark, as on the control bar |
 //! | `panel PANEL NAME` | save a panel's image flat, pixel for pixel, as OUT_DIR/NAME.png |
 
 use crate::app::{App, FrameInput};
@@ -528,6 +529,11 @@ impl Sim {
                 self.app.settings.default_view.chroma_key = parts.get(1) != Some(&"off");
                 self.app.repaint_all();
                 self.run_frames(3)?;
+            }
+            Some("bookmark") => {
+                self.app.apply(crate::ui::Action::AddBookmark);
+                self.app.repaint_all();
+                self.run_frames(2)?;
             }
             // Turns chroma key on for the open video (the Passthrough tab).
             Some("chroma") => {

@@ -111,7 +111,7 @@ pub struct Playback {
     /// picked since.
     colour_open: bool,
     pub heatmap: Option<Heatmap>,
-    pub markers: Vec<(f64, String)>,
+    pub markers: Vec<Marker>,
     pub subtitle_files: Vec<SubtitleFile>,
     pub active_subtitle_file: Option<usize>,
     /// The subtitles Subtitles on / off last turned off, to turn back on.
@@ -957,29 +957,99 @@ pub fn read_subtitle_file(opener: &Opener, file: &SubtitleFile) -> Result<Vec<Cu
     read
 }
 
+/// A place on the video's timeline: a chapter, a marker its source gives,
+/// or the viewer's bookmark.
+#[derive(Clone, Debug, PartialEq)]
+pub struct Marker {
+    pub time: f64,
+    pub name: String,
+    /// For the viewer's bookmark, which they can remove: the library's rows
+    /// it shows, more than one where the same bookmark was added again
+    /// before that was prevented, none for a video not in the library.
+    pub bookmark: Option<Vec<fp_library::MarkerId>>,
+}
+
+impl Marker {
+    fn chapter(time: f64, name: String) -> Marker {
+        Marker {
+            time,
+            name,
+            bookmark: None,
+        }
+    }
+}
+
+/// How near the viewer's bookmark makes another one there a repeat, seconds.
+const BOOKMARK_GAP: f64 = 1.0;
+
 /// Chapters, the source's markers and the user's bookmarks, in time order.
 fn markers(
     info: &fp_media::MediaInfo,
     entry: Option<&Entry>,
     record: Option<&fp_library::MediaRecord>,
     library: &Library,
-) -> Vec<(f64, String)> {
-    let mut markers: Vec<(f64, String)> = info
+) -> Vec<Marker> {
+    let mut markers: Vec<Marker> = info
         .chapters
         .iter()
-        .map(|c| (c.start, c.title.clone()))
+        .map(|c| Marker::chapter(c.start, c.title.clone()))
         .collect();
     if let Some(e) = entry {
-        markers.extend(e.markers.iter().cloned());
+        markers.extend(
+            e.markers
+                .iter()
+                .map(|(t, n)| Marker::chapter(*t, n.clone())),
+        );
     }
     if let Some(r) = record
         && let Ok(m) = library.markers(r.id)
     {
-        markers.extend(m.into_iter().map(|m| (m.time, m.name)));
+        markers.extend(m.into_iter().map(|m| Marker {
+            time: m.time,
+            bookmark: (!m.from_source).then(|| vec![m.id]),
+            name: m.name,
+        }));
     }
-    markers.sort_by(|a, b| a.0.total_cmp(&b.0));
-    markers.dedup_by(|a, b| (a.0 - b.0).abs() < 0.5 && a.1 == b.1);
+    collapse(&mut markers);
     markers
+}
+
+/// Sorts `markers` by time and shows each place once: the same name at
+/// the same moment, a bookmark's rows together.
+fn collapse(markers: &mut Vec<Marker>) {
+    markers.sort_by(|a, b| a.time.total_cmp(&b.time));
+    markers.dedup_by(|a, b| {
+        let same = (a.time - b.time).abs() < 0.5
+            && a.name == b.name
+            && a.bookmark.is_some() == b.bookmark.is_some();
+        if same && let (Some(rows), Some(kept)) = (a.bookmark.as_mut(), b.bookmark.as_mut()) {
+            kept.append(rows);
+        }
+        same
+    });
+}
+
+/// Removes the viewer's bookmark at `index` in `markers` and its rows.
+fn remove_bookmark(
+    markers: &mut Vec<Marker>,
+    index: usize,
+    library: &Library,
+) -> fp_library::Result<()> {
+    let Some(Some(rows)) = markers.get(index).map(|m| &m.bookmark) else {
+        return Ok(());
+    };
+    for row in rows {
+        library.remove_marker(*row)?;
+    }
+    markers.remove(index);
+    Ok(())
+}
+
+/// Whether the viewer has a bookmark within [`BOOKMARK_GAP`] of `time`.
+fn bookmarked_near(markers: &[Marker], time: f64) -> bool {
+    markers
+        .iter()
+        .any(|m| m.bookmark.is_some() && (m.time - time).abs() < BOOKMARK_GAP)
 }
 
 impl Playback {
@@ -1265,15 +1335,31 @@ impl Playback {
             .position(|p| p.matches(&self.settings, self.picked_format(), flat))
     }
 
-    pub fn add_bookmark(&mut self, library: &Library) -> fp_library::Result<()> {
+    /// Bookmarks where the video is; false, adding none, when the viewer
+    /// has one there already.
+    pub fn add_bookmark(&mut self, library: &Library) -> fp_library::Result<bool> {
         let t = self.player.position();
-        let name = tr!("bookmark-name", time = crate::ui::fmt_time(t));
-        if let Some(id) = self.record_id {
-            library.add_marker(id, t, &name)?;
+        if bookmarked_near(&self.markers, t) {
+            return Ok(false);
         }
-        self.markers.push((t, name));
-        self.markers.sort_by(|a, b| a.0.total_cmp(&b.0));
-        Ok(())
+        let name = tr!("bookmark-name", time = crate::ui::fmt_time(t));
+        let rows = match self.record_id {
+            Some(id) => vec![library.add_marker(id, t, &name)?],
+            None => Vec::new(),
+        };
+        self.markers.push(Marker {
+            time: t,
+            name,
+            bookmark: Some(rows),
+        });
+        collapse(&mut self.markers);
+        Ok(true)
+    }
+
+    /// Removes the viewer's bookmark at `index` in [`Self::markers`], with
+    /// every row of it the library holds. Chapters stay.
+    pub fn remove_bookmark(&mut self, index: usize, library: &Library) -> fp_library::Result<()> {
+        remove_bookmark(&mut self.markers, index, library)
     }
 
     /// Saves where the video was and closes it. The player's threads are
@@ -1494,6 +1580,63 @@ pub(crate) fn slow_decode_notice(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn repeated_bookmarks_show_once_and_are_removed_together() {
+        let library = Library::open_in_memory().unwrap();
+        let id = library
+            .upsert(&fp_library::MediaUpsert::new("/videos/clip.mp4", "local"))
+            .unwrap()
+            .id;
+        // Ten presses at one moment, from before repeats were prevented,
+        // and one bookmark further on.
+        for _ in 0..10 {
+            library.add_marker(id, 60.2, "Bookmark 1:00").unwrap();
+        }
+        library.add_marker(id, 300.0, "Bookmark 5:00").unwrap();
+        let info = fp_media::MediaInfo {
+            name: "clip.mp4".into(),
+            container: "mp4".into(),
+            duration: 600.0,
+            streams: Vec::new(),
+            chapters: vec![fp_media::info::Chapter {
+                start: 60.0,
+                end: 120.0,
+                title: "Opening".into(),
+            }],
+            hints: Default::default(),
+            video: None,
+            audio: None,
+            title: None,
+        };
+        let record = library.get(id).unwrap();
+        let mut m = markers(&info, None, record.as_ref(), &library);
+        let shown: Vec<_> = m.iter().map(|m| (m.time, m.name.as_str())).collect();
+        assert_eq!(
+            shown,
+            [
+                (60.0, "Opening"),
+                (60.2, "Bookmark 1:00"),
+                (300.0, "Bookmark 5:00")
+            ]
+        );
+        assert_eq!(m[0].bookmark, None);
+        assert_eq!(m[1].bookmark.as_ref().map(Vec::len), Some(10));
+
+        // Another press near a bookmark is a repeat; near a chapter it isn't.
+        assert!(bookmarked_near(&m, 60.9));
+        assert!(!bookmarked_near(&m, 61.5));
+        assert!(!bookmarked_near(&m[..1], 60.0));
+
+        // A chapter can't be removed; a bookmark goes with all its copies.
+        remove_bookmark(&mut m, 0, &library).unwrap();
+        assert_eq!(m.len(), 3);
+        remove_bookmark(&mut m, 1, &library).unwrap();
+        assert_eq!(m.len(), 2);
+        let left: Vec<_> = library.markers(id).unwrap();
+        assert_eq!(left.len(), 1);
+        assert_eq!(left[0].name, "Bookmark 5:00");
+    }
 
     #[test]
     fn the_backdrop_is_found_in_a_second_read_of_the_file() {

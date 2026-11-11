@@ -137,6 +137,7 @@ impl App {
             }),
             Action::ClearKeyframes => self.edit_view(|p, _| p.keyframes = Default::default()),
             Action::AddBookmark => self.add_bookmark(),
+            Action::RemoveBookmark(i) => self.remove_bookmark(i),
             Action::SelectAudio(i) => {
                 if let Some(p) = &mut self.playback {
                     p.player.select_audio(i);
@@ -498,13 +499,24 @@ impl App {
     fn add_bookmark(&mut self) {
         let Some(p) = &mut self.playback else { return };
         match p.add_bookmark(&self.services.library) {
-            Ok(()) => self.ui.toast(tr!("toast-bookmark-added")),
+            Ok(true) => self.ui.toast(tr!("toast-bookmark-added")),
+            Ok(false) => self.ui.toast(tr!("toast-bookmark-exists")),
             Err(e) => self.not_saved(
                 "the bookmark",
                 |e| tr!("error-save-bookmark", error = e),
                 &e,
             ),
         }
+    }
+
+    fn remove_bookmark(&mut self, index: usize) {
+        let Some(p) = &mut self.playback else { return };
+        if let Err(e) = p.remove_bookmark(index, &self.services.library) {
+            log::warn!("removing a bookmark: {e}");
+            self.ui
+                .toast(tr!("error-remove-bookmark", error = e.to_string()));
+        }
+        self.ui.invalidate();
     }
 
     fn select_subtitle_file(&mut self, i: Option<usize>) {

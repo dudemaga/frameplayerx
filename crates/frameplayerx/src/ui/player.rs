@@ -1012,8 +1012,8 @@ fn seek_bar(
     }
     let done = egui::Rect::from_min_max(track.min, egui::pos2(to_x(frac), track.bottom()));
     widgets::rail_fill(painter, track, done);
-    for (m, _) in &pb.markers {
-        let x = to_x((*m / duration).clamp(0.0, 1.0) as f32);
+    for m in &pb.markers {
+        let x = to_x((m.time / duration).clamp(0.0, 1.0) as f32);
         painter.circle_filled(egui::pos2(x, track.center().y), 3.0, theme::WARN);
     }
     let knob = egui::pos2(to_x(frac), track.center().y);
@@ -1022,11 +1022,11 @@ fn seek_bar(
     let to_time = |x: f32| ((x - track.left()) / track.width()).clamp(0.0, 1.0) as f64 * duration;
     if let Some(p) = resp.hover_pos().or(resp.interact_pointer_pos()) {
         let tm = to_time(p.x);
-        let marker = pb.markers.iter().find(|(m, _)| {
-            ((m / duration) as f32 * track.width() - (p.x - track.left())).abs() < 8.0
+        let marker = pb.markers.iter().find(|m| {
+            ((m.time / duration) as f32 * track.width() - (p.x - track.left())).abs() < 8.0
         });
         let label = match marker {
-            Some((_, name)) => format!("{} · {name}", fmt_time(tm)),
+            Some(m) => format!("{} · {}", fmt_time(tm), m.name),
             None => fmt_time(tm),
         };
         // A bubble above the track, on the panel's top layer. A marker's
@@ -1076,7 +1076,7 @@ fn seek_bar(
         let snap = pb
             .markers
             .iter()
-            .map(|m| m.0)
+            .map(|m| m.time)
             .find(|m| ((m - t) / duration).abs() * (track.width() as f64) < 8.0);
         actions.push(Action::Seek(snap.unwrap_or(t)));
     }
@@ -1907,13 +1907,21 @@ fn chapters_tab(ui: &mut egui::Ui, pb: &crate::playback::Playback, actions: &mut
     } else {
         widgets::section_label(ui, tr!("adjust-chapters-heading"));
         widgets::rows(ui, |r| {
-            for (t, name) in &pb.markers {
-                r.row(name, Some(fmt_time(*t).as_str()), |ui| {
+            for (i, m) in pb.markers.iter().enumerate() {
+                r.row(&m.name, Some(fmt_time(m.time).as_str()), |ui| {
+                    // Laid out right to left: Go stays where it was.
                     if widgets::icon_button(ui, icons::PLAY, 40.0, false)
                         .tip(tr!("adjust-chapter-go"))
                         .clicked()
                     {
-                        actions.push(Action::Seek(*t));
+                        actions.push(Action::Seek(m.time));
+                    }
+                    if m.bookmark.is_some()
+                        && widgets::icon_button(ui, icons::TRASH, 40.0, false)
+                            .tip(tr!("adjust-bookmark-remove"))
+                            .clicked()
+                    {
+                        actions.push(Action::RemoveBookmark(i));
                     }
                 });
             }
