@@ -454,6 +454,7 @@ adjust-no-chapters = No chapters or bookmarks. Bookmark, on the control bar, mar
 adjust-chapters-heading = Chapters and bookmarks
 # A tooltip: plays from this chapter.
 adjust-chapter-go = Go
+adjust-bookmark-remove = Remove bookmark
 # Short: a column's title.
 tracks-audio = Audio
 tracks-no-audio = No audio
@@ -1129,6 +1130,7 @@ toast-preset = Preset: { $name }
 toast-no-presets = No presets yet: save one at the top of the adjust panel
 toast-nothing-to-play = Nothing here to play
 toast-bookmark-added = Bookmark added
+toast-bookmark-exists = Already bookmarked here
 toast-history-cleared = Watch history cleared
 # Play next and Add to queue are buttons: use their translations.
 queue-empty = Nothing queued: Play next and Add to queue are on a video's details
@@ -1183,6 +1185,7 @@ error-save-favorite = Couldn't save the favorite: { $error }
 error-save-rating = Couldn't save the rating: { $error }
 error-save-format = Couldn't save the format: { $error }
 error-save-bookmark = Couldn't save the bookmark: { $error }
+error-remove-bookmark = Couldn't remove the bookmark: { $error }
 error-save-adjustments = Adjustments couldn't be saved: { $error }
 error-add-to-playlist = Couldn't add to the playlist: { $error }
 error-clear-history = Could not clear the history: { $error }

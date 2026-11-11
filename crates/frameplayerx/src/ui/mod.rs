@@ -273,6 +273,8 @@ pub enum Action {
     AddKeyframe,
     ClearKeyframes,
     AddBookmark,
+    /// Removes the viewer's bookmark at this index in the playback's markers.
+    RemoveBookmark(usize),
     /// Plays this audio stream, and keeps it as this video's pick.
     SelectAudio(usize),
     SelectSourceAudio(String),

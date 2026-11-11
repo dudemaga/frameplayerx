@@ -80,9 +80,9 @@ impl App {
             markers: p
                 .markers
                 .iter()
-                .map(|(time, name)| RemoteMarker {
-                    time: *time,
-                    name: name.clone(),
+                .map(|m| RemoteMarker {
+                    time: m.time,
+                    name: m.name.clone(),
                 })
                 .collect(),
             volume: f64::from(p.player.volume()),

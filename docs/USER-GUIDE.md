@@ -667,7 +667,9 @@ picked is kept, so a video whose subtitles you never changed follows
 **⚙ › Chapters** lists the video's chapters and your bookmarks (**Bookmark**
 on the control bar, or grip + A on the right controller, adds one where you
 are), each with a button to go there; grip + X and grip + Y step through
-them.
+them. Your bookmarks also have a button to remove them. Pressing Bookmark
+within a second of one you already have adds no other: it says "Already
+bookmarked here".
 
 Subtitles show in any script, with the fonts on the headset: Arabic and
 Hebrew read right to left, and Chinese, Japanese or Korean need a font
