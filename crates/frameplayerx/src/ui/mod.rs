@@ -216,11 +216,16 @@ impl std::fmt::Debug for WebAddress {
 /// Something the UI asks the app to do.
 #[derive(Clone, Debug)]
 pub enum Action {
+    /// Plays this video alone.
     Open(OpenRequest),
-    /// Open item `.1` of a list; grip + thumbstick moves through the list.
-    OpenList(Vec<OpenRequest>, usize),
-    /// Plays the list from `.1`, through to its end (Play all, a playlist).
+    /// Makes the list Up next and plays it from `.1` (Play all, a playlist).
     PlayAll(Vec<OpenRequest>, usize),
+    /// A server grid's Play all when its first videos aren't all loaded:
+    /// fetches them by `query`, then plays them as Play all does.
+    CatalogPlayAll {
+        source: String,
+        query: fp_sources::CatalogQuery,
+    },
     /// Queues a video right after the one playing (`next`) or at the end.
     Queue {
         req: OpenRequest,
@@ -403,7 +408,7 @@ pub enum Action {
     ToggleFollow,
     /// The video playing starts again when it ends.
     ToggleLoopVideo,
-    /// The list a video was opened from plays through.
+    /// Up next plays through.
     ToggleAutoplay,
     /// Up next starts again from the first video after the last.
     ToggleLoopPlaylist,

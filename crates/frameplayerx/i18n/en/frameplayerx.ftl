@@ -1036,6 +1036,7 @@ playlists-delete = Delete
 playlists-rename = Rename
 # Short: a button.
 common-play-all = Play all
+catalog-play-all-first = Plays the first { $count } videos, in this order
 playlists-empty = Nothing in it yet
 playlists-empty-desc = Add videos from their details with Add to playlist.
 playlists-picker-title = Add to a playlist
@@ -1125,6 +1126,7 @@ toast-adjustments-saved = Adjustments saved
 toast-preset-saved = Saved as { $name }
 toast-preset = Preset: { $name }
 toast-no-presets = No presets yet: save one at the top of the adjust panel
+toast-nothing-to-play = Nothing here to play
 toast-bookmark-added = Bookmark added
 toast-history-cleared = Watch history cleared
 # Play next and Add to queue are buttons: use their translations.

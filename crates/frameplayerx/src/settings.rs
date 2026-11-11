@@ -109,8 +109,7 @@ pub struct Settings {
     pub follow: bool,
     /// The video playing starts again when it ends.
     pub loop_video: bool,
-    /// The list a video was opened from plays through, the next starting
-    /// when one ends (Play all, a playlist and what was queued always do).
+    /// Up next plays through, the next video starting when one ends.
     pub autoplay: bool,
     /// Up next starts again from the first video after the last, and X and
     /// Y step round it.

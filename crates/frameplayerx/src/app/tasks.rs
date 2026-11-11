@@ -30,6 +30,8 @@ pub(super) enum Job {
         seq: u64,
         result: Box<Result<ui::catalog::Loaded, String>>,
     },
+    /// The videos a server grid's Play all fetched, for Up next.
+    PlayAll(Result<Vec<OpenRequest>, String>),
     /// A scene feed's listing; `cached`: the one saved last time, shown
     /// while the server answers.
     FeedLibrary {
@@ -387,6 +389,11 @@ impl App {
                     j.loaded(seq, *result);
                 }
             }
+            Job::PlayAll(result) => match result {
+                Ok(reqs) if !reqs.is_empty() => self.apply(Action::PlayAll(reqs, 0)),
+                Ok(_) => self.ui.toast(tr!("toast-nothing-to-play")),
+                Err(e) => self.ui.toast(e),
+            },
             Job::FeedLibrary {
                 source,
                 result,

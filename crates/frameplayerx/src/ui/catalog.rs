@@ -608,8 +608,13 @@ impl CatalogView {
 enum Go {
     /// Into a library, collection, folder, series or season.
     Open(CatalogItem),
-    /// Item `.1` of a list, the rest queued; `.2` from the start.
-    Play(Vec<CatalogItem>, usize, bool),
+    /// This item alone; `.1` from the start.
+    Play(CatalogItem, bool),
+    /// These in turn: the page's Play all.
+    PlayAll(Vec<CatalogItem>),
+    /// The first [`PLAY_ALL_LIMIT`] of this listing, fetched first: a grid's
+    /// Play all when fewer are loaded.
+    PlayFirst(CatalogQuery),
     /// Play next (`true`) or Add to queue.
     Queue(CatalogItem, bool),
     AddToPlaylist(CatalogItem),
@@ -646,16 +651,39 @@ pub fn page(
         return true;
     };
     let mut refresh = false;
+    let mut play_all: Option<Go> = None;
     let back = page::header(ui, name, Some(&subtitle), |ui| {
         refresh = widgets::icon_button(ui, icons::ARROWS_CLOCKWISE, 44.0, false)
             .tip(tr!("feed-refresh"))
             .clicked();
+        if shows_videos(&p.body) {
+            let button = widgets::button_sized(
+                ui,
+                Some(icons::PLAY),
+                tr!("common-play-all"),
+                Kind::Secondary,
+                44.0,
+            );
+            let button = match &p.body {
+                Body::Grid(g) if g.total > PLAY_ALL_LIMIT => {
+                    button.tip(&tr!("catalog-play-all-first", count = PLAY_ALL_LIMIT))
+                }
+                _ => button,
+            };
+            if button.clicked() {
+                play_all = play_all_of(&p.body);
+            }
+        }
         if let Body::Home { search, typed, .. } | Body::Search { search, typed, .. } = &mut p.body
             && page::search_field(ui, search, tr!("jf-search-server"), 220.0)
         {
             *typed = Some(Instant::now());
         }
     });
+    if let Some(go) = play_all {
+        follow(v, source, j, go);
+        return back;
+    }
     if refresh {
         if let Some((seq, load)) = j.reload() {
             v.actions.push(Action::Catalog {
@@ -748,14 +776,21 @@ fn follow(v: &mut View, source: &str, j: &mut CatalogView, go: Go) {
                 ask(v, p.seq, Load::Facets(query));
             }
         }
-        Go::Play(list, i, from_start) => {
-            let reqs: Vec<OpenRequest> = list
-                .iter()
-                .enumerate()
-                .map(|(k, item)| request(source, item, from_start && k == i))
-                .collect();
-            v.actions.push(Action::OpenList(reqs, i));
+        Go::Play(item, from_start) => {
+            v.actions
+                .push(Action::Open(request(source, &item, from_start)));
         }
+        Go::PlayAll(items) => {
+            let reqs = items
+                .iter()
+                .map(|item| request(source, item, false))
+                .collect();
+            v.actions.push(Action::PlayAll(reqs, 0));
+        }
+        Go::PlayFirst(query) => v.actions.push(Action::CatalogPlayAll {
+            source: source.to_string(),
+            query,
+        }),
         Go::Queue(item, next) => v.actions.push(Action::Queue {
             req: request(source, &item, false),
             next,
@@ -904,8 +939,58 @@ fn has_content(body: &Body) -> bool {
     }
 }
 
+/// How many videos a server grid's Play all queues at most, as Jellyfin's
+/// own Play does.
+pub const PLAY_ALL_LIMIT: usize = 300;
+
+/// Whether the page shows videos for Play all: a season's episodes, those a
+/// search found, or a grid's (a grid of series has none).
+fn shows_videos(body: &Body) -> bool {
+    let any = |items: &[CatalogItem]| items.iter().any(|i| i.kind.playable());
+    match body {
+        Body::Series { episodes, .. } => any(episodes),
+        Body::Search { results, .. } => results.iter().any(|(_, r)| any(r)),
+        Body::Grid(g) => any(&g.items),
+        _ => false,
+    }
+}
+
+/// What the page's Play all plays: the season shown, the videos a search
+/// found, or a grid's first [`PLAY_ALL_LIMIT`] in its order, fetched when
+/// fewer are loaded.
+fn play_all_of(body: &Body) -> Option<Go> {
+    let videos = |items: &mut dyn Iterator<Item = &CatalogItem>| {
+        Go::PlayAll(items.filter(|i| i.kind.playable()).cloned().collect())
+    };
+    Some(match body {
+        Body::Series { episodes, .. } => videos(&mut episodes.iter()),
+        Body::Search { results, .. } => videos(&mut results.iter().flat_map(|(_, r)| r)),
+        Body::Grid(g) => {
+            let wanted = g.total.min(PLAY_ALL_LIMIT);
+            if g.items.len() >= wanted {
+                videos(&mut g.items.iter().take(wanted))
+            } else {
+                Go::PlayFirst(CatalogQuery {
+                    start: 0,
+                    limit: PLAY_ALL_LIMIT,
+                    // A shuffle's own order.
+                    ids: g
+                        .order
+                        .iter()
+                        .flatten()
+                        .take(PLAY_ALL_LIMIT)
+                        .cloned()
+                        .collect(),
+                    ..g.query.clone()
+                })
+            }
+        }
+        _ => return None,
+    })
+}
+
 /// Opens `item`, starting from the server's resume point.
-fn request(source: &str, item: &CatalogItem, from_start: bool) -> OpenRequest {
+pub(crate) fn request(source: &str, item: &CatalogItem, from_start: bool) -> OpenRequest {
     OpenRequest {
         location: item.location.clone(),
         source_id: Some(source.to_string()),
@@ -1023,7 +1108,7 @@ fn card_go(c: page::CardResponse, list: &[CatalogItem], i: usize) -> Option<Go> 
     if c.more {
         Some(Go::Details(item.clone()))
     } else if c.open && item.kind.playable() {
-        Some(Go::Play(list.to_vec(), i, false))
+        Some(Go::Play(item.clone(), false))
     } else if c.open {
         Some(Go::Open(item.clone()))
     } else {
@@ -1446,12 +1531,7 @@ fn series_page(
                     tr!("jf-play-episode", episode = ep.as_str())
                 };
                 if widgets::button(ui, Some(icons::PLAY), &label, Kind::Primary).clicked() {
-                    // The next episode, with the rest of its season after it
-                    // when it is the season shown.
-                    go = Some(match episodes.iter().position(|e| e.id == n.id) {
-                        Some(i) => Go::Play(episodes.to_vec(), i, false),
-                        None => Go::Play(vec![n.clone()], 0, false),
-                    });
+                    go = Some(Go::Play(n.clone(), false));
                 }
             }
             go = go.take().or(mark_chips(ui, series, caps));
@@ -1474,10 +1554,10 @@ fn series_page(
         });
         ui.add_space(12.0);
     }
-    for (i, e) in episodes.iter().enumerate() {
+    for e in episodes {
         let (play, more) = episode_row(ui, v, e);
         if play {
-            go = Some(Go::Play(episodes.to_vec(), i, false));
+            go = Some(Go::Play(e.clone(), false));
         }
         if more {
             go = Some(Go::Details(e.clone()));
@@ -1660,7 +1740,7 @@ fn details(
                 tr!("player-play").to_string()
             };
             if widgets::button(ui, Some(icons::PLAY), &label, Kind::Primary).clicked() {
-                go = Some(Go::Play(vec![item.clone()], 0, false));
+                go = Some(Go::Play(item.clone(), false));
             }
             if resume
                 && widgets::button(
@@ -1671,7 +1751,7 @@ fn details(
                 )
                 .clicked()
             {
-                go = Some(Go::Play(vec![item.clone()], 0, true));
+                go = Some(Go::Play(item.clone(), true));
             }
         });
         if matches!(
@@ -1819,6 +1899,50 @@ mod tests {
             kind,
             ..CatalogItem::default()
         }
+    }
+
+    #[test]
+    fn play_all_queues_the_videos_shown_or_fetches_a_grids_first() {
+        let films: Vec<CatalogItem> = (0..5)
+            .map(|i| item(&format!("f{i}"), CatalogKind::Movie))
+            .collect();
+        let grid = |items: Vec<CatalogItem>, total: usize| {
+            let mut g = Grid::new("Films".into(), CatalogQuery::default());
+            g.items = items;
+            g.total = total;
+            Body::Grid(Box::new(g))
+        };
+        let ids = |go: Option<Go>| match go {
+            Some(Go::PlayAll(items)) => items.into_iter().map(|i| i.id).collect::<Vec<_>>(),
+            _ => panic!("not a list to play"),
+        };
+        // All loaded: those, folders left out.
+        let mut mixed = films.clone();
+        mixed.insert(1, item("dir", CatalogKind::Folder));
+        let body = grid(mixed, 6);
+        assert!(shows_videos(&body));
+        assert_eq!(ids(play_all_of(&body)), ["f0", "f1", "f2", "f3", "f4"]);
+        // More than are loaded: the first PLAY_ALL_LIMIT fetched in order,
+        // a shuffle by its own order.
+        let mut big = Grid::new("Films".into(), CatalogQuery::default());
+        big.items = films.clone();
+        big.total = 1000;
+        big.order = Some((0..1000).map(|i| format!("s{i}")).collect());
+        match play_all_of(&Body::Grid(Box::new(big))) {
+            Some(Go::PlayFirst(q)) => {
+                assert_eq!(
+                    (q.start, q.limit, q.ids.len()),
+                    (0, PLAY_ALL_LIMIT, PLAY_ALL_LIMIT)
+                );
+                assert_eq!(q.ids[0], "s0");
+            }
+            _ => panic!("not fetched"),
+        }
+        // A grid of series has nothing to play.
+        assert!(!shows_videos(&grid(
+            vec![item("show", CatalogKind::Series)],
+            1
+        )));
     }
 
     #[test]

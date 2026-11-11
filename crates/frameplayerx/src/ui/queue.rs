@@ -96,7 +96,7 @@ pub fn page(ui: &mut egui::Ui, v: &mut View) {
     let n = q.items.len();
     let loops = v.settings.loop_playlist;
     let at = q.pos + 1;
-    let subtitle = match (n, q.plays_through || v.settings.autoplay, loops) {
+    let subtitle = match (n, v.settings.autoplay, loops) {
         (0, ..) => tr!("queue-empty").to_string(),
         (_, true, false) => tr!("queue-plays-through", at = at, of = n),
         (_, true, true) => tr!("queue-plays-round", at = at, of = n),
