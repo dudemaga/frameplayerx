@@ -220,19 +220,22 @@ impl App {
             }
         }
         let mut anchor = self.anchor.unwrap_or(Mat4::IDENTITY);
-        // A 180°/360° video is drawn from wherever the head is (it was
-        // filmed from one spot), so it moves along when you lean; panels
-        // fixed in the room then seem to slide against it. During such a
-        // video the panels keep to the head's position (not its turning),
-        // so they stay put relative to the picture. It never rolls, even
-        // when following turned the anchor on its side.
-        if let (Some((pos, _)), Some(p)) = (input.head, &self.playback)
-            && p.format.projection != Projection::Flat
-        {
-            let (_, rot, _) = anchor.to_scale_rotation_translation();
+        // The panels stay where they are in the room during a 180°/360°
+        // video too, as they do everywhere else: lean or walk and they
+        // don't come along. The anchor never rolls there, even when
+        // following turned it on its side before the video opened.
+        if self.immersive() {
+            let (_, rot, pos) = anchor.to_scale_rotation_translation();
             anchor = anchor_facing(pos, rot);
         }
         anchor
+    }
+
+    /// A 180°/360° video is playing.
+    fn immersive(&self) -> bool {
+        self.playback
+            .as_ref()
+            .is_some_and(|p| p.format.projection != Projection::Flat)
     }
 
     /// Whether the flat screen and panels follow the head: the setting is
@@ -579,7 +582,15 @@ impl App {
             video.background = [0.0; 4];
         }
         let anchor_rot = anchor.to_scale_rotation_translation().1;
-        let player = self.picture_anchor(anchor);
+        // A 180°/360° video is drawn from wherever the head is (it was
+        // filmed from one spot), so it moves along when you lean. What is
+        // part of the picture (its subtitles) keeps to the head's position
+        // with it; the panels stay in the room.
+        let picture = match input.head {
+            Some((pos, _)) if self.immersive() => Mat4::from_rotation_translation(anchor_rot, pos),
+            _ => anchor,
+        };
+        let player = self.picture_anchor(picture);
         if let (Some(p), Some(s)) = (&self.playback, shown) {
             frame = p.player.current_frame();
             video.format = p.format;
