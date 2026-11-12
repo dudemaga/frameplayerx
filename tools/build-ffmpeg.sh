@@ -19,8 +19,9 @@ src="$root/third_party/src"
 mkdir -p "$src"
 
 # The upstream release tarballs (ffmpeg.org, VideoLAN), which Ubuntu's
-# archive serves unchanged, and zlib's from zlib.net. Nothing is
-# extracted, cached or downloaded, unless it matches.
+# archive serves unchanged, and zlib's from its GitHub release (zlib.net
+# no longer serves the same file). Nothing is extracted, cached or
+# downloaded, unless it matches.
 FFMPEG_SHA256=733984395e0dbbe5c046abda2dc49a5544e7e0e1e2366bba849222ae9e3a03b1
 DAV1D_SHA256=732010aa5ef461fa93355ed2c6c5fedb48ddc4b74e697eaabe8907eaeb943011
 ZLIB_SHA256=9a93b2b7dfdac77ceba5a558a580e74667dd6fede4585b91eefb60f03b72df23
@@ -35,7 +36,7 @@ fetch() { # url dest sha256
 }
 fetch "https://archive.ubuntu.com/ubuntu/pool/universe/f/ffmpeg/ffmpeg_${FFMPEG_VER}.orig.tar.xz" "$src/ffmpeg-$FFMPEG_VER.tar.xz" "$FFMPEG_SHA256"
 fetch "https://archive.ubuntu.com/ubuntu/pool/main/d/dav1d/dav1d_${DAV1D_VER}.orig.tar.xz" "$src/dav1d-$DAV1D_VER.tar.xz" "$DAV1D_SHA256"
-fetch "https://zlib.net/fossils/zlib-${ZLIB_VER}.tar.gz" "$src/zlib-$ZLIB_VER.tar.gz" "$ZLIB_SHA256"
+fetch "https://github.com/madler/zlib/releases/download/v${ZLIB_VER}/zlib-${ZLIB_VER}.tar.gz" "$src/zlib-$ZLIB_VER.tar.gz" "$ZLIB_SHA256"
 
 # zig from PATH, else the pip package (tools/requirements.txt).
 if command -v zig >/dev/null; then zig="$(command -v zig)"; else zig="python3 -m ziglang"; fi
