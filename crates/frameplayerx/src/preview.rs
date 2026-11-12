@@ -11,6 +11,8 @@
 //! | `wait-playing [TIMEOUT]` | run until a video is playing |
 //! | `look YAW PITCH [ROLL]` | head direction (and roll, to lie on your side) in degrees |
 //! | `recenter` | recenter on where the head faces |
+//! | `gaze YAW PITCH` / `gaze off` | where the eyes look, in degrees from where the head faces (simulated eye tracking) |
+//! | `foveation off/low/high` | set Settings › General › Display › Foveated rendering |
 //! | `aim YAW PITCH` | controller ray direction in degrees |
 //! | `point PANEL X Y` | aim at a panel (`main`, `bar`, `adjust`, `keyboard`, `tracks`, `perf`) at fractional X, Y |
 //! | `click` | pull and release the trigger |
@@ -25,7 +27,7 @@
 //! | `quality NAME` | play `automatic`, `original` or a transcode by its label (`1440p`) |
 //! | `loop video` / `loop playlist` | turn Loop video or Up next's Loop on or off |
 //! | `autoplay` | turn Autoplay on or off |
-//! | `open-list` | open the library's videos as a grid does, from the first |
+//! | `open-list` | play the library's videos as Play all does, from the first |
 //! | `shuffle` | shuffle Up next, keeping the current video first |
 //! | `shot NAME` | save the left eye as OUT_DIR/NAME.png |
 //! | `sbs NAME` | save both eyes side by side |
@@ -34,6 +36,7 @@
 //! | `tracks` | open the audio and subtitles picker |
 //! | `filters` | open the Filters drawer of the source page shown (a Jellyfin grid, a feed) |
 //! | `chroma` | turn chroma key on for the open video |
+//! | `bookmark` | press Bookmark, as on the control bar |
 //! | `panel PANEL NAME` | save a panel's image flat, pixel for pixel, as OUT_DIR/NAME.png |
 
 use crate::app::{App, FrameInput};
@@ -57,10 +60,13 @@ struct Sim {
     eyes: OffscreenEyes,
     size: u32,
     head: Quat,
+    /// Where the eyes look, from where the head faces.
+    gaze: Option<Quat>,
     hand: Hand,
     start: Instant,
     last: Instant,
     frames: u64,
+    gpu_ms: crate::perf::GpuWindow,
     out: std::path::PathBuf,
 }
 
@@ -81,6 +87,7 @@ impl Sim {
         let dt = self.last.elapsed().as_secs_f32().clamp(0.001, 0.1);
         self.last = Instant::now();
         self.renderer.begin_frame()?;
+        self.gpu_ms.push(self.renderer.gpu_times());
         let hands = [Hand::default(), self.hand];
         let head = Some((self.head_pos(), self.head));
         let out = self.app.frame(
@@ -108,6 +115,10 @@ impl Sim {
             proj,
         };
         let eyes = [ev(self.head_pos() - right), ev(self.head_pos() + right)];
+        self.renderer
+            .set_gaze(self.gaze.map(|g| self.head * g * Vec3::NEG_Z));
+        self.renderer
+            .set_foveation(self.app.settings.display.foveation);
         self.renderer
             .draw(&self.eyes.targets(), &eyes, &out.video, &out.quads)?;
         self.renderer.end_frame()?;
@@ -256,6 +267,7 @@ impl Sim {
                         "general" => SettingsTab::General,
                         "playback" => SettingsTab::Playback,
                         "position" => SettingsTab::VideoPosition,
+                        "picture" => SettingsTab::Picture,
                         "sound" => SettingsTab::Sound,
                         "passthrough" => SettingsTab::Passthrough,
                         "controller" => SettingsTab::Controller,
@@ -311,6 +323,47 @@ impl Sim {
                 self.app.repaint_all();
                 self.run_frames(3)?;
             }
+            // One adjustment of the playing video, by its name in
+            // settings.json: `view brightness -0.2`.
+            Some("view") => {
+                let key = parts.get(1).ok_or("view needs an adjustment")?;
+                let value: serde_json::Value = parts
+                    .get(2)
+                    .and_then(|v| serde_json::from_str(v).ok())
+                    .ok_or("view needs a value")?;
+                if let Some(p) = &mut self.app.playback {
+                    let mut v = serde_json::to_value(p.settings).map_err(|e| e.to_string())?;
+                    v[*key] = value;
+                    p.settings = serde_json::from_value(v).map_err(|e| e.to_string())?;
+                    p.settings_dirty = true;
+                }
+                self.app.repaint_all();
+                self.run_frames(2)?;
+            }
+            // The playing video's adjustments as a preset, as New preset
+            // saves them, under the rest of the line: `save-preset Night`.
+            Some("save-preset") => {
+                self.app.apply(crate::ui::Action::SavePreset);
+                let name = line.trim().strip_prefix("save-preset").unwrap_or("").trim();
+                if let Some(p) = self
+                    .app
+                    .settings
+                    .presets
+                    .last_mut()
+                    .filter(|_| !name.is_empty())
+                {
+                    p.name = name.to_string();
+                }
+                self.app.repaint_all();
+                self.run_frames(2)?;
+            }
+            // The adjust panel's presets listed to rename or delete, as Edit
+            // shows them: `edit-presets`.
+            Some("edit-presets") => {
+                self.app.ui.presets_editing = true;
+                self.app.repaint_all();
+                self.run_frames(3)?;
+            }
             Some("filters") => {
                 use crate::ui::SourcePage;
                 match self.app.ui.source.as_mut().map(|s| &mut s.page) {
@@ -339,10 +392,10 @@ impl Sim {
                 self.app.apply(crate::ui::Action::ClosePlayback);
                 self.run_frames(3)?;
             }
-            // The library's videos as a grid opens them, from the first.
+            // The library's videos as Play all plays them, from the first.
             Some("open-list") => {
                 let list = self.library_requests();
-                self.app.apply(crate::ui::Action::OpenList(list, 0));
+                self.app.apply(crate::ui::Action::PlayAll(list, 0));
                 self.run_frames(3)?;
             }
             Some("autoplay") => {
@@ -427,6 +480,15 @@ impl Sim {
                 self.run_frames(3)?;
             }
             // `subtitles always ar`, as Settings › Sound and subtitles does.
+            Some("foveation") => {
+                use fp_core::display::Foveation;
+                self.app.settings.display.foveation = match parts.get(1).copied() {
+                    Some("off") => Foveation::Off,
+                    Some("low") => Foveation::Low,
+                    Some("high") => Foveation::High,
+                    _ => return Err("foveation needs off, low or high".into()),
+                };
+            }
             Some("subtitles") => {
                 use crate::settings::SubtitleMode;
                 self.app.settings.subtitles = match parts.get(1).copied() {
@@ -468,6 +530,11 @@ impl Sim {
                 self.app.repaint_all();
                 self.run_frames(3)?;
             }
+            Some("bookmark") => {
+                self.app.apply(crate::ui::Action::AddBookmark);
+                self.app.repaint_all();
+                self.run_frames(2)?;
+            }
             // Turns chroma key on for the open video (the Passthrough tab).
             Some("chroma") => {
                 if let Some(p) = &mut self.app.playback {
@@ -481,6 +548,12 @@ impl Sim {
             Some("look") => {
                 let roll = num(3).unwrap_or(0.0).to_radians();
                 self.head = dir_quat(num(1)?, num(2)?) * Quat::from_rotation_z(roll);
+            }
+            Some("gaze") => {
+                self.gaze = match parts.get(1) {
+                    Some(&"off") => None,
+                    _ => Some(dir_quat(num(1)?, num(2)?)),
+                };
             }
             Some("recenter") => {
                 self.app.apply(crate::ui::Action::Recenter);
@@ -532,6 +605,12 @@ impl Sim {
             Some("grip") => self.hand.squeeze = num(1)?,
             Some("trigger") => self.hand.trigger = num(1)?,
             Some("status") => println!("status: {}", self.app.status_line()),
+            // The GPU's time per frame since the last `gpu`: `gpu`.
+            Some("gpu") => {
+                if let Some(line) = self.gpu_ms.take_line() {
+                    println!("{line}");
+                }
+            }
             Some("squeeze") => {
                 self.hand.squeeze = 1.0;
                 self.run_frames(2)?;
@@ -832,9 +911,12 @@ pub fn run(args: &Args, out: &Path) -> Result<(), Error> {
     let gpu = Arc::new(Gpu::headless()?);
     let renderer = Renderer::new(gpu.clone(), ash::vk::Format::R8G8B8A8_SRGB)?;
     fp_media::set_hevc_10bit_hardware(renderer.shows_q10c());
+    fp_media::set_shared_frames(renderer.reads_decoder_buffers());
     let size = args.size.unwrap_or(1024);
     let eyes = OffscreenEyes::new(&renderer, size, size)?;
-    let mut app = crate::make_app()?;
+    let mut app = crate::make_app(crate::settings::Settings::load(
+        &crate::settings::Settings::path(),
+    ))?;
     // The rows a Steam Frame shows, so screenshots cover long values.
     app.set_about(vec![
         ("Mode".into(), "Preview (no headset)".into()),
@@ -863,6 +945,7 @@ pub fn run(args: &Args, out: &Path) -> Result<(), Error> {
         eyes,
         size,
         head: Quat::IDENTITY,
+        gaze: None,
         hand: Hand {
             active: true,
             aim: None,
@@ -871,6 +954,7 @@ pub fn run(args: &Args, out: &Path) -> Result<(), Error> {
         start: Instant::now(),
         last: Instant::now(),
         frames: 0,
+        gpu_ms: Default::default(),
         out: out.to_path_buf(),
     };
     sim.hand.aim = Some((sim.hand_pos(), Quat::IDENTITY));
@@ -890,6 +974,9 @@ pub fn run(args: &Args, out: &Path) -> Result<(), Error> {
         }
     }
     println!("{} frames rendered", sim.frames);
+    if let Some(line) = sim.gpu_ms.take_line() {
+        println!("{line}");
+    }
     let Sim {
         app,
         renderer,

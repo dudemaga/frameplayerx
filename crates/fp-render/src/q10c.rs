@@ -10,7 +10,9 @@
 //! descriptor is fetched through `VK_EXT_descriptor_buffer`, and its format
 //! and width are changed to the TP10 ones (fields from Mesa's a6xx register
 //! descriptions). A compute pass copies the samples into P010 planes, which
-//! the scene shader samples like any P010 frame. The other carrier formats
+//! the scene shader samples like any P010 frame, or, for an SDR picture
+//! read in the decoder's buffer, the eye passes sample the TP10 descriptors
+//! themselves ([`Sampled`], [`crate::tp10_eyes`]). The other carrier formats
 //! decompress the same bytes wrongly: the decompression depends on the
 //! format.
 //!
@@ -132,6 +134,41 @@ fn bands(per_row: u32, height: u32) -> Vec<(u32, u32)> {
         .collect()
 }
 
+/// Overlapping bands that let a shader sample a whole plane with bilinear
+/// filtering: each band `rows` tall, one starting every `step` rows (half a
+/// band), `count` of them, the last ending at the plane's bottom. A lookup
+/// reads the band whose middle is nearest, which reaches at least half a
+/// step beyond it, so a sample and its neighbours are always in one band.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) struct SampleBands {
+    pub step: u32,
+    pub rows: u32,
+    pub count: u32,
+}
+
+/// Most luma and chroma bands the eye passes bind (`planes_tp10.wgsl`).
+pub(crate) const MAX_LUMA_BANDS: usize = 8;
+pub(crate) const MAX_CHROMA_BANDS: usize = 4;
+
+/// The overlapping bands for a plane of `height` rows of `per_row` samples.
+pub(crate) fn sample_bands(per_row: u32, height: u32) -> SampleBands {
+    let fit = (MAX_BAND_SAMPLES / per_row.max(1) as u64) as u32;
+    let rows = (fit / BAND_ALIGN * BAND_ALIGN).max(2 * BAND_ALIGN);
+    if rows >= height {
+        return SampleBands {
+            step: height.max(1),
+            rows: height.max(1),
+            count: 1,
+        };
+    }
+    let step = (rows / 2 / BAND_ALIGN * BAND_ALIGN).max(BAND_ALIGN);
+    SampleBands {
+        step,
+        rows,
+        count: (height - rows).div_ceil(step) + 1,
+    }
+}
+
 /// Where a Q10C picture's planes are ([`fp_media::Q10cPicture`]).
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) struct Geometry {
@@ -190,16 +227,18 @@ impl Carriers {
     /// Creates the carriers of `g` and checks they need the memory the
     /// decoder's layout has; `bind` then gets their requirements and binds
     /// them (at 0 and the UV offset).
+    /// `external`: bound to an imported DMA-BUF (the decoder's buffer).
     fn new(
         gpu: &Gpu,
         g: &Geometry,
+        external: bool,
         bind: impl FnOnce(&[vk::MemoryRequirements; 2]) -> Result<vk::DeviceMemory>,
     ) -> Result<Carriers> {
         let mut c = Carriers {
             images: [vk::Image::null(); 2],
             views: [vk::ImageView::null(); 2],
         };
-        let r = c.create(gpu, g, bind);
+        let r = c.create(gpu, g, external, bind);
         if r.is_err() {
             c.destroy(gpu);
         }
@@ -210,6 +249,7 @@ impl Carriers {
         &mut self,
         gpu: &Gpu,
         g: &Geometry,
+        external: bool,
         bind: impl FnOnce(&[vk::MemoryRequirements; 2]) -> Result<vk::DeviceMemory>,
     ) -> Result<()> {
         let d = &gpu.device;
@@ -222,6 +262,7 @@ impl Carriers {
             let mut explicit = vk::ImageDrmFormatModifierExplicitCreateInfoEXT::default()
                 .drm_format_modifier(QCOM_COMPRESSED)
                 .plane_layouts(&layouts);
+            let mut ext = crate::shared::external_info();
             let info = vk::ImageCreateInfo::default()
                 .image_type(vk::ImageType::TYPE_2D)
                 .format(CARRIER)
@@ -237,8 +278,19 @@ impl Carriers {
                 .usage(vk::ImageUsageFlags::SAMPLED)
                 // The memory is written by the host, then the layout
                 // changes to GENERAL keeping it (see `Converter::record`).
-                .initial_layout(vk::ImageLayout::PREINITIALIZED)
+                // Images over imported memory start UNDEFINED, as Vulkan
+                // asks, and are read in GENERAL as the decoder left it.
+                .initial_layout(if external {
+                    vk::ImageLayout::UNDEFINED
+                } else {
+                    vk::ImageLayout::PREINITIALIZED
+                })
                 .push_next(&mut explicit);
+            let info = if external {
+                info.push_next(&mut ext)
+            } else {
+                info
+            };
             // SAFETY: valid create info; images are destroyed by `destroy`.
             unsafe {
                 self.images[i] = d.create_image(&info, None).ctx("Q10C carrier")?;
@@ -316,6 +368,10 @@ pub(crate) struct Picture {
     bands: Vec<Band>,
     /// The carriers' layout is GENERAL (after the first conversion).
     ready: bool,
+    /// The memory is the decoder's buffer, imported ([`Converter::import`]):
+    /// nothing is copied in, and each conversion acquires the carriers from
+    /// the decoder's queue family and releases them to it after.
+    imported: bool,
 }
 
 // SAFETY: `mapped` points into `memory`, which only this picture uses; the
@@ -323,8 +379,12 @@ pub(crate) struct Picture {
 unsafe impl Send for Picture {}
 
 impl Picture {
-    /// The memory the decoder's buffer goes into.
+    /// The memory the decoder's buffer goes into (nothing for an imported
+    /// picture, which is the decoder's buffer).
     pub fn bytes(&mut self) -> &mut [u8] {
+        if self.mapped.is_null() {
+            return &mut [];
+        }
         // SAFETY: `mapped` is the persistent mapping of `geometry.len` bytes.
         unsafe { std::slice::from_raw_parts_mut(self.mapped, self.geometry.len) }
     }
@@ -337,6 +397,71 @@ impl Picture {
                 .destroy_buffer(std::mem::take(&mut self.descriptors), None);
             gpu.device
                 .free_memory(std::mem::take(&mut self.descriptor_memory), None);
+            gpu.device
+                .free_memory(std::mem::take(&mut self.memory), None);
+        }
+    }
+}
+
+/// A Q10C picture in the decoder's buffer, sampled there by the eye passes
+/// (`planes_tp10.wgsl`) instead of being converted: its carriers and the
+/// TP10 descriptors of its overlapping bands.
+pub(crate) struct Sampled {
+    memory: vk::DeviceMemory,
+    carriers: Carriers,
+    pub luma: Vec<[u32; tex::WORDS]>,
+    pub chroma: Vec<[u32; tex::WORDS]>,
+    pub luma_bands: SampleBands,
+    pub chroma_bands: SampleBands,
+    /// Acquired from the decoder's queue family and not handed back yet.
+    held: bool,
+}
+
+impl Sampled {
+    /// Records the move of the carriers from the decoder to the renderer,
+    /// for the eye passes to sample.
+    pub fn acquire(&mut self, gpu: &Gpu, cmd: vk::CommandBuffer) {
+        // A frame that took it over without drawing hands it back first.
+        self.release(gpu, cmd);
+        for &image in &self.carriers.images {
+            mem::ownership_barrier(
+                gpu,
+                cmd,
+                image,
+                vk::ImageLayout::GENERAL,
+                vk::ImageLayout::GENERAL,
+                mem::TOP,
+                mem::SHADER_READ,
+                (gpu.decoder_family, gpu.queue_family),
+            );
+        }
+        self.held = true;
+    }
+
+    /// Records the move back to the decoder once the eye passes have read
+    /// the picture, if the renderer holds it.
+    pub fn release(&mut self, gpu: &Gpu, cmd: vk::CommandBuffer) {
+        if !std::mem::take(&mut self.held) {
+            return;
+        }
+        for &image in &self.carriers.images {
+            mem::ownership_barrier(
+                gpu,
+                cmd,
+                image,
+                vk::ImageLayout::GENERAL,
+                vk::ImageLayout::GENERAL,
+                mem::SHADER_READ,
+                mem::BOTTOM,
+                (gpu.queue_family, gpu.decoder_family),
+            );
+        }
+    }
+
+    pub fn destroy(&mut self, gpu: &Gpu) {
+        self.carriers.destroy(gpu);
+        // SAFETY: not in use; null is ignored.
+        unsafe {
             gpu.device
                 .free_memory(std::mem::take(&mut self.memory), None);
         }
@@ -520,7 +645,7 @@ impl Converter {
     fn check(&self, gpu: &Gpu) -> Result<()> {
         let g = Geometry::REFERENCE;
         let mut memory = vk::DeviceMemory::null();
-        let carriers = Carriers::new(gpu, &g, |reqs| {
+        let carriers = Carriers::new(gpu, &g, false, |reqs| {
             memory = allocate(
                 gpu,
                 g.len as u64,
@@ -591,10 +716,82 @@ impl Converter {
     /// The resources to convert pictures of geometry `g` into `outputs`
     /// (the Y and UV planes, R16 and R16G16).
     pub fn picture(&self, gpu: &Gpu, g: Geometry, outputs: &[Image]) -> Result<Picture> {
+        self.make(gpu, g, outputs, None)
+    }
+
+    /// A picture whose memory is the decoder's buffer `fd` (a DMA-BUF of
+    /// `g.len` bytes), converted into `outputs` where it lies.
+    pub fn import(&self, gpu: &Gpu, g: Geometry, fd: i32, outputs: &[Image]) -> Result<Picture> {
+        self.make(gpu, g, outputs, Some(fd))
+    }
+
+    /// The picture in the decoder's buffer `fd` (a DMA-BUF of `g.len`
+    /// bytes) as the eye passes sample it, without a conversion.
+    pub fn sample(&self, gpu: &Gpu, g: Geometry, fd: i32) -> Result<Sampled> {
+        let (cw, ch) = (g.width.div_ceil(2), g.height.div_ceil(2));
+        let luma_bands = sample_bands(g.width, g.height);
+        let chroma_bands = sample_bands(cw * 2, ch);
+        if luma_bands.count as usize > MAX_LUMA_BANDS
+            || chroma_bands.count as usize > MAX_CHROMA_BANDS
+        {
+            return Err(Error::Unsupported(format!(
+                "Q10C {}x{} needs more bands than the eye passes read",
+                g.width, g.height
+            )));
+        }
         let mut memory = vk::DeviceMemory::null();
-        let carriers = Carriers::new(gpu, &g, |reqs| {
+        let carriers = Carriers::new(gpu, &g, true, |reqs| {
             let bits = reqs[0].memory_type_bits & reqs[1].memory_type_bits;
-            memory = allocate(gpu, g.len as u64, bits, false)?;
+            memory = crate::shared::import(gpu, fd, g.len as u64, bits, None)?;
+            Ok(memory)
+        });
+        let mut s = Sampled {
+            memory,
+            carriers: match carriers {
+                Ok(c) => c,
+                Err(e) => {
+                    // SAFETY: unused (null is ignored).
+                    unsafe { gpu.device.free_memory(memory, None) };
+                    return Err(e);
+                }
+            },
+            luma: Vec::new(),
+            chroma: Vec::new(),
+            luma_bands,
+            chroma_bands,
+            held: false,
+        };
+        let made = [
+            (Plane::Y, luma_bands, g.height),
+            (Plane::Uv, chroma_bands, ch),
+        ]
+        .into_iter()
+        .try_for_each(|(plane, b, height)| {
+            for k in 0..b.count {
+                let row0 = k * b.step;
+                let d = self.band(&g, &s.carriers, plane, row0, b.rows.min(height - row0))?;
+                match plane {
+                    Plane::Y => s.luma.push(d),
+                    Plane::Uv => s.chroma.push(d),
+                }
+            }
+            Ok(())
+        });
+        if let Err(e) = made {
+            s.destroy(gpu);
+            return Err(e);
+        }
+        Ok(s)
+    }
+
+    fn make(&self, gpu: &Gpu, g: Geometry, outputs: &[Image], fd: Option<i32>) -> Result<Picture> {
+        let mut memory = vk::DeviceMemory::null();
+        let carriers = Carriers::new(gpu, &g, fd.is_some(), |reqs| {
+            let bits = reqs[0].memory_type_bits & reqs[1].memory_type_bits;
+            memory = match fd {
+                Some(fd) => crate::shared::import(gpu, fd, g.len as u64, bits, None)?,
+                None => allocate(gpu, g.len as u64, bits, false)?,
+            };
             Ok(memory)
         });
         let mut p = Picture {
@@ -614,6 +811,7 @@ impl Converter {
             descriptor_address: 0,
             bands: Vec::new(),
             ready: false,
+            imported: fd.is_some(),
         };
         if let Err(e) = self.fill(gpu, &mut p, outputs) {
             p.destroy(gpu);
@@ -625,12 +823,14 @@ impl Converter {
     fn fill(&self, gpu: &Gpu, p: &mut Picture, outputs: &[Image]) -> Result<()> {
         let d = &gpu.device;
         let g = p.geometry;
-        // SAFETY: host-visible memory of g.len bytes, mapped for the
-        // picture's lifetime (freeing it unmaps).
-        p.mapped = unsafe {
-            d.map_memory(p.memory, 0, g.len as u64, vk::MemoryMapFlags::empty())
-                .ctx("map Q10C memory")? as *mut u8
-        };
+        if !p.imported {
+            // SAFETY: host-visible memory of g.len bytes, mapped for the
+            // picture's lifetime (freeing it unmaps).
+            p.mapped = unsafe {
+                d.map_memory(p.memory, 0, g.len as u64, vk::MemoryMapFlags::empty())
+                    .ctx("map Q10C memory")? as *mut u8
+            };
+        }
         let (cw, ch) = (g.width.div_ceil(2), g.height.div_ceil(2));
         let mut offset = 0;
         for (plane, per_row, height) in [(Plane::Y, g.width, g.height), (Plane::Uv, cw * 2, ch)] {
@@ -716,7 +916,22 @@ impl Converter {
                 compute_write,
             );
         }
-        if !p.ready {
+        if p.imported {
+            // From the decoder, as it wrote the buffer: compressed data
+            // read in GENERAL, as on the Frame since the first conversion.
+            for &image in &p.carriers.images {
+                mem::ownership_barrier(
+                    gpu,
+                    cmd,
+                    image,
+                    vk::ImageLayout::GENERAL,
+                    vk::ImageLayout::GENERAL,
+                    mem::TOP,
+                    compute_read,
+                    (gpu.decoder_family, gpu.queue_family),
+                );
+            }
+        } else if !p.ready {
             for &image in &p.carriers.images {
                 mem::barrier(
                     gpu,
@@ -762,6 +977,21 @@ impl Converter {
                 d.cmd_dispatch(cmd, width.div_ceil(8), b.rows.div_ceil(8), 1);
             }
         }
+        if p.imported {
+            // Back to the decoder once read.
+            for &image in &p.carriers.images {
+                mem::ownership_barrier(
+                    gpu,
+                    cmd,
+                    image,
+                    vk::ImageLayout::GENERAL,
+                    vk::ImageLayout::GENERAL,
+                    compute_read,
+                    mem::BOTTOM,
+                    (gpu.queue_family, gpu.decoder_family),
+                );
+            }
+        }
         for o in outputs {
             mem::barrier(
                 gpu,
@@ -791,7 +1021,7 @@ impl Converter {
 
 /// `size` bytes of host-visible, coherent memory of a type in `bits`, with
 /// a device address when `address`.
-fn allocate(gpu: &Gpu, size: u64, bits: u32, address: bool) -> Result<vk::DeviceMemory> {
+pub(crate) fn allocate(gpu: &Gpu, size: u64, bits: u32, address: bool) -> Result<vk::DeviceMemory> {
     let index = memory_type(gpu, bits, HOST)
         .ok_or_else(|| Error::Unsupported("no host-visible memory for Q10C".into()))?;
     let mut flags =
@@ -917,5 +1147,43 @@ mod tests {
                 assert!(w as u64 * rows as u64 <= MAX_BAND_SAMPLES);
             }
         }
+    }
+
+    #[test]
+    fn a_sample_and_its_neighbours_are_always_in_the_band_the_shader_picks() {
+        // Luma and chroma (samples a row = UV pairs x 2) of the largest and
+        // some odd pictures the decoder gives.
+        for (per_row, height, most) in [
+            (8192, 8192, MAX_LUMA_BANDS),
+            (8192, 4320, MAX_LUMA_BANDS),
+            (7680, 3840, MAX_LUMA_BANDS),
+            (5760, 5760, MAX_LUMA_BANDS),
+            (1920, 1080, MAX_LUMA_BANDS),
+            (8192, 4096, MAX_CHROMA_BANDS),
+            (8192, 2160, MAX_CHROMA_BANDS),
+            (7680, 1920, MAX_CHROMA_BANDS),
+        ] {
+            let b = sample_bands(per_row, height);
+            assert!(b.count as usize <= most, "{per_row}x{height}: {b:?}");
+            assert!(b.step.is_multiple_of(BAND_ALIGN) || b.count == 1, "{b:?}");
+            assert!(per_row as u64 * b.rows as u64 <= MAX_BAND_SAMPLES || b.count == 1);
+            for row in 0..height {
+                // As planes_tp10.wgsl picks: the band whose middle is nearest.
+                let y = row as f32 + 0.5;
+                let k = ((y - 0.5 * b.rows as f32) / b.step as f32)
+                    .round()
+                    .clamp(0.0, (b.count - 1) as f32) as u32;
+                let row0 = k * b.step;
+                let end = (row0 + b.rows).min(height);
+                // Bilinear reads the next row; sharpening one more each way.
+                let need = (row.saturating_sub(2), (row + 2).min(height - 1));
+                assert!(
+                    row0 <= need.0 && need.1 < end,
+                    "{per_row}x{height} row {row}: band {k} is {row0}..{end}"
+                );
+            }
+        }
+        assert_eq!(sample_bands(1920, 1080).count, 1);
+        assert_eq!(sample_bands(7680, 3840).count, 3);
     }
 }

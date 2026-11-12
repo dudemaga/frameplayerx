@@ -29,6 +29,9 @@ pub struct Input {
     /// Whether the viewer says the video is frame sequential 3D; None goes
     /// by its labels.
     frame_sequential: Option<bool>,
+    /// Whether the viewer says the video is interlaced; None goes by its
+    /// headers.
+    deinterlace: Option<bool>,
     /// 3D Blu-ray's second view in a stream of its own (SSIF files, and
     /// transport streams holding both views), added to the base view's
     /// packets.
@@ -167,6 +170,7 @@ impl Input {
                 mvc_in_band: Vec::new(),
                 frame_packing: Vec::new(),
                 frame_sequential: None,
+                deinterlace: None,
                 pair: None,
                 title: None,
             };
@@ -362,6 +366,16 @@ impl Input {
 
     pub(crate) fn frame_sequential(&self) -> Option<bool> {
         self.frame_sequential
+    }
+
+    /// Deinterlaces the video or not, whatever its headers say (None: as
+    /// they say). Read when its info is read and its video decoder opened.
+    pub(crate) fn set_deinterlace(&mut self, choice: Option<bool>) {
+        self.deinterlace = choice;
+    }
+
+    pub(crate) fn deinterlace(&self) -> Option<bool> {
+        self.deinterlace
     }
 
     /// Best stream of a media type, as FFmpeg chooses it.

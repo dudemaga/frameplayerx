@@ -80,6 +80,9 @@ pub struct PlayerConfig {
     /// Whether the viewer says the video is frame sequential 3D; None goes
     /// by its labels.
     pub frame_sequential: Option<bool>,
+    /// Whether the viewer says the video is interlaced; None goes by its
+    /// headers.
+    pub deinterlace: Option<bool>,
 }
 
 impl Default for PlayerConfig {
@@ -96,6 +99,7 @@ impl Default for PlayerConfig {
             volume: 1.0,
             timeline: None,
             frame_sequential: None,
+            deinterlace: None,
         }
     }
 }
@@ -301,6 +305,7 @@ impl Player {
         let quit = Arc::new(AtomicBool::new(false));
         let mut input = Input::open(src, name, quit.clone())?;
         input.set_frame_sequential(config.frame_sequential);
+        input.set_deinterlace(config.deinterlace);
         if let Some(tl) = &config.timeline {
             input.start_at(tl.start);
         }
@@ -364,7 +369,12 @@ impl Player {
 
         // Decoders are opened here so errors surface from open().
         let video_dec = match info.video {
-            Some(i) => Some(Decoder::open(&input, i, config.hw_decode)?),
+            Some(i) => {
+                let mut d = Decoder::open(&input, i, config.hw_decode)?;
+                // Its frames go to the renderer alone.
+                d.share_frames();
+                Some(d)
+            }
             None => None,
         };
         if let Some(d) = &video_dec {
@@ -517,8 +527,17 @@ impl Player {
         if let Some(net) = &s.net {
             net.expect_first_read();
         }
-        s.ctl().seek = Some(SeekRequest { target, precise });
+        {
+            // Buffering from the request on, not only once the demux thread
+            // takes it: until then the frames queued for the old time would
+            // be judged against the new one, dropped as late and counted as
+            // a stall.
+            let mut c = s.ctl();
+            s.buffering.store(true, Ordering::Release);
+            c.seek = Some(SeekRequest { target, precise });
+        }
         // Reflect the new position immediately in the UI.
+        s.clock.pause();
         s.clock.set(target);
         s.ended.store(false, Ordering::Release);
         s.ctl_cv.notify_all();
@@ -1003,6 +1022,7 @@ fn reopen(restart: &Restart, current: &Input, at: f64, quit: Arc<AtomicBool>) ->
     let src = restart(at).map_err(Error::Unsupported)?;
     let mut next = Input::open(src, &current.name, quit)?;
     next.set_frame_sequential(current.frame_sequential());
+    next.set_deinterlace(current.deinterlace());
     next.start_at(at);
     if next.streams().len() != current.streams().len() {
         return Err(Error::Unsupported(format!(
@@ -1084,7 +1104,13 @@ fn video_thread(sh: Arc<Shared>, mut dec: Decoder, cap: usize) {
                                 continue;
                             }
                         };
-                        // Wait for room in the frame queue.
+                        // Wait for room in the frame queue, shorter for
+                        // frames that hold a decoder buffer.
+                        let cap = if vf.shared().is_some() {
+                            cap.min(crate::v4l2::SHARED_QUEUE)
+                        } else {
+                            cap
+                        };
                         let mut q = sh.frames();
                         while q.len() >= cap
                             && !sh.quit.load(Ordering::Acquire)
@@ -1519,6 +1545,18 @@ mod tests {
         let st = p.stats();
         assert!(st.last_jump.is_some_and(|j| j.skip));
         assert_ne!(st.serial, serial);
+    }
+
+    #[test]
+    fn a_skip_is_neither_a_stall_nor_dropped_frames() {
+        let p = open("h264_aac_180_LR.mp4", cfg());
+        run(&p, 2.0, |p, _| p.position() > 0.3);
+        // The frames queued ahead are behind the new time at once.
+        p.seek(p.position() + 1.0, true);
+        run(&p, 4.0, |p, _| p.state() == PlayerState::Ended);
+        let st = p.stats();
+        assert_eq!(p.state(), PlayerState::Ended);
+        assert_eq!((st.frames_dropped, st.stalls), (0, 0));
     }
 
     #[test]

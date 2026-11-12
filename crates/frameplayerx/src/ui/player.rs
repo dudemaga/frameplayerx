@@ -80,8 +80,8 @@ fn shows(choice: &VideoFormat, current: &VideoFormat) -> bool {
     projection && full(choice.stereo) == full(current.stereo)
 }
 
-/// `choice` picked in place of `current`: the eye order, a packed mask and
-/// a fisheye lens stay.
+/// `choice` picked in place of `current`: the eye order, a packed mask, the
+/// interlaced choice and a fisheye lens stay.
 fn picked(choice: VideoFormat, current: &VideoFormat) -> VideoFormat {
     let projection = match (choice.projection, current.projection) {
         (Projection::Fisheye { .. }, Projection::Fisheye { fov }) => Projection::Fisheye { fov },
@@ -91,6 +91,7 @@ fn picked(choice: VideoFormat, current: &VideoFormat) -> VideoFormat {
         projection,
         eyes_swapped: current.eyes_swapped,
         alpha_packed: current.alpha_packed,
+        interlaced: current.interlaced,
         ..choice
     }
 }
@@ -1012,8 +1013,8 @@ fn seek_bar(
     }
     let done = egui::Rect::from_min_max(track.min, egui::pos2(to_x(frac), track.bottom()));
     widgets::rail_fill(painter, track, done);
-    for (m, _) in &pb.markers {
-        let x = to_x((*m / duration).clamp(0.0, 1.0) as f32);
+    for m in &pb.markers {
+        let x = to_x((m.time / duration).clamp(0.0, 1.0) as f32);
         painter.circle_filled(egui::pos2(x, track.center().y), 3.0, theme::WARN);
     }
     let knob = egui::pos2(to_x(frac), track.center().y);
@@ -1022,11 +1023,11 @@ fn seek_bar(
     let to_time = |x: f32| ((x - track.left()) / track.width()).clamp(0.0, 1.0) as f64 * duration;
     if let Some(p) = resp.hover_pos().or(resp.interact_pointer_pos()) {
         let tm = to_time(p.x);
-        let marker = pb.markers.iter().find(|(m, _)| {
-            ((m / duration) as f32 * track.width() - (p.x - track.left())).abs() < 8.0
+        let marker = pb.markers.iter().find(|m| {
+            ((m.time / duration) as f32 * track.width() - (p.x - track.left())).abs() < 8.0
         });
         let label = match marker {
-            Some((_, name)) => format!("{} · {name}", fmt_time(tm)),
+            Some(m) => format!("{} · {}", fmt_time(tm), m.name),
             None => fmt_time(tm),
         };
         // A bubble above the track, on the panel's top layer. A marker's
@@ -1076,7 +1077,7 @@ fn seek_bar(
         let snap = pb
             .markers
             .iter()
-            .map(|m| m.0)
+            .map(|m| m.time)
             .find(|m| ((m - t) / duration).abs() * (track.width() as f64) < 8.0);
         actions.push(Action::Seek(snap.unwrap_or(t)));
     }
@@ -1110,18 +1111,36 @@ pub fn adjust_panel(ctx: &egui::Context, v: &mut View) {
                 .color(theme::TEXT),
         );
         ui.add_space(4.0);
+        if v.settings.presets.is_empty() {
+            v.state.presets_editing = false;
+        }
+        presets_row(
+            ui,
+            &v.settings.presets,
+            pb,
+            &mut v.state.presets_editing,
+            v.actions,
+        );
         // Haptics is the last tab, left out while haptics are off.
         let all = tabs();
         let tabs = &all[..all.len() - usize::from(!v.settings.haptics_enabled)];
         if v.state.adjust_tab >= tabs.len() {
             v.state.adjust_tab = 0;
         }
-        if let Some(i) = widgets::segmented(ui, tabs, v.state.adjust_tab) {
+        // No tab is lit while the presets are listed in place of its page.
+        let lit = if v.state.presets_editing {
+            usize::MAX
+        } else {
+            v.state.adjust_tab
+        };
+        if let Some(i) = widgets::segmented(ui, tabs, lit) {
             v.state.adjust_tab = i;
+            v.state.presets_editing = false;
         }
         ui.add_space(10.0);
+        let editing = v.state.presets_editing;
         // Save and reset stay at the bottom while the page scrolls.
-        let footer = v.state.adjust_tab <= 4;
+        let footer = !editing && v.state.adjust_tab <= 4;
         let footer_h = if footer { 64.0 } else { 0.0 };
         let page = ui.available_height() - footer_h;
         egui::ScrollArea::vertical()
@@ -1129,6 +1148,10 @@ pub fn adjust_panel(ctx: &egui::Context, v: &mut View) {
             .auto_shrink([false, false])
             .show_list(ui, |ui| {
                 ui.spacing_mut().item_spacing.y = 10.0;
+                if editing {
+                    presets_list(ui, &mut v.settings.presets, v.state);
+                    return;
+                }
                 let before = pb.settings;
                 match v.state.adjust_tab {
                     0 => format_tab(ui, pb, v.settings, v.actions),
@@ -1138,7 +1161,7 @@ pub fn adjust_panel(ctx: &egui::Context, v: &mut View) {
                             || (flat && (pb.settings.yaw, pb.settings.pitch) != (0.0, 0.0));
                         position_tab(ui, &mut pb.settings, flat, moved, v.actions);
                     }
-                    2 => stereo_tab(ui, &mut pb.settings),
+                    2 => stereo_tab(ui, &mut pb.settings, true),
                     3 => picture_tab(ui, &mut pb.settings),
                     4 => {
                         widgets::section_label(ui, tr!("settings-passthrough-videos"));
@@ -1148,8 +1171,7 @@ pub fn adjust_panel(ctx: &egui::Context, v: &mut View) {
                         ui.add_space(6.0);
                         chroma_tab(
                             ui,
-                            &mut pb.settings,
-                            pb.format,
+                            pb,
                             &v.settings.default_view,
                             v.passthrough_available,
                             v.actions,
@@ -1166,6 +1188,125 @@ pub fn adjust_panel(ctx: &egui::Context, v: &mut View) {
             adjust_footer(ui, pb, v.actions);
         }
     });
+}
+
+/// The presets, above the tabs since one gives a video everything saved for
+/// it; lit while the video has everything of one. New preset saves the
+/// video's, and Edit lists them to rename or delete in place of the page.
+fn presets_row(
+    ui: &mut egui::Ui,
+    presets: &[fp_core::view::Preset],
+    pb: &crate::playback::Playback,
+    editing: &mut bool,
+    actions: &mut Vec<Action>,
+) {
+    let matching = pb.matching_preset(presets);
+    ui.horizontal_wrapped(|ui| {
+        ui.spacing_mut().item_spacing = Vec2::new(8.0, 8.0);
+        ui.label(RichText::new(tr!("adjust-presets")).color(theme::TEXT_2));
+        for (i, preset) in presets.iter().enumerate() {
+            if widgets::chip(ui, &preset.name, matching == Some(i)).clicked() {
+                actions.push(Action::ApplyPreset(i));
+            }
+        }
+        if presets.len() < crate::settings::MAX_PRESETS
+            && widgets::chip_icon(ui, Some(icons::PLUS), tr!("adjust-preset-new"), false)
+                .tip(tr!("adjust-preset-new-tip"))
+                .clicked()
+        {
+            actions.push(Action::SavePreset);
+        }
+        if !presets.is_empty()
+            && widgets::chip_icon(
+                ui,
+                Some(icons::PENCIL_SIMPLE),
+                tr!("adjust-preset-edit"),
+                *editing,
+            )
+            .clicked()
+        {
+            *editing = !*editing;
+        }
+    });
+    ui.add_space(8.0);
+}
+
+/// The presets to rename or delete, in place of the tab's page while Edit
+/// is on; Delete asks again first, as a playlist's does.
+fn presets_list(
+    ui: &mut egui::Ui,
+    presets: &mut Vec<fp_core::view::Preset>,
+    state: &mut super::UiState,
+) {
+    let armed = state
+        .preset_delete_armed
+        .filter(|(_, at)| at.elapsed().as_secs_f32() < 4.0)
+        .map(|(i, _)| i);
+    let (mut delete, mut renamed) = (None, false);
+    widgets::rows(ui, |r| {
+        for (i, preset) in presets.iter_mut().enumerate() {
+            let title = preset.name.clone();
+            r.row(&title, None, |ui| match &mut state.preset_renaming {
+                Some((at, typed)) if *at == i => {
+                    let name = typed.trim().to_string();
+                    let save = ui.add_enabled_ui(!name.is_empty(), |ui| {
+                        widgets::button(ui, Some(icons::CHECK), tr!("common-save"), Kind::Primary)
+                    });
+                    ui.add(
+                        egui::TextEdit::singleline(typed)
+                            .margin(egui::Margin::symmetric(12, 9))
+                            .font(theme::font(Weight::Regular, 17.0))
+                            .desired_width(200.0),
+                    );
+                    if save.inner.clicked() {
+                        preset.name = name;
+                        renamed = true;
+                    }
+                }
+                _ => {
+                    let (label, kind) = if armed == Some(i) {
+                        (tr!("adjust-preset-delete-confirm"), Kind::Danger)
+                    } else {
+                        (tr!("adjust-preset-delete"), Kind::Secondary)
+                    };
+                    if widgets::button(ui, Some(icons::TRASH), label, kind).clicked() {
+                        if armed == Some(i) {
+                            delete = Some(i);
+                        } else {
+                            state.preset_delete_armed = Some((i, std::time::Instant::now()));
+                        }
+                    }
+                    if widgets::button(
+                        ui,
+                        Some(icons::PENCIL_SIMPLE),
+                        tr!("adjust-preset-rename"),
+                        Kind::Secondary,
+                    )
+                    .clicked()
+                    {
+                        state.preset_renaming = Some((i, preset.name.clone()));
+                    }
+                }
+            });
+        }
+    });
+    if armed.is_some() {
+        ui.ctx()
+            .request_repaint_after(std::time::Duration::from_millis(500));
+    }
+    if let Some(i) = delete {
+        presets.remove(i);
+        state.preset_delete_armed = None;
+        state.preset_renaming = None;
+    }
+    if renamed {
+        state.preset_renaming = None;
+    }
+    ui.add_space(6.0);
+    if widgets::button(ui, Some(icons::CHECK), tr!("common-done"), Kind::Primary).clicked() {
+        state.presets_editing = false;
+        state.preset_renaming = None;
+    }
 }
 
 /// Format tab: the format list, the eye order, and a fisheye's lens with
@@ -1190,13 +1331,36 @@ fn format_tab(
     } else if let Some(f) = format_list(ui, &pb.format, pb.record_id.is_some(), fisheye_start) {
         actions.push(Action::SetFormat(Some(f)));
     }
-    if pb.format.stereo.is_stereo() {
+    // Interlaced is on while deinterlacing; a change reopens the video,
+    // which needs it in the library to remember.
+    let interlaced = pb
+        .player
+        .info()
+        .video_stream()
+        .filter(|v| pb.record_id.is_some() && !blu_ray && !v.frame_sequential)
+        .map(|v| v.deinterlaced);
+    let stereo = pb.format.stereo.is_stereo();
+    if stereo || interlaced.is_some() {
         widgets::rows(ui, |r| {
-            r.switch(
-                tr!("adjust-swap-eyes"),
-                Some(tr!("adjust-swap-eyes-desc")),
-                &mut s.swap_eyes,
-            );
+            if stereo {
+                r.switch(
+                    tr!("adjust-swap-eyes"),
+                    Some(tr!("adjust-swap-eyes-desc")),
+                    &mut s.swap_eyes,
+                );
+            }
+            if let Some(mut on) = interlaced
+                && r.switch(
+                    tr!("adjust-interlaced"),
+                    Some(tr!("adjust-interlaced-desc")),
+                    &mut on,
+                )
+            {
+                actions.push(Action::SetFormat(Some(VideoFormat {
+                    interlaced: Some(on),
+                    ..pb.format
+                })));
+            }
         });
     }
     if let Projection::Fisheye { fov } = pb.format.projection {
@@ -1414,7 +1578,9 @@ fn position_tab(
     background_controls(ui, &mut s.background);
 }
 
-fn stereo_tab(ui: &mut egui::Ui, s: &mut ViewSettings) {
+/// Depth and eye alignment, with subtitle depth unless `subtitles` is off
+/// (Settings has it with the subtitles).
+pub(super) fn stereo_tab(ui: &mut egui::Ui, s: &mut ViewSettings, subtitles: bool) {
     let d = ViewSettings::default();
     widgets::rows(ui, |r| {
         r.slider(
@@ -1444,19 +1610,21 @@ fn stereo_tab(ui: &mut egui::Ui, s: &mut ViewSettings) {
             "°",
             1,
         );
-        r.slider(
-            tr!("settings-subtitle-depth"),
-            None,
-            &mut s.subtitle_distance,
-            0.8..=10.0,
-            d.subtitle_distance,
-            " m",
-            1,
-        );
+        if subtitles {
+            r.slider(
+                tr!("settings-subtitle-depth"),
+                None,
+                &mut s.subtitle_distance,
+                0.8..=10.0,
+                d.subtitle_distance,
+                " m",
+                1,
+            );
+        }
     });
 }
 
-fn picture_tab(ui: &mut egui::Ui, s: &mut ViewSettings) {
+pub(super) fn picture_tab(ui: &mut egui::Ui, s: &mut ViewSettings) {
     widgets::rows(ui, |r| {
         r.slider(
             tr!("adjust-brightness"),
@@ -1566,15 +1734,18 @@ fn key_colors() -> [(&'static str, [f32; 3]); 3] {
 
 /// Passthrough tab: the video's own packed mask (`_alpha` videos) or a
 /// chroma key, so the room shows where the video's background was. The key
-/// follows Settings > Passthrough until it is changed here for this video.
+/// follows Settings > Passthrough until it is changed here for this video,
+/// its colour the one found in the video until one is picked.
 fn chroma_tab(
     ui: &mut egui::Ui,
-    s: &mut ViewSettings,
-    format: VideoFormat,
+    pb: &mut crate::playback::Playback,
     global: &ViewSettings,
     passthrough_available: bool,
     actions: &mut Vec<Action>,
 ) {
+    let found = pb.found_colour();
+    let format = pb.format;
+    let s = &mut pb.settings;
     widgets::rows(ui, |r| {
         let mut packed = format.alpha_packed;
         let desc = if packed && format.alpha_pack_scale().is_none() {
@@ -1599,26 +1770,38 @@ fn chroma_tab(
             &mut own,
         ) {
             if own {
-                s.set_key(global);
+                s.set_key(&ViewSettings {
+                    key_color: found.unwrap_or(global.key_color),
+                    ..*global
+                });
             }
             s.key_own = Some(own);
             actions.push(Action::SaveKey);
         }
     });
     let mut shown = s.with_global_key(global);
-    if chroma_controls(ui, &mut shown, passthrough_available) {
+    if let Some(c) = found {
+        shown.key_color = c;
+    }
+    let colour = shown.key_color;
+    if chroma_controls(ui, &mut shown, passthrough_available, found.is_some()) {
         s.set_key(&shown);
         s.key_own = Some(true);
         actions.push(Action::SaveKey);
+        if shown.key_color != colour {
+            pb.colour_picked();
+        }
     }
 }
 
 /// "Remove the background" and its colour and fine-tune controls, for one
-/// video or the global default. True when anything changed.
+/// video or the global default; `found` when its colour is the one found
+/// in the video. True when anything changed.
 pub(super) fn chroma_controls(
     ui: &mut egui::Ui,
     s: &mut ViewSettings,
     passthrough_available: bool,
+    found: bool,
 ) -> bool {
     let before = s.key();
     let d = ViewSettings::default();
@@ -1635,7 +1818,13 @@ pub(super) fn chroma_controls(
     });
     if s.chroma_key {
         premium::label(ui, tr!("adjust-chroma-colour-heading"));
-        colour_picker(ui, &key_colors(), &mut s.key_color, d.key_color);
+        colour_picker(
+            ui,
+            &key_colors(),
+            &mut s.key_color,
+            d.key_color,
+            found.then_some(tr!("adjust-chroma-found")),
+        );
         premium::label(ui, tr!("adjust-fine-tune"));
         widgets::rows(ui, |r| {
             r.slider(
@@ -1689,16 +1878,17 @@ pub(super) fn background_controls(ui: &mut egui::Ui, c: &mut [f32; 3]) {
             .font(theme::font(Weight::Regular, 15.0))
             .color(theme::TEXT_3),
     );
-    colour_picker(ui, &backgrounds(), c, fp_core::view::BACKGROUND);
+    colour_picker(ui, &backgrounds(), c, fp_core::view::BACKGROUND, None);
 }
 
-/// A colour, sRGB 0..1: `choices` as one-tap swatches, then a preview and
-/// red, green and blue sliders that reset to `default`.
+/// A colour, sRGB 0..1: `choices` as one-tap swatches, then a preview with
+/// `desc` beside it and red, green and blue sliders that reset to `default`.
 fn colour_picker(
     ui: &mut egui::Ui,
     choices: &[(&str, [f32; 3])],
     c: &mut [f32; 3],
     default: [f32; 3],
+    desc: Option<&str>,
 ) {
     ui.horizontal_wrapped(|ui| {
         ui.spacing_mut().item_spacing = Vec2::new(8.0, 8.0);
@@ -1710,7 +1900,7 @@ fn colour_picker(
         }
     });
     widgets::rows(ui, |r| {
-        r.row(tr!("adjust-chroma-colour"), None, |ui| {
+        r.row(tr!("adjust-chroma-colour"), desc, |ui| {
             let [cr, cg, cb] = c.map(|x| (x.clamp(0.0, 1.0) * 255.0) as u8);
             let (rect, _) = ui.allocate_exact_size(Vec2::new(64.0, 32.0), Sense::hover());
             let p = ui.painter();
@@ -1741,13 +1931,21 @@ fn chapters_tab(ui: &mut egui::Ui, pb: &crate::playback::Playback, actions: &mut
     } else {
         widgets::section_label(ui, tr!("adjust-chapters-heading"));
         widgets::rows(ui, |r| {
-            for (t, name) in &pb.markers {
-                r.row(name, Some(fmt_time(*t).as_str()), |ui| {
+            for (i, m) in pb.markers.iter().enumerate() {
+                r.row(&m.name, Some(fmt_time(m.time).as_str()), |ui| {
+                    // Laid out right to left: Go stays where it was.
                     if widgets::icon_button(ui, icons::PLAY, 40.0, false)
                         .tip(tr!("adjust-chapter-go"))
                         .clicked()
                     {
-                        actions.push(Action::Seek(*t));
+                        actions.push(Action::Seek(m.time));
+                    }
+                    if m.bookmark.is_some()
+                        && widgets::icon_button(ui, icons::TRASH, 40.0, false)
+                            .tip(tr!("adjust-bookmark-remove"))
+                            .clicked()
+                    {
+                        actions.push(Action::RemoveBookmark(i));
                     }
                 });
             }

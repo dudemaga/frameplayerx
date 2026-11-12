@@ -64,6 +64,8 @@ pub enum SourceKind {
     HereSphere,
     /// An SMB2/3 share.
     Smb,
+    /// A folder on an SFTP (SSH) server.
+    Sftp,
     /// A Jellyfin or Emby media server (MediaBrowser API).
     #[serde(rename = "mediabrowser")]
     MediaBrowser,
@@ -83,6 +85,7 @@ impl SourceKind {
             SourceKind::DeoVr => "DeoVR feed",
             SourceKind::HereSphere => "HereSphere API",
             SourceKind::Smb => "SMB share",
+            SourceKind::Sftp => "SFTP server",
             SourceKind::MediaBrowser => "Jellyfin/Emby",
             SourceKind::Plex => "Plex",
         }
@@ -218,6 +221,51 @@ pub struct SmbConfig {
     /// Login; guest access when absent.
     #[serde(default)]
     pub credentials: Option<Credentials>,
+}
+
+/// A folder on an SFTP (SSH) server.
+#[derive(Clone, PartialEq, Serialize, Deserialize)]
+pub struct SftpConfig {
+    /// Stable identifier chosen by the app.
+    pub id: String,
+    pub name: String,
+    /// Server host name or IP address.
+    pub host: String,
+    /// TCP port; 22 when absent.
+    #[serde(default)]
+    pub port: Option<u16>,
+    /// Folder shown at the root of the source: empty for the user's home
+    /// folder, `~/Videos` for one inside it, `/srv/media` for any other.
+    #[serde(default)]
+    pub path: String,
+    /// The user to sign in as, and the password, tried after the key file.
+    pub credentials: Option<Credentials>,
+    /// A private key on the headset to sign in with: OpenSSH, PKCS#8 or
+    /// PuTTY (`.ppk`).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub key_file: Option<PathBuf>,
+    /// The key file's passphrase, when it has one.
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub key_passphrase: String,
+    /// The server's public key in OpenSSH form, trusted when the source was
+    /// first used; a server showing another one is refused.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub host_key: Option<String>,
+}
+
+impl fmt::Debug for SftpConfig {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("SftpConfig")
+            .field("id", &self.id)
+            .field("name", &self.name)
+            .field("host", &self.host)
+            .field("port", &self.port)
+            .field("path", &self.path)
+            .field("credentials", &self.credentials)
+            .field("key_file", &self.key_file)
+            .field("host_key", &self.host_key)
+            .finish_non_exhaustive()
+    }
 }
 
 /// A Jellyfin or Emby media server (MediaBrowser API).
@@ -384,6 +432,8 @@ pub enum SourceConfig {
     HereSphere(FeedConfig),
     /// An SMB2/3 share.
     Smb(SmbConfig),
+    /// A folder on an SFTP (SSH) server.
+    Sftp(SftpConfig),
     /// A Jellyfin or Emby media server.
     #[serde(rename = "mediabrowser")]
     MediaBrowser(MediaBrowserConfig),
@@ -400,6 +450,7 @@ impl SourceConfig {
             SourceConfig::Dlna(c) => &c.id,
             SourceConfig::DeoVr(c) | SourceConfig::HereSphere(c) => &c.id,
             SourceConfig::Smb(c) => &c.id,
+            SourceConfig::Sftp(c) => &c.id,
             SourceConfig::MediaBrowser(c) => &c.id,
             SourceConfig::Plex(c) => &c.id,
         }
@@ -414,6 +465,7 @@ impl SourceConfig {
             SourceConfig::Dlna(c) => &c.name,
             SourceConfig::DeoVr(c) | SourceConfig::HereSphere(c) => &c.name,
             SourceConfig::Smb(c) => &c.name,
+            SourceConfig::Sftp(c) => &c.name,
             SourceConfig::MediaBrowser(c) => &c.name,
             SourceConfig::Plex(c) => &c.name,
         }
@@ -430,6 +482,7 @@ impl SourceConfig {
             SourceConfig::DeoVr(_) => SourceKind::DeoVr,
             SourceConfig::HereSphere(_) => SourceKind::HereSphere,
             SourceConfig::Smb(_) => SourceKind::Smb,
+            SourceConfig::Sftp(_) => SourceKind::Sftp,
             SourceConfig::MediaBrowser(_) => SourceKind::MediaBrowser,
             SourceConfig::Plex(_) => SourceKind::Plex,
         }
@@ -448,6 +501,7 @@ impl SourceConfig {
             SourceConfig::Dlna(c) => redact(&c.location),
             SourceConfig::DeoVr(c) | SourceConfig::HereSphere(c) => redact(&c.url),
             SourceConfig::Smb(c) => crate::smb::smb_url(&c.host, c.port, &c.share, &c.path),
+            SourceConfig::Sftp(c) => crate::sftp::sftp_url(&c.host, c.port, &c.path),
             SourceConfig::MediaBrowser(c) => redact(&c.url),
             SourceConfig::Plex(c) => redact(&c.url),
         }
@@ -598,6 +652,17 @@ mod tests {
                 max_height: Some(2880),
                 access_token: None,
                 user_id: None,
+            }),
+            SourceConfig::Sftp(SftpConfig {
+                id: "sf".into(),
+                name: "Desktop".into(),
+                host: "pc.local".into(),
+                port: Some(2222),
+                path: "~/Videos".into(),
+                credentials: Some(Credentials::new("carol", String::new())),
+                key_file: Some("/home/steamos/.ssh/desktop.ppk".into()),
+                key_passphrase: "hunter2".into(),
+                host_key: Some("ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIA".into()),
             }),
         ]
     }

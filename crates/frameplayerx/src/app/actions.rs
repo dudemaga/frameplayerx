@@ -5,12 +5,13 @@ use super::*;
 impl App {
     pub(crate) fn apply(&mut self, a: Action) {
         match a {
+            // Up next is this video alone.
             Action::Open(req) => {
-                self.queue.clear();
+                self.queue.set(vec![req.clone()], 0);
                 self.open_request(req);
             }
-            Action::OpenList(list, pos) => self.open_list(list, pos, false),
-            Action::PlayAll(list, pos) => self.open_list(list, pos, true),
+            Action::PlayAll(list, pos) => self.play_all(list, pos),
+            Action::CatalogPlayAll { source, query } => self.catalog_play_all(source, query),
             Action::Queue { req, next } => self.queue_video(req, next),
             Action::QueueJump(i) => {
                 if let Some(req) = self.queue.jump(i).cloned() {
@@ -85,15 +86,18 @@ impl App {
                     if !was_flat {
                         p.place_flat(self.offsets.main[0]);
                     }
-                    // Frame sequential video decodes differently.
-                    let paired = p
-                        .player
-                        .info()
-                        .video_stream()
-                        .is_some_and(|v| v.frame_sequential);
+                    // Frame sequential and deinterlaced video decode
+                    // differently.
+                    let v = p.player.info().video_stream();
+                    let paired = v.is_some_and(|v| v.frame_sequential);
+                    let sequential =
+                        p.format.stereo == fp_core::format::StereoLayout::FrameSequential;
+                    let deinterlaced = v.is_some_and(|v| v.deinterlaced);
+                    let interlaced = v.is_some_and(|v| {
+                        !v.mvc && !sequential && p.format.interlaced.unwrap_or(v.interlaced)
+                    });
                     reopen = p.record_id.is_some()
-                        && paired
-                            != (p.format.stereo == fp_core::format::StereoLayout::FrameSequential);
+                        && (paired != sequential || deinterlaced != interlaced);
                 }
                 if reopen {
                     self.reopen();
@@ -120,11 +124,23 @@ impl App {
                 p.settings = s.new_video_view();
                 p.keyframes = Default::default();
             }),
+            Action::SavePreset => {
+                if let Some(p) = &self.playback {
+                    let (view, format) = p.preset_parts();
+                    if let Some(name) = self.settings.add_preset(view, format) {
+                        self.ui.toast(tr!("toast-preset-saved", name = name));
+                    }
+                }
+            }
+            Action::ApplyPreset(i) => {
+                self.apply_preset(i);
+            }
             Action::AddKeyframe => self.edit_view(|p, _| {
                 p.keyframes.insert(p.player.position(), p.settings);
             }),
             Action::ClearKeyframes => self.edit_view(|p, _| p.keyframes = Default::default()),
             Action::AddBookmark => self.add_bookmark(),
+            Action::RemoveBookmark(i) => self.remove_bookmark(i),
             Action::SelectAudio(i) => {
                 if let Some(p) = &mut self.playback {
                     p.player.select_audio(i);
@@ -330,9 +346,9 @@ impl App {
         self.playback.as_ref().map(|p| &p.player)
     }
 
-    fn open_list(&mut self, list: Vec<OpenRequest>, pos: usize, plays_through: bool) {
+    fn play_all(&mut self, list: Vec<OpenRequest>, pos: usize) {
         if let Some(req) = list.get(pos).cloned() {
-            self.queue.set(list, pos, plays_through);
+            self.queue.set(list, pos);
             self.open_request(req);
         }
     }
@@ -343,7 +359,7 @@ impl App {
     fn queue_video(&mut self, req: OpenRequest, next: bool) {
         let title = ui::widgets::display_title(&req.shown_title());
         let Some(playing) = self.playback.as_ref().map(|p| p.request.clone()) else {
-            self.queue.set(vec![req.clone()], 0, true);
+            self.queue.set(vec![req.clone()], 0);
             self.open_request(req);
             return;
         };
@@ -447,16 +463,63 @@ impl App {
         }
     }
 
+    /// Sets the preset after the one the playing video matches, and names it.
+    pub(super) fn next_preset(&mut self) {
+        let Some(p) = &self.playback else { return };
+        let next = self
+            .settings
+            .next_preset(p.matching_preset(&self.settings.presets));
+        match next.and_then(|i| self.apply_preset(i)) {
+            Some(name) => self.ui.toast(tr!("toast-preset", name = name)),
+            None => self.ui.toast(tr!("toast-no-presets")),
+        }
+    }
+
+    /// Gives the playing video preset `i`, and its name: the adjustments, a
+    /// changed chroma key saved at once as the Passthrough tab saves it,
+    /// then the format, last since a format change can open the video again.
+    fn apply_preset(&mut self, i: usize) -> Option<String> {
+        let preset = self.settings.presets.get(i)?.clone();
+        let p = self.playback.as_mut()?;
+        let flat = preset.format.unwrap_or(p.format).projection == Projection::Flat;
+        let key = (p.settings.key(), p.settings.key_own);
+        p.settings = preset.view_for(&p.settings, flat);
+        p.settings_dirty = true;
+        if (p.settings.key(), p.settings.key_own) != key {
+            p.key_changed();
+            if p.settings.own_key() {
+                p.colour_picked();
+            }
+        }
+        if let Some(f) = preset.format
+            && p.picked_format() != Some(f)
+        {
+            self.apply(Action::SetFormat(Some(f)));
+        }
+        Some(preset.name)
+    }
+
     fn add_bookmark(&mut self) {
         let Some(p) = &mut self.playback else { return };
         match p.add_bookmark(&self.services.library) {
-            Ok(()) => self.ui.toast(tr!("toast-bookmark-added")),
+            Ok(true) => self.ui.toast(tr!("toast-bookmark-added")),
+            Ok(false) => self.ui.toast(tr!("toast-bookmark-exists")),
             Err(e) => self.not_saved(
                 "the bookmark",
                 |e| tr!("error-save-bookmark", error = e),
                 &e,
             ),
         }
+    }
+
+    fn remove_bookmark(&mut self, index: usize) {
+        let Some(p) = &mut self.playback else { return };
+        if let Err(e) = p.remove_bookmark(index, &self.services.library) {
+            log::warn!("removing a bookmark: {e}");
+            self.ui
+                .toast(tr!("error-remove-bookmark", error = e.to_string()));
+        }
+        self.ui.invalidate();
     }
 
     fn select_subtitle_file(&mut self, i: Option<usize>) {

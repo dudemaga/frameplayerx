@@ -59,6 +59,19 @@ pub enum Error {
     /// SMB support is not available in this build.
     #[error("SMB unavailable: {0}")]
     SmbUnavailable(String),
+    #[error("SFTP error: {0}")]
+    Sftp(String),
+    /// SFTP support is not available in this build.
+    #[error("SFTP unavailable: {0}")]
+    SftpUnavailable(String),
+    /// The server's key isn't the one trusted for the source: another
+    /// machine answers at its address, or the server was reinstalled.
+    #[error("{0}: the server's key changed")]
+    HostKeyChanged(String),
+    /// The key file is password-protected and the passphrase is missing or
+    /// doesn't unlock it.
+    #[error("{0}: the key file's passphrase is missing or wrong")]
+    KeyPassphrase(String),
     #[error("invalid source configuration: {0}")]
     Config(String),
 }

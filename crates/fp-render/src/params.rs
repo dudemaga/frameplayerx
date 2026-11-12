@@ -34,6 +34,37 @@ pub(crate) struct SceneParams {
     pub key2: Vec4,
     pub viewer: Vec4,
     pub display: [u32; 4],
+    pub hdr: Vec4,
+    pub tp10: Vec4,
+    pub tp10_uv: Vec4,
+}
+
+/// Sets `p` up for a Q10C picture of `height` rows sampled where it lies
+/// (`planes_tp10.wgsl`), read in bands `luma` and `chroma`.
+pub(crate) fn sample_tp10(
+    p: &mut SceneParams,
+    height: u32,
+    luma: crate::q10c::SampleBands,
+    chroma: crate::q10c::SampleBands,
+) {
+    let bands = |b: crate::q10c::SampleBands, rows: u32| {
+        Vec4::new(b.step as f32, b.rows as f32, rows as f32, b.count as f32)
+    };
+    // TP10 reads 10-bit values as they are; P010 keeps them at the top of 16.
+    p.yuv_offset.w = 1.0;
+    p.tp10 = bands(luma, height);
+    p.tp10_uv = bands(chroma, height.div_ceil(2));
+}
+
+/// The shader's `hdr`: an HDR scene peaking at `peak` nits on the screen's
+/// white, both PQ-coded.
+pub(crate) fn hdr_levels(peak: f32) -> Vec4 {
+    Vec4::new(
+        crate::hdr::pq_from_nits(peak),
+        crate::hdr::pq_from_nits(crate::hdr::SDR_WHITE),
+        0.0,
+        0.0,
+    )
 }
 
 /// Everything about the video that the projection pass needs, other than
@@ -250,6 +281,9 @@ pub(crate) fn build(
         ),
         viewer: glam::vec3(0.0, s.height, -s.forward).extend(SPHERE_RADIUS),
         display: [turns, 0, 0, 0],
+        hdr: hdr_levels(crate::hdr::DEFAULT_PEAK),
+        tp10: Vec4::ZERO,
+        tp10_uv: Vec4::ZERO,
     }
 }
 

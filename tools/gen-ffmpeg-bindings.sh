@@ -8,7 +8,7 @@ crate="$root/crates/fp-ffmpeg-sys"
 gen() { # arch clang-target sysroot-args...
   local arch="$1" target="$2"; shift 2
   bindgen "$crate/wrapper.h" -o "$crate/src/bindings_$arch.rs" \
-    --allowlist-function '(av|avformat|avcodec|avio|avsubtitle|swr|sws|av_bsf)_.*' \
+    --allowlist-function '(av|avformat|avcodec|avfilter|avio|avsubtitle|swr|sws|av_bsf)_.*' \
     --allowlist-type '(AV|Swr|Sws).*' \
     --allowlist-var '(AV_|AVERROR_|AVFMT_|AVIO_|AVSEEK_|SWS_|FF_|LIBAV).*' \
     --default-enum-style consts --no-prepend-enum-name \

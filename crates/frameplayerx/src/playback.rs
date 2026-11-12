@@ -16,7 +16,8 @@ use fp_media::{Cue, Player, PlayerConfig, PlayerState, StreamInfo};
 use fp_sources::sidecar::subtitle_file;
 use fp_sources::urlutil::last_segment;
 use fp_sources::{Source, TranscodeTarget};
-use std::sync::{Arc, Mutex};
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::{Arc, Mutex, mpsc};
 use std::thread::JoinHandle;
 use std::time::{Duration, Instant};
 
@@ -104,8 +105,13 @@ pub struct Playback {
     /// and when it was last saved: slider drags save twice a second.
     key_pending: bool,
     key_saved_at: Instant,
+    pub backdrop: BackdropSearch,
+    /// No colour is picked for this video's chroma key, so it starts with
+    /// the one found in it: none had its own key when opened, and none was
+    /// picked since.
+    colour_open: bool,
     pub heatmap: Option<Heatmap>,
-    pub markers: Vec<(f64, String)>,
+    pub markers: Vec<Marker>,
     pub subtitle_files: Vec<SubtitleFile>,
     pub active_subtitle_file: Option<usize>,
     /// The subtitles Subtitles on / off last turned off, to turn back on.
@@ -125,6 +131,140 @@ pub struct Playback {
     /// What the server is transcoding it to; `None` for the file as it is.
     pub transcoding: Option<TranscodeTarget>,
     pub source_tracks: Vec<fp_sources::PlaybackTrack>,
+}
+
+/// The size, each way, the backdrop's picture is scaled to fit: plenty of
+/// samples to tell a backdrop, cheap to decode into.
+const BACKDROP_PICTURE: u32 = 160;
+
+/// Where the search for a video's backdrop colour has got to.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub enum Backdrop {
+    /// Not started yet, or its picture is being decoded.
+    Looking,
+    /// Its colour at full strength ([`fp_render::backdrop::pure`]).
+    Found([f32; 3]),
+    /// The middle of the video shows none.
+    NotFound,
+}
+
+/// The search for a video's backdrop colour, the colour its chroma key
+/// starts with: the keyframe in the middle of the video, so a studio's
+/// intro doesn't decide it, decoded in software by a second reader of the
+/// file playback opened (for a transcode, the original).
+pub struct BackdropSearch {
+    source_id: Option<String>,
+    location: String,
+    pub state: Backdrop,
+    answer: Option<mpsc::Receiver<Option<[f32; 3]>>>,
+    /// Stops the search's reads when the video closes.
+    stop: Arc<AtomicBool>,
+}
+
+impl BackdropSearch {
+    pub fn new(source_id: Option<String>, location: String) -> BackdropSearch {
+        BackdropSearch {
+            source_id,
+            location,
+            state: Backdrop::Looking,
+            answer: None,
+            stop: Arc::new(AtomicBool::new(false)),
+        }
+    }
+
+    /// Starts the search on a thread of its own, once. `duration` stands in
+    /// when the file doesn't say how long it is.
+    pub fn start(&mut self, opener: Arc<Opener>, duration: f64) {
+        if self.answer.is_some() || self.state != Backdrop::Looking {
+            return;
+        }
+        let (tx, rx) = mpsc::channel();
+        let (source_id, location, stop) = (
+            self.source_id.clone(),
+            self.location.clone(),
+            self.stop.clone(),
+        );
+        let spawned = std::thread::Builder::new()
+            .name("backdrop".into())
+            .spawn(move || {
+                crate::prober::background();
+                let began = Instant::now();
+                let found =
+                    middle_backdrop(&opener, source_id.as_deref(), &location, duration, stop)
+                        .unwrap_or_else(|e| {
+                            log::warn!("looking for the backdrop of {location}: {e}");
+                            None
+                        });
+                log::info!(
+                    "backdrop search: {:.2} s, {}",
+                    began.elapsed().as_secs_f64(),
+                    if found.is_some() { "found" } else { "none" }
+                );
+                let _ = tx.send(found);
+            });
+        match spawned {
+            Ok(_) => self.answer = Some(rx),
+            Err(e) => {
+                log::warn!("looking for the backdrop: {e}");
+                self.state = Backdrop::NotFound;
+            }
+        }
+    }
+
+    /// Takes the search's answer once it has one.
+    pub fn poll(&mut self) {
+        let Some(rx) = &self.answer else {
+            return;
+        };
+        let found = match rx.try_recv() {
+            Ok(found) => found,
+            Err(mpsc::TryRecvError::Empty) => return,
+            Err(mpsc::TryRecvError::Disconnected) => None,
+        };
+        self.answer = None;
+        self.state = match found {
+            Some(c) => {
+                let pure = fp_render::backdrop::pure(c);
+                log::info!("the video's backdrop is sRGB {c:.2?}, keyed as {pure:.2?}");
+                Backdrop::Found(pure)
+            }
+            None => Backdrop::NotFound,
+        };
+    }
+}
+
+impl Drop for BackdropSearch {
+    fn drop(&mut self) {
+        self.stop.store(true, Ordering::Release);
+    }
+}
+
+/// The backdrop in the keyframe at the middle of `location`, the file read
+/// anew through `opener`; `stop` makes its reads fail.
+fn middle_backdrop(
+    opener: &Opener,
+    source_id: Option<&str>,
+    location: &str,
+    duration: f64,
+    stop: Arc<AtomicBool>,
+) -> Result<Option<[f32; 3]>, String> {
+    let src = opener.open_in(source_id, location)?;
+    let mut grabber = fp_media::thumb::Grabber::open(src, &last_segment(location), stop)
+        .map_err(|e| e.to_string())?;
+    let length = Some(grabber.info().duration)
+        .filter(|d| *d > 0.0)
+        .unwrap_or(duration);
+    // A still or a moment's clip has no middle to seek to.
+    let middle = if length > 1.0 { length / 2.0 } else { 0.0 };
+    let picture = grabber
+        .grab(
+            middle,
+            BACKDROP_PICTURE,
+            BACKDROP_PICTURE,
+            fp_media::thumb::Crop::Full,
+        )
+        .map_err(|e| e.to_string())?;
+    Ok(fp_render::backdrop::find(&picture.pixels))
 }
 
 /// The result of opening on a background thread.
@@ -381,11 +521,7 @@ pub fn open(
             src.transcode_targets(&video)
         })
         .unwrap_or_default();
-    // Frame sequential or not as the viewer last said, else by the labels.
-    let frame_sequential = record
-        .as_ref()
-        .and_then(|r| r.user_format)
-        .map(|f| f.stereo == format::StereoLayout::FrameSequential);
+    let user_format = record.as_ref().and_then(|r| r.user_format);
     let duration = entry
         .as_ref()
         .and_then(|e| e.duration)
@@ -405,7 +541,7 @@ pub fn open(
                 duration,
                 restart: t.seekable.then_some(restart),
             }),
-            ..player_config(settings, 0.0, frame_sequential)
+            ..player_config(settings, 0.0, user_format)
         };
         open_player(stream, config).map_err(|e| fail(crate::ui::errors::media(&e)))
     };
@@ -440,9 +576,7 @@ pub fn open(
                     .map(Some),
             }
             .map_err(failed)?;
-            match src
-                .map(|src| open_player(src, player_config(settings, start_at, frame_sequential)))
-            {
+            match src.map(|src| open_player(src, player_config(settings, start_at, user_format))) {
                 Some(Ok((p, pick))) => (p, pick, None),
                 Some(Err(e))
                     if e.cannot_play_here()
@@ -542,6 +676,7 @@ pub fn open(
             None => Watch::start(reports, src, &video, start_at),
         }
     });
+    let backdrop = BackdropSearch::new(req.source_id.clone(), location.clone());
     Ok(Opened {
         playback: Playback {
             player,
@@ -563,6 +698,8 @@ pub fn open(
             saved_settings: settings_v,
             key_pending: false,
             key_saved_at: Instant::now(),
+            backdrop,
+            colour_open: !settings_v.own_key(),
             keyframes,
             settings_dirty: false,
             heatmap,
@@ -601,10 +738,12 @@ fn restart_at(
     })
 }
 
+/// The player's settings for a video, frame sequential and interlaced or not
+/// as the viewer last said in `user_format`, else by its labels and headers.
 fn player_config(
     settings: &Settings,
     start_at: f64,
-    frame_sequential: Option<bool>,
+    user_format: Option<VideoFormat>,
 ) -> PlayerConfig {
     PlayerConfig {
         hw_decode: if settings.hardware_decoding {
@@ -618,7 +757,8 @@ fn player_config(
         },
         start_at,
         volume: settings.volume,
-        frame_sequential,
+        frame_sequential: user_format.map(|f| f.stereo == format::StereoLayout::FrameSequential),
+        deinterlace: user_format.and_then(|f| f.interlaced),
         ..Default::default()
     }
 }
@@ -814,29 +954,99 @@ pub fn read_subtitle_file(opener: &Opener, file: &SubtitleFile) -> Result<Vec<Cu
     read
 }
 
+/// A place on the video's timeline: a chapter, a marker its source gives,
+/// or the viewer's bookmark.
+#[derive(Clone, Debug, PartialEq)]
+pub struct Marker {
+    pub time: f64,
+    pub name: String,
+    /// For the viewer's bookmark, which they can remove: the library's rows
+    /// it shows, more than one where the same bookmark was added again
+    /// before that was prevented, none for a video not in the library.
+    pub bookmark: Option<Vec<fp_library::MarkerId>>,
+}
+
+impl Marker {
+    fn chapter(time: f64, name: String) -> Marker {
+        Marker {
+            time,
+            name,
+            bookmark: None,
+        }
+    }
+}
+
+/// How near the viewer's bookmark makes another one there a repeat, seconds.
+const BOOKMARK_GAP: f64 = 1.0;
+
 /// Chapters, the source's markers and the user's bookmarks, in time order.
 fn markers(
     info: &fp_media::MediaInfo,
     entry: Option<&Entry>,
     record: Option<&fp_library::MediaRecord>,
     library: &Library,
-) -> Vec<(f64, String)> {
-    let mut markers: Vec<(f64, String)> = info
+) -> Vec<Marker> {
+    let mut markers: Vec<Marker> = info
         .chapters
         .iter()
-        .map(|c| (c.start, c.title.clone()))
+        .map(|c| Marker::chapter(c.start, c.title.clone()))
         .collect();
     if let Some(e) = entry {
-        markers.extend(e.markers.iter().cloned());
+        markers.extend(
+            e.markers
+                .iter()
+                .map(|(t, n)| Marker::chapter(*t, n.clone())),
+        );
     }
     if let Some(r) = record
         && let Ok(m) = library.markers(r.id)
     {
-        markers.extend(m.into_iter().map(|m| (m.time, m.name)));
+        markers.extend(m.into_iter().map(|m| Marker {
+            time: m.time,
+            bookmark: (!m.from_source).then(|| vec![m.id]),
+            name: m.name,
+        }));
     }
-    markers.sort_by(|a, b| a.0.total_cmp(&b.0));
-    markers.dedup_by(|a, b| (a.0 - b.0).abs() < 0.5 && a.1 == b.1);
+    collapse(&mut markers);
     markers
+}
+
+/// Sorts `markers` by time and shows each place once: the same name at
+/// the same moment, a bookmark's rows together.
+fn collapse(markers: &mut Vec<Marker>) {
+    markers.sort_by(|a, b| a.time.total_cmp(&b.time));
+    markers.dedup_by(|a, b| {
+        let same = (a.time - b.time).abs() < 0.5
+            && a.name == b.name
+            && a.bookmark.is_some() == b.bookmark.is_some();
+        if same && let (Some(rows), Some(kept)) = (a.bookmark.as_mut(), b.bookmark.as_mut()) {
+            kept.append(rows);
+        }
+        same
+    });
+}
+
+/// Removes the viewer's bookmark at `index` in `markers` and its rows.
+fn remove_bookmark(
+    markers: &mut Vec<Marker>,
+    index: usize,
+    library: &Library,
+) -> fp_library::Result<()> {
+    let Some(Some(rows)) = markers.get(index).map(|m| &m.bookmark) else {
+        return Ok(());
+    };
+    for row in rows {
+        library.remove_marker(*row)?;
+    }
+    markers.remove(index);
+    Ok(())
+}
+
+/// Whether the viewer has a bookmark within [`BOOKMARK_GAP`] of `time`.
+fn bookmarked_near(markers: &[Marker], time: f64) -> bool {
+    markers
+        .iter()
+        .any(|m| m.bookmark.is_some() && (m.time - time).abs() < BOOKMARK_GAP)
 }
 
 impl Playback {
@@ -868,9 +1078,50 @@ impl Playback {
     }
 
     /// What is shown now: [`Self::current_settings`] with the global chroma
-    /// key unless this video has its own.
+    /// key unless this video has its own, and the backdrop's colour once
+    /// found, until a colour is picked for this video.
     pub fn shown_settings(&self, global: &ViewSettings) -> ViewSettings {
-        self.current_settings().with_global_key(global)
+        let mut s = self.current_settings().with_global_key(global);
+        if let Some(c) = self.found_colour() {
+            s.key_color = c;
+        }
+        s
+    }
+
+    /// The colour found for this video's chroma key, while none is picked.
+    pub fn found_colour(&self) -> Option<[f32; 3]> {
+        match self.backdrop.state {
+            Backdrop::Found(c) if self.colour_open => Some(c),
+            _ => None,
+        }
+    }
+
+    /// A colour was picked for this video: the one found no longer applies.
+    pub fn colour_picked(&mut self) {
+        self.colour_open = false;
+    }
+
+    /// Whether the backdrop is to be searched for: the chroma key is on, no
+    /// colour is picked for this video, and its own mask isn't in use, its
+    /// red corners being no backdrop.
+    pub fn wants_backdrop(&self, global: &ViewSettings) -> bool {
+        let s = self.current_settings().with_global_key(global);
+        self.colour_open && s.chroma_key && self.format.alpha_pack_scale().is_none()
+    }
+
+    /// Takes the search's answer once it has one. A video with its own
+    /// chroma key, turned on in this session with no colour picked, keeps
+    /// the colour found, saved as the Passthrough tab saves it.
+    pub fn poll_backdrop(&mut self) {
+        let before = self.backdrop.state;
+        self.backdrop.poll();
+        if before == Backdrop::Looking
+            && let Some(c) = self.found_colour()
+            && self.settings.own_key()
+        {
+            self.settings.key_color = c;
+            self.key_changed();
+        }
     }
 
     /// Saves progress every few seconds and at the end.
@@ -1059,15 +1310,53 @@ impl Playback {
         self.key_pending = true;
     }
 
-    pub fn add_bookmark(&mut self, library: &Library) -> fp_library::Result<()> {
+    /// The format picked for this video: none on Automatic.
+    pub fn picked_format(&self) -> Option<VideoFormat> {
+        (self.evidence == Evidence::User).then_some(self.format)
+    }
+
+    /// What a preset keeps of this video: its adjustments as they are saved
+    /// with it, and the format picked.
+    pub fn preset_parts(&self) -> (ViewSettings, Option<VideoFormat>) {
+        (
+            kept_with_video(self.settings, self.format),
+            self.picked_format(),
+        )
+    }
+
+    /// The first of `presets` this video has everything of.
+    pub fn matching_preset(&self, presets: &[fp_core::view::Preset]) -> Option<usize> {
+        let flat = self.format.projection == format::Projection::Flat;
+        presets
+            .iter()
+            .position(|p| p.matches(&self.settings, self.picked_format(), flat))
+    }
+
+    /// Bookmarks where the video is; false, adding none, when the viewer
+    /// has one there already.
+    pub fn add_bookmark(&mut self, library: &Library) -> fp_library::Result<bool> {
         let t = self.player.position();
-        let name = tr!("bookmark-name", time = crate::ui::fmt_time(t));
-        if let Some(id) = self.record_id {
-            library.add_marker(id, t, &name)?;
+        if bookmarked_near(&self.markers, t) {
+            return Ok(false);
         }
-        self.markers.push((t, name));
-        self.markers.sort_by(|a, b| a.0.total_cmp(&b.0));
-        Ok(())
+        let name = tr!("bookmark-name", time = crate::ui::fmt_time(t));
+        let rows = match self.record_id {
+            Some(id) => vec![library.add_marker(id, t, &name)?],
+            None => Vec::new(),
+        };
+        self.markers.push(Marker {
+            time: t,
+            name,
+            bookmark: Some(rows),
+        });
+        collapse(&mut self.markers);
+        Ok(true)
+    }
+
+    /// Removes the viewer's bookmark at `index` in [`Self::markers`], with
+    /// every row of it the library holds. Chapters stay.
+    pub fn remove_bookmark(&mut self, index: usize, library: &Library) -> fp_library::Result<()> {
+        remove_bookmark(&mut self.markers, index, library)
     }
 
     /// Saves where the video was and closes it. The player's threads are
@@ -1154,14 +1443,21 @@ fn has_hardware_decoder(v: &StreamInfo) -> bool {
 }
 
 /// 8-bit 4:2:0 HEVC and H.264, and 10-bit 4:2:0 HEVC when `hevc_10bit` (the
-/// renderer shows it, see [`fp_media::set_hevc_10bit_hardware`]).
+/// renderer shows it, see [`fp_media::set_hevc_10bit_hardware`]). Not
+/// interlaced H.264, nor video being deinterlaced, which takes pictures in
+/// memory.
 fn hardware_decodes(v: &StreamInfo, hevc_10bit: bool) -> bool {
     let depth = v.bit_depth <= 8 || (hevc_10bit && v.codec == "hevc" && v.bit_depth == 10);
-    matches!(v.codec.as_str(), "hevc" | "h264") && depth && v.chroma() == "4:2:0"
+    matches!(v.codec.as_str(), "hevc" | "h264")
+        && depth
+        && v.chroma() == "4:2:0"
+        && !v.deinterlaced
+        && !(v.interlaced && v.codec == "h264")
 }
 
 /// The stream's codec, with its bit depth and chroma when they are not
-/// plain 8-bit 4:2:0 ("10-bit HEVC", "4:2:2 HEVC").
+/// plain 8-bit 4:2:0 ("10-bit HEVC", "4:2:2 HEVC"), and whether it is
+/// interlaced.
 fn stream_desc(v: &StreamInfo) -> String {
     let codec = match v.codec.as_str() {
         "hevc" => "HEVC".to_string(),
@@ -1171,11 +1467,16 @@ fn stream_desc(v: &StreamInfo) -> String {
         c => c.to_uppercase(),
     };
     let chroma = v.chroma();
-    match (v.bit_depth > 8, chroma != "4:2:0") {
+    let desc = match (v.bit_depth > 8, chroma != "4:2:0") {
         (true, true) => format!("{}-bit {chroma} {codec}", v.bit_depth),
         (true, false) => format!("{}-bit {codec}", v.bit_depth),
         (false, true) => format!("{chroma} {codec}"),
         (false, false) => codec,
+    };
+    if v.interlaced || v.deinterlaced {
+        tr!("decoder-stream-interlaced", stream = desc)
+    } else {
+        desc
     }
 }
 
@@ -1288,6 +1589,101 @@ pub(crate) fn slow_decode_notice(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn repeated_bookmarks_show_once_and_are_removed_together() {
+        let library = Library::open_in_memory().unwrap();
+        let id = library
+            .upsert(&fp_library::MediaUpsert::new("/videos/clip.mp4", "local"))
+            .unwrap()
+            .id;
+        // Ten presses at one moment, from before repeats were prevented,
+        // and one bookmark further on.
+        for _ in 0..10 {
+            library.add_marker(id, 60.2, "Bookmark 1:00").unwrap();
+        }
+        library.add_marker(id, 300.0, "Bookmark 5:00").unwrap();
+        let info = fp_media::MediaInfo {
+            name: "clip.mp4".into(),
+            container: "mp4".into(),
+            duration: 600.0,
+            streams: Vec::new(),
+            chapters: vec![fp_media::info::Chapter {
+                start: 60.0,
+                end: 120.0,
+                title: "Opening".into(),
+            }],
+            hints: Default::default(),
+            video: None,
+            audio: None,
+            title: None,
+        };
+        let record = library.get(id).unwrap();
+        let mut m = markers(&info, None, record.as_ref(), &library);
+        let shown: Vec<_> = m.iter().map(|m| (m.time, m.name.as_str())).collect();
+        assert_eq!(
+            shown,
+            [
+                (60.0, "Opening"),
+                (60.2, "Bookmark 1:00"),
+                (300.0, "Bookmark 5:00")
+            ]
+        );
+        assert_eq!(m[0].bookmark, None);
+        assert_eq!(m[1].bookmark.as_ref().map(Vec::len), Some(10));
+
+        // Another press near a bookmark is a repeat; near a chapter it isn't.
+        assert!(bookmarked_near(&m, 60.9));
+        assert!(!bookmarked_near(&m, 61.5));
+        assert!(!bookmarked_near(&m[..1], 60.0));
+
+        // A chapter can't be removed; a bookmark goes with all its copies.
+        remove_bookmark(&mut m, 0, &library).unwrap();
+        assert_eq!(m.len(), 3);
+        remove_bookmark(&mut m, 1, &library).unwrap();
+        assert_eq!(m.len(), 2);
+        let left: Vec<_> = library.markers(id).unwrap();
+        assert_eq!(left.len(), 1);
+        assert_eq!(left[0].name, "Bookmark 5:00");
+    }
+
+    #[test]
+    fn the_backdrop_is_found_in_a_second_read_of_the_file() {
+        let dir = std::env::temp_dir().join(format!("fpx-backdrop-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        // A person in front of a green screen, as a still picture.
+        let path = dir.join("screen.png");
+        image::RgbImage::from_fn(320, 180, |x, y| {
+            if (140..180).contains(&x) && y > 50 {
+                image::Rgb([170, 130, 110])
+            } else {
+                image::Rgb([40, 190, 70])
+            }
+        })
+        .save(&path)
+        .unwrap();
+        let search = |location: &std::path::Path| {
+            let mut s = BackdropSearch::new(None, location.to_string_lossy().into_owned());
+            s.start(Arc::new(Opener::new()), 0.0);
+            let until = Instant::now() + Duration::from_secs(20);
+            while s.state == Backdrop::Looking && Instant::now() < until {
+                std::thread::sleep(Duration::from_millis(20));
+                s.poll();
+            }
+            s.state
+        };
+        // The green at full strength.
+        let Backdrop::Found([r, g, b]) = search(&path) else {
+            panic!("no backdrop found");
+        };
+        assert!(
+            r < 0.02 && g > 0.98 && (b - 0.2).abs() < 0.03,
+            "{:?}",
+            [r, g, b]
+        );
+        assert_eq!(search(&dir.join("gone.mp4")), Backdrop::NotFound);
+        std::fs::remove_dir_all(&dir).ok();
+    }
 
     #[test]
     fn source_owned_requests_bind_the_owner_without_a_library_record() {
@@ -1761,7 +2157,7 @@ mod tests {
 
     #[test]
     fn opening_waits_for_closing_videos_but_not_forever() {
-        let (tx, rx) = std::sync::mpsc::channel::<()>();
+        let (tx, rx) = mpsc::channel::<()>();
         let slow = std::thread::spawn(move || {
             let _ = rx.recv();
         });
@@ -1798,6 +2194,7 @@ mod tests {
                 "yuv420p".into()
             },
             interlaced: false,
+            deinterlaced: false,
             transfer: Default::default(),
             rotation: 0,
             pixel_aspect: 1.0,
@@ -1892,6 +2289,18 @@ mod tests {
         s422.pixel_format = "yuv422p10le".into();
         assert!(!hardware_decodes(&s422, true));
         assert!(hardware_decodes(&stream("h264", 8), false));
+
+        // Interlaced H.264, and video being deinterlaced, decode in software.
+        let mut tv = stream("h264", 8);
+        tv.interlaced = true;
+        assert!(!hardware_decodes(&tv, false));
+        assert_eq!(
+            software_reason(&tv, true, None),
+            "no hardware decoding for interlaced H.264"
+        );
+        let mut forced = stream("hevc", 8);
+        forced.deinterlaced = true;
+        assert!(!hardware_decodes(&forced, false));
     }
 
     #[test]

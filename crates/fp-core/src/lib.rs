@@ -3,6 +3,7 @@
 //! - [`format`](mod@format): how a video maps onto the sphere or screen ([`Projection`],
 //!   [`StereoLayout`]) and detection from file names and metadata.
 //! - [`view`]: per-video picture corrections ([`ViewSettings`]).
+//! - [`display`]: refresh rate, render resolution and foveated rendering.
 //! - [`source`]: the contract between media sources and the player
 //!   ([`ByteSource`], [`Entry`]).
 //! - [`playback`]: playback status and commands shared with haptics and the
@@ -13,6 +14,7 @@
 //! - [`volume`]: microSD cards and USB drives, known by their filesystem's ID.
 
 pub mod dirs;
+pub mod display;
 pub mod format;
 pub mod language;
 pub mod playback;

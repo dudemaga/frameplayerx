@@ -12,6 +12,21 @@ pub(crate) struct PipelineDesc<'a> {
     pub attributes: &'a [vk::VertexInputAttributeDescription],
     /// Premultiplied-alpha blending.
     pub blend: bool,
+    /// Its descriptors come from descriptor buffers, not sets.
+    pub descriptor_buffer: bool,
+    pub shading_rate: ShadingRate,
+}
+
+/// How a pipeline meets the eye passes' shading rate attachment
+/// ([`crate::foveation`]).
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub(crate) enum ShadingRate {
+    /// It never draws into renders with one.
+    Unused,
+    /// It draws into them, shading every pixel.
+    Full,
+    /// It draws into them at the attachment's rates.
+    Attachment,
 }
 
 pub(crate) fn create(gpu: &Gpu, d: &PipelineDesc) -> Result<vk::Pipeline> {
@@ -68,7 +83,25 @@ pub(crate) fn create(gpu: &Gpu, d: &PipelineDesc) -> Result<vk::Pipeline> {
     let formats = [d.color_format];
     let mut rendering =
         vk::PipelineRenderingCreateInfo::default().color_attachment_formats(&formats);
-    let info = vk::GraphicsPipelineCreateInfo::default()
+    let mut flags = vk::PipelineCreateFlags::empty();
+    if d.descriptor_buffer {
+        flags |= vk::PipelineCreateFlags::DESCRIPTOR_BUFFER_EXT;
+    }
+    if d.shading_rate != ShadingRate::Unused {
+        flags |= vk::PipelineCreateFlags::RENDERING_FRAGMENT_SHADING_RATE_ATTACHMENT_KHR;
+    }
+    // One pixel unless the attachment says more.
+    let mut rate = vk::PipelineFragmentShadingRateStateCreateInfoKHR::default()
+        .fragment_size(vk::Extent2D {
+            width: 1,
+            height: 1,
+        })
+        .combiner_ops([
+            vk::FragmentShadingRateCombinerOpKHR::KEEP,
+            vk::FragmentShadingRateCombinerOpKHR::REPLACE,
+        ]);
+    let mut info = vk::GraphicsPipelineCreateInfo::default()
+        .flags(flags)
         .stages(&stages)
         .vertex_input_state(&vertex_input)
         .input_assembly_state(&ia)
@@ -79,6 +112,9 @@ pub(crate) fn create(gpu: &Gpu, d: &PipelineDesc) -> Result<vk::Pipeline> {
         .dynamic_state(&dynamic)
         .layout(d.layout)
         .push_next(&mut rendering);
+    if d.shading_rate == ShadingRate::Attachment {
+        info = info.push_next(&mut rate);
+    }
     // SAFETY: all referenced state lives until the call returns.
     let result = unsafe {
         gpu.device

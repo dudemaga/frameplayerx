@@ -180,6 +180,7 @@ impl App {
                     self.ui.toast(tr!("toast-view-reset"));
                 }
             }
+            Cmd::NextPreset => self.next_preset(),
             Cmd::DragBegin => {
                 self.drag_start = self
                     .playback
@@ -328,17 +329,17 @@ impl App {
         }
         let now = p.player.position();
         let to = if dir > 0 {
-            p.markers.iter().find(|(t, _)| *t > now + 0.5)
+            p.markers.iter().find(|m| m.time > now + 0.5)
         } else {
             p.markers
                 .iter()
                 .rev()
-                .find(|(t, _)| *t < now - CHAPTER_GRACE)
+                .find(|m| m.time < now - CHAPTER_GRACE)
         };
         match to.cloned() {
-            Some((t, name)) => {
-                self.apply(Action::Seek(t));
-                self.ui.toast(name);
+            Some(m) => {
+                self.apply(Action::Seek(m.time));
+                self.ui.toast(m.name);
             }
             None if dir < 0 => {
                 self.apply(Action::Seek(0.0));

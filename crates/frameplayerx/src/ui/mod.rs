@@ -216,11 +216,16 @@ impl std::fmt::Debug for WebAddress {
 /// Something the UI asks the app to do.
 #[derive(Clone, Debug)]
 pub enum Action {
+    /// Plays this video alone.
     Open(OpenRequest),
-    /// Open item `.1` of a list; grip + thumbstick moves through the list.
-    OpenList(Vec<OpenRequest>, usize),
-    /// Plays the list from `.1`, through to its end (Play all, a playlist).
+    /// Makes the list Up next and plays it from `.1` (Play all, a playlist).
     PlayAll(Vec<OpenRequest>, usize),
+    /// A server grid's Play all when its first videos aren't all loaded:
+    /// fetches them by `query`, then plays them as Play all does.
+    CatalogPlayAll {
+        source: String,
+        query: fp_sources::CatalogQuery,
+    },
     /// Queues a video right after the one playing (`next`) or at the end.
     Queue {
         req: OpenRequest,
@@ -261,9 +266,15 @@ pub enum Action {
     /// The Passthrough tab changed this video's chroma key: saved at once.
     SaveKey,
     ResetView,
+    /// Saves the playing video's adjustments as a new preset.
+    SavePreset,
+    /// Sets this preset's adjustments on the playing video.
+    ApplyPreset(usize),
     AddKeyframe,
     ClearKeyframes,
     AddBookmark,
+    /// Removes the viewer's bookmark at this index in the playback's markers.
+    RemoveBookmark(usize),
     /// Plays this audio stream, and keeps it as this video's pick.
     SelectAudio(usize),
     SelectSourceAudio(String),
@@ -399,7 +410,7 @@ pub enum Action {
     ToggleFollow,
     /// The video playing starts again when it ends.
     ToggleLoopVideo,
-    /// The list a video was opened from plays through.
+    /// Up next plays through.
     ToggleAutoplay,
     /// Up next starts again from the first video after the last.
     ToggleLoopPlaylist,
@@ -431,6 +442,8 @@ pub enum SettingsTab {
     General,
     Playback,
     VideoPosition,
+    /// How videos look until adjusted: picture, and 3D depth and alignment.
+    Picture,
     /// Sound and subtitles.
     Sound,
     Passthrough,
@@ -660,6 +673,15 @@ pub struct SourceForm {
     pub address: String,
     pub username: String,
     pub password: String,
+    /// An SFTP source's private key file and its passphrase.
+    pub key_file: String,
+    pub key_passphrase: String,
+    /// Key files found on the headset, offered for an SFTP source; looked
+    /// for once, when the form first shows them.
+    pub key_files: Option<Vec<String>>,
+    /// Whether the key file is password-protected, with the path it was
+    /// checked at; checked again when the path changes.
+    pub key_locked: Option<(String, Option<bool>)>,
     pub insecure_tls: bool,
     pub parallel_downloads: bool,
     /// Signing in to a Jellyfin/Emby server with Quick Connect rather than a
@@ -699,6 +721,10 @@ impl Default for SourceForm {
             address: String::new(),
             username: String::new(),
             password: String::new(),
+            key_file: String::new(),
+            key_passphrase: String::new(),
+            key_files: None,
+            key_locked: None,
             insecure_tls: false,
             parallel_downloads: false,
             use_quick_connect: true,
@@ -792,6 +818,12 @@ pub struct UiState {
     /// Delete was pressed once on the open playlist: pressing again within
     /// a few seconds deletes it.
     pub delete_armed: Option<std::time::Instant>,
+    /// The adjust panel lists the presets to rename or delete.
+    pub presets_editing: bool,
+    /// The preset being renamed, with the name as typed.
+    pub preset_renaming: Option<(usize, String)>,
+    /// Delete was pressed once on this preset, as for playlists.
+    pub preset_delete_armed: Option<(usize, std::time::Instant)>,
     /// Videos being added to a playlist (the picker shows instead of the
     /// screen).
     pub picking: Option<Picking>,
@@ -861,6 +893,9 @@ impl Default for UiState {
             playlist_name: String::new(),
             renaming: false,
             delete_armed: None,
+            presets_editing: false,
+            preset_renaming: None,
+            preset_delete_armed: None,
             picking: None,
             up_next: None,
             source: None,

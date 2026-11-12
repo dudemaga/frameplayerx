@@ -37,6 +37,7 @@ settings-general = General
 settings-playback = Playback
 # Short: a tab.
 settings-video-position = Video position
+settings-picture = Picture
 # Short: a tab.
 settings-sound = Sound and subtitles
 # Short: a tab.
@@ -66,6 +67,19 @@ settings-follow = Screen follows you
 settings-follow-desc = Flat videos and the menus stay in front of you as you turn, lie back or roll onto your side.
 settings-haptic-devices = Haptic devices
 settings-haptic-devices-desc = Sync connected haptic devices with videos that have scripts.
+settings-display = Display
+settings-refresh-rate = Refresh rate
+settings-refresh-rate-desc = 120 Hz shows 24, 30 and 60 fps video evenly. A lower rate gives each frame more time and saves battery.
+settings-render-resolution = Render resolution
+settings-render-resolution-desc = Pixels across each eye's picture. Higher is sharper and shimmers less, and works the GPU harder.
+settings-foveation = Foveated rendering
+settings-foveation-desc = Less detail where you aren't looking, following your eyes, so high resolutions keep up. High gives up more.
+# Short: a chip.
+foveation-off = Off
+# Short: a chip.
+foveation-low = Low
+# Short: a chip.
+foveation-high = High
 settings-thumbnails = Thumbnails
 settings-make-thumbnails = Make thumbnails
 settings-make-thumbnails-desc = For videos whose server has no picture: a frame of the video, made on the headset while nothing plays.
@@ -107,12 +121,18 @@ settings-fisheye-presets-desc = The angles offered under Fisheye lens. Add one f
 # Before the fisheye presets: the angle a video gets when Fisheye is picked for it.
 settings-fisheye-start = Fisheye starts at
 settings-video-position-desc = Where videos start. A video you adjust in the player keeps its own.
+settings-picture-desc = How videos look until you adjust them. A video you adjust in the player keeps its own.
+adjust-preset-rename = Rename
+adjust-preset-delete = Delete
+adjust-preset-delete-confirm = Delete it?
 settings-flat-videos = Flat videos
 settings-screen-distance = Screen distance
 settings-screen-width = Screen width
 settings-screen-width-desc = Its longer side: a portrait video's height.
 settings-screen-curvature = Screen curvature
 settings-vr-videos = 180° and 360° videos
+settings-all-videos = All videos
+settings-3d-videos = 3D videos
 settings-height = Height
 settings-height-desc = Raise or lower yourself in videos without their own.
 settings-background = Background
@@ -363,6 +383,11 @@ adjust-field-of-view-hint = A preset sets this. For any other angle, slide it, t
 # Short: before buttons that set a fisheye lens's field of view.
 adjust-lens-presets = Presets
 adjust-lens-add-preset = Add to the presets
+adjust-presets = Presets
+adjust-preset-new = New preset
+adjust-preset-new-tip = Saves this video's adjustments, and its format if you picked one, as a preset for any video
+adjust-preset-edit = Edit
+preset-name = Preset { $n }
 adjust-edge-stretch = Edge stretch
 adjust-edge-stretch-desc = For a lens that doesn't spread its view evenly: straight lines bend as you look around.
 adjust-rim-stretch = Rim stretch
@@ -393,6 +418,8 @@ adjust-vertical-align = Vertical align
 adjust-rotation-align = Rotation align
 adjust-swap-eyes = Swap eyes
 adjust-swap-eyes-desc = For left/right swapped files.
+adjust-interlaced = Interlaced
+adjust-interlaced-desc = For video with comb lines.
 adjust-format-3d-blu-ray = A 3D Blu-ray's two eyes are decoded together, so it plays in the format the disc gives.
 adjust-brightness = Brightness
 adjust-contrast = Contrast
@@ -415,6 +442,7 @@ adjust-chroma-desc = Makes one colour of the video see-through, so your room sho
 adjust-chroma-desc-dark = Makes one colour of the video see-through. This headset doesn't share passthrough with apps, so it turns dark instead.
 adjust-chroma-colour-heading = Background colour
 adjust-chroma-colour = Colour
+adjust-chroma-found = Found in this video.
 adjust-red = Red
 adjust-green = Green
 adjust-blue = Blue
@@ -428,6 +456,7 @@ adjust-no-chapters = No chapters or bookmarks. Bookmark, on the control bar, mar
 adjust-chapters-heading = Chapters and bookmarks
 # A tooltip: plays from this chapter.
 adjust-chapter-go = Go
+adjust-bookmark-remove = Remove bookmark
 # Short: a column's title.
 tracks-audio = Audio
 tracks-no-audio = No audio
@@ -574,6 +603,10 @@ source-address = Address
 source-sign-in-with = Sign in with
 source-sign-in-with-desc = Jellyfin's Quick Connect pairs using a 6-digit code on another device.
 source-password = Password
+source-key-file = Key file
+source-key-file-desc = A private key on the headset to sign in with, OpenSSH or PuTTY (.ppk), tried before the password. Keys in ~/.ssh and Downloads are listed below.
+source-key-passphrase = Key passphrase
+source-key-passphrase-desc = This key file is password-protected. Enter the passphrase it was saved with, not the account password.
 source-user-name = User name
 source-user-name-desc = If the server asks for one.
 source-self-signed = Accept self-signed certificates
@@ -597,6 +630,10 @@ pin-set = Set a PIN
 source-error-no-address = Enter an address
 source-error-http = Address must start with http:// or https://
 source-error-smb = Use smb://server/, smb://server/share or smb://server/share/folder
+source-error-sftp = Use sftp://server/, sftp://server/~/folder or sftp://server/path/to/folder
+source-error-sftp-user = Enter the user name to sign in as
+source-error-sftp-sign-in = Enter a password or choose a key file
+source-error-key-passphrase = This key file is password-protected: enter its passphrase
 source-error-port = Bad port
 source-error-approve-code = Approve the code in your Jellyfin/Emby app
 # Get pairing code is the button above: use its translation.
@@ -618,6 +655,8 @@ source-kind-deovr = DeoVR feed
 source-kind-heresphere = HereSphere API
 # Short: a kind of source; keep SMB.
 source-kind-smb = SMB share
+# Short: a kind of source; keep SFTP.
+source-kind-sftp = SFTP server
 sources-library-not-inserted = Library · Not inserted
 # Short: after a source's address, it is unlocked until the app restarts.
 sources-unlocked = Unlocked
@@ -631,6 +670,7 @@ source-kind-heresphere-desc = The URL of any server's HereSphere API, e.g. http:
 source-kind-webdav-desc = WebDAV share URL (Nextcloud, NAS), e.g. https://nas.local/dav/videos/
 source-kind-http-desc = Web server folder listing, e.g. http://192.168.1.10:8080/videos/
 source-kind-smb-desc = Windows / Samba server or share, e.g. smb://nas.local/ or smb://nas.local/videos
+source-kind-sftp-desc = A folder on any computer with SSH (Linux, macOS, many NAS), e.g. sftp://pc.local/~/Videos
 source-kind-dlna-desc = DLNA media server on your network (Plex, Jellyfin, Emby, Serviio)
 # A name field's hint.
 source-name-hint-jellyfin = Optional (e.g. Jellyfin)
@@ -639,6 +679,7 @@ source-name-hint-heresphere = Optional (e.g. HereSphere API)
 source-name-hint-webdav = Optional (e.g. Nextcloud)
 source-name-hint-http = Optional (e.g. Video server)
 source-name-hint-smb = Optional (e.g. Home NAS)
+source-name-hint-sftp = Optional (e.g. Desktop PC)
 source-name-hint-library = Optional (e.g. Movies)
 source-name-hint = Optional
 source-edit-title = Edit { $name }
@@ -881,6 +922,7 @@ action-show-hide = Show / hide controls
 action-adjust = Adjust panel
 action-room = Show your room
 action-recenter = Recenter
+action-next-preset = Next preset
 # Very short: a label beside the controller picture.
 action-short-play-pause = Play/pause
 # Very short: a label beside the controller picture.
@@ -901,6 +943,7 @@ action-short-reset = Reset view
 action-short-show-hide = Show/hide UI
 # Very short: a label beside the controller picture.
 action-short-adjust = Adjust
+action-short-next-preset = Next preset
 # Very short: a label beside the controller picture.
 action-short-room = Room
 # What a thumbstick direction does.
@@ -997,6 +1040,7 @@ playlists-delete = Delete
 playlists-rename = Rename
 # Short: a button.
 common-play-all = Play all
+catalog-play-all-first = Plays the first { $count } videos, in this order
 playlists-empty = Nothing in it yet
 playlists-empty-desc = Add videos from their details with Add to playlist.
 playlists-picker-title = Add to a playlist
@@ -1083,7 +1127,12 @@ crash-show-report = Show the report
 crash-dont-send = Don't send
 crash-report-heading = The report, exactly as it would be sent
 toast-adjustments-saved = Adjustments saved
+toast-preset-saved = Saved as { $name }
+toast-preset = Preset: { $name }
+toast-no-presets = No presets yet: save one at the top of the adjust panel
+toast-nothing-to-play = Nothing here to play
 toast-bookmark-added = Bookmark added
+toast-bookmark-exists = Already bookmarked here
 toast-history-cleared = Watch history cleared
 # Play next and Add to queue are buttons: use their translations.
 queue-empty = Nothing queued: Play next and Add to queue are on a video's details
@@ -1138,6 +1187,7 @@ error-save-favorite = Couldn't save the favorite: { $error }
 error-save-rating = Couldn't save the rating: { $error }
 error-save-format = Couldn't save the format: { $error }
 error-save-bookmark = Couldn't save the bookmark: { $error }
+error-remove-bookmark = Couldn't remove the bookmark: { $error }
 error-save-adjustments = Adjustments couldn't be saved: { $error }
 error-add-to-playlist = Couldn't add to the playlist: { $error }
 error-clear-history = Could not clear the history: { $error }
@@ -1214,6 +1264,7 @@ bookmark-name = Bookmark { $time }
 decoder-why-none = no hardware decoding for { $stream }
 decoder-why-off = hardware decoding is off in Settings
 decoder-why-untried = hardware decoder not tried
+decoder-stream-interlaced = interlaced { $stream }
 decoder-notice-none = No hardware decoding for { $stream }, so it stutters. 8-bit 4:2:0 H.265 plays smoothly
 decoder-notice-off = { $stream } in software stutters: turn on hardware decoding in Settings
 decoder-notice-busy = Hardware decoder busy: { $stream } in software stutters
@@ -1266,6 +1317,10 @@ error-parse = cannot parse { $what }: { $error }
 error-unsupported = not supported: { $what }
 error-smb = SMB error: { $error }
 error-smb-unavailable = SMB unavailable: { $error }
+error-sftp = SFTP error: { $error }
+error-sftp-unavailable = SFTP unavailable: { $error }
+error-host-key-changed = { $server } answered with a different identity key than when it was added. If the server was reinstalled, remove the source and add it again; otherwise another machine may be answering in its place.
+error-key-passphrase = { $file } is password-protected and the saved passphrase doesn't unlock it. Edit the source and enter the key's passphrase.
 error-config = invalid source configuration: { $error }
 # $context is what FFmpeg was doing, in English.
 error-ffmpeg = { $context }: { $error }

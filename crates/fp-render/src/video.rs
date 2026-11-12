@@ -354,62 +354,17 @@ impl VideoPlanes {
             uv_offset: pic.uv_offset,
             len: pic.data.len(),
         };
-        let needs_new = slot.as_ref().is_none_or(|s| {
-            s.desc.layout != frame.layout || s.q10c.as_ref().is_none_or(|p| p.geometry != geometry)
-        });
-        let mut recreated = false;
-        if needs_new {
-            if let Some(old) = slot.take() {
-                old.release(gpu, garbage);
-            }
-            let usage = vk::ImageUsageFlags::SAMPLED | vk::ImageUsageFlags::STORAGE;
-            let (cw, ch) = (frame.width.div_ceil(2), frame.height.div_ceil(2));
-            let mut images = vec![Image::new(
-                gpu,
-                frame.width,
-                frame.height,
-                &[vk::Format::R16_UNORM],
-                usage,
-                1,
-                "video plane",
-            )?];
-            let made = Image::new(
-                gpu,
-                cw,
-                ch,
-                &[vk::Format::R16G16_UNORM],
-                usage,
-                1,
-                "video plane",
-            )
-            .and_then(|uv| {
-                images.push(uv);
-                conv.picture(gpu, geometry, &images)
-            });
-            let picture = match made {
-                Ok(p) => p,
-                Err(e) => {
-                    garbage.append(&mut images);
-                    return Err(e);
-                }
-            };
-            *slot = Some(VideoPlanes {
-                images,
-                desc: FrameDesc {
-                    width: frame.width,
-                    height: frame.height,
-                    layout: frame.layout,
-                    color: frame.color,
-                },
-                key: None,
-                staging: None,
-                q10c: Some(picture),
-            });
-            recreated = true;
-        }
+        let recreated = Self::q10c_outputs(slot, gpu, frame, garbage)?;
         let Some(s) = slot.as_mut() else {
             return Ok(recreated);
         };
+        if s.q10c.as_ref().is_none_or(|p| p.geometry != geometry) {
+            // The set isn't in flight: its old picture can go at once.
+            if let Some(mut old) = s.q10c.take() {
+                old.destroy(gpu);
+            }
+            s.q10c = Some(conv.picture(gpu, geometry, &s.images)?);
+        }
         let Some(p) = s.q10c.as_mut() else {
             return Ok(recreated);
         };
@@ -418,6 +373,67 @@ impl VideoPlanes {
         conv.record(gpu, cmd, p, &s.images);
         s.key = Some(frame_key(frame));
         Ok(recreated)
+    }
+
+    /// Makes sure the set has P010 planes for a Q10C frame the size of
+    /// `frame`, which the converter writes, whether the picture is copied
+    /// in or read in the decoder's buffer. True when they were recreated
+    /// (descriptor sets, and conversions into them, must be redone).
+    pub(crate) fn q10c_outputs(
+        slot: &mut Option<VideoPlanes>,
+        gpu: &Gpu,
+        frame: &VideoFrame,
+        garbage: &mut Vec<Image>,
+    ) -> Result<bool> {
+        let fits = slot.as_ref().is_some_and(|s| {
+            s.desc.layout == PixelLayout::Q10c
+                && (s.desc.width, s.desc.height) == (frame.width, frame.height)
+        });
+        if fits {
+            return Ok(false);
+        }
+        if let Some(old) = slot.take() {
+            old.release(gpu, garbage);
+        }
+        let usage = vk::ImageUsageFlags::SAMPLED | vk::ImageUsageFlags::STORAGE;
+        let (cw, ch) = (frame.width.div_ceil(2), frame.height.div_ceil(2));
+        let mut images = vec![Image::new(
+            gpu,
+            frame.width,
+            frame.height,
+            &[vk::Format::R16_UNORM],
+            usage,
+            1,
+            "video plane",
+        )?];
+        match Image::new(
+            gpu,
+            cw,
+            ch,
+            &[vk::Format::R16G16_UNORM],
+            usage,
+            1,
+            "video plane",
+        ) {
+            Ok(uv) => images.push(uv),
+            Err(e) => {
+                garbage.append(&mut images);
+                return Err(e);
+            }
+        }
+        *slot = Some(VideoPlanes {
+            images,
+            desc: FrameDesc {
+                width: frame.width,
+                height: frame.height,
+                layout: frame.layout,
+                color: frame.color,
+            },
+            key: None,
+            staging: None,
+            q10c: None,
+        });
+        Ok(true)
     }
 
     /// Gives up the set when it is replaced: its images to `garbage` (the

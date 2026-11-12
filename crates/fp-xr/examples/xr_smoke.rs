@@ -16,7 +16,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     );
     let gpu = Arc::new(Gpu::new(&ctx.creator(), "frameplayerx")?);
     println!("gpu: {} ({})", gpu.device_name, gpu.driver);
-    let mut session = XrSession::new(ctx.clone(), gpu.clone())?;
+    let ((width, _), _) = ctx.eye_sizes()?;
+    let mut session = XrSession::new(ctx.clone(), gpu.clone(), width)?;
     println!(
         "eye: {:?} {:?}; bindings {:?}",
         session.extent,

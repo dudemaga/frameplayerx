@@ -8,7 +8,7 @@ use super::{Action, SettingsTab, View, icons};
 use crate::settings::HapticDeviceConfig;
 use egui::{Align2, Color32, RichText, Sense, Vec2};
 
-fn tabs() -> [(SettingsTab, &'static str, &'static str); 10] {
+fn tabs() -> [(SettingsTab, &'static str, &'static str); 11] {
     [
         (
             SettingsTab::General,
@@ -25,6 +25,7 @@ fn tabs() -> [(SettingsTab, &'static str, &'static str); 10] {
             icons::FRAME_CORNERS,
             tr!("settings-video-position"),
         ),
+        (SettingsTab::Picture, icons::SUN, tr!("settings-picture")),
         (
             SettingsTab::Sound,
             icons::SPEAKER_HIGH,
@@ -103,6 +104,7 @@ pub fn settings(ui: &mut egui::Ui, v: &mut View) {
                     SettingsTab::General => general(ui, v),
                     SettingsTab::Playback => playback(ui, v),
                     SettingsTab::VideoPosition => video_position(ui, v),
+                    SettingsTab::Picture => picture(ui, v),
                     SettingsTab::Sound => sound(ui, v),
                     SettingsTab::Passthrough => passthrough(ui, v),
                     SettingsTab::Controller => controller(ui, v),
@@ -236,7 +238,8 @@ fn controller(ui: &mut egui::Ui, v: &mut View) {
     });
 }
 
-/// App-wide switches, thumbnails, then the switches for finding a problem.
+/// App-wide switches, the display, thumbnails, then the switches for
+/// finding a problem.
 fn general(ui: &mut egui::Ui, v: &mut View) {
     let s = &mut *v.settings;
     let open = &mut v.state.interface_languages_open;
@@ -303,6 +306,7 @@ fn general(ui: &mut egui::Ui, v: &mut View) {
             &mut s.haptics_enabled,
         );
     });
+    display(ui, &mut s.display);
     heading(ui, tr!("settings-thumbnails"));
     widgets::rows(ui, |r| {
         r.switch(
@@ -357,6 +361,53 @@ fn general(ui: &mut egui::Ui, v: &mut View) {
             tr!("settings-perf-overlay"),
             Some(tr!("settings-perf-panel-desc")),
             &mut s.perf_overlay,
+        );
+    });
+}
+
+/// Refresh rate, render resolution and foveated rendering. A row's
+/// chips go right to left, so the first choice is added last.
+fn display(ui: &mut egui::Ui, d: &mut fp_core::display::Display) {
+    use fp_core::display::{EYE_RESOLUTIONS, Foveation, REFRESH_RATES};
+    heading(ui, tr!("settings-display"));
+    widgets::rows(ui, |r| {
+        r.row(
+            tr!("settings-refresh-rate"),
+            Some(tr!("settings-refresh-rate-desc")),
+            |ui| {
+                for hz in REFRESH_RATES.into_iter().rev() {
+                    if widgets::chip(ui, &format!("{hz} Hz"), d.refresh_rate == hz).clicked() {
+                        d.refresh_rate = hz;
+                    }
+                }
+            },
+        );
+        r.row(
+            tr!("settings-render-resolution"),
+            Some(tr!("settings-render-resolution-desc")),
+            |ui| {
+                for px in EYE_RESOLUTIONS.into_iter().rev() {
+                    if widgets::chip(ui, &px.to_string(), d.eye_resolution == px).clicked() {
+                        d.eye_resolution = px;
+                    }
+                }
+            },
+        );
+        r.row(
+            tr!("settings-foveation"),
+            Some(tr!("settings-foveation-desc")),
+            |ui| {
+                for level in Foveation::ALL.into_iter().rev() {
+                    let label = match level {
+                        Foveation::Off => tr!("foveation-off"),
+                        Foveation::Low => tr!("foveation-low"),
+                        Foveation::High => tr!("foveation-high"),
+                    };
+                    if widgets::chip(ui, label, d.foveation == level).clicked() {
+                        d.foveation = level;
+                    }
+                }
+            },
         );
     });
 }
@@ -469,6 +520,15 @@ fn video_position(ui: &mut egui::Ui, v: &mut View) {
     heading(ui, tr!("settings-vr-videos"));
     widgets::rows(ui, |r| {
         r.slider(
+            tr!("adjust-zoom"),
+            None,
+            &mut d.zoom,
+            0.5..=2.5,
+            1.0,
+            "×",
+            2,
+        );
+        r.slider(
             tr!("settings-height"),
             Some(tr!("settings-height-desc")),
             &mut d.height,
@@ -477,9 +537,29 @@ fn video_position(ui: &mut egui::Ui, v: &mut View) {
             " m",
             2,
         );
+        r.slider(
+            tr!("adjust-forward"),
+            Some(tr!("adjust-forward-desc")),
+            &mut d.forward,
+            -1.0..=1.0,
+            0.0,
+            " m",
+            2,
+        );
     });
     heading(ui, tr!("settings-background"));
     super::player::background_controls(ui, &mut d.background);
+}
+
+/// How videos look until they are adjusted: the picture, and a 3D video's
+/// depth and eye alignment.
+fn picture(ui: &mut egui::Ui, v: &mut View) {
+    let d = &mut v.settings.default_view;
+    note(ui, tr!("settings-picture-desc"));
+    heading(ui, tr!("settings-all-videos"));
+    super::player::picture_tab(ui, d);
+    heading(ui, tr!("settings-3d-videos"));
+    super::player::stereo_tab(ui, d, false);
 }
 
 fn sound(ui: &mut egui::Ui, v: &mut View) {
@@ -602,7 +682,7 @@ fn passthrough(ui: &mut egui::Ui, v: &mut View) {
     widgets::section_label(ui, tr!("settings-passthrough-videos"));
     ui.label(RichText::new(tr!("settings-passthrough-videos-desc")).color(theme::TEXT_2));
     ui.add_space(6.0);
-    super::player::chroma_controls(ui, &mut s.default_view, available);
+    super::player::chroma_controls(ui, &mut s.default_view, available, false);
 }
 
 /// The kinds of haptic device, each with the hint its address field shows.

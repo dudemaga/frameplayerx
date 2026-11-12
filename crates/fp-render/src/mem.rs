@@ -256,6 +256,47 @@ pub fn barrier(
     };
 }
 
+/// [`barrier`] over a whole single-mip image that also moves it from queue
+/// family `families.0` to `families.1`: for memory the video decoder
+/// writes, from the foreign family before the GPU reads it and back after
+/// ([`Gpu::decoder_family`](crate::gpu::Gpu)).
+#[allow(clippy::too_many_arguments)]
+pub fn ownership_barrier(
+    gpu: &Gpu,
+    cmd: vk::CommandBuffer,
+    image: vk::Image,
+    old: vk::ImageLayout,
+    new: vk::ImageLayout,
+    src: (vk::PipelineStageFlags2, vk::AccessFlags2),
+    dst: (vk::PipelineStageFlags2, vk::AccessFlags2),
+    families: (u32, u32),
+) {
+    let b = [vk::ImageMemoryBarrier2::default()
+        .image(image)
+        .subresource_range(range(0, 1))
+        .old_layout(old)
+        .new_layout(new)
+        .src_stage_mask(src.0)
+        .src_access_mask(src.1)
+        .dst_stage_mask(dst.0)
+        .dst_access_mask(dst.1)
+        .src_queue_family_index(families.0)
+        .dst_queue_family_index(families.1)];
+    // SAFETY: recording into a command buffer in the recording state.
+    unsafe {
+        gpu.device.cmd_pipeline_barrier2(
+            cmd,
+            &vk::DependencyInfo::default().image_memory_barriers(&b),
+        );
+    };
+}
+
+/// After everything, for a release to another queue family.
+pub const BOTTOM: (vk::PipelineStageFlags2, vk::AccessFlags2) = (
+    vk::PipelineStageFlags2::BOTTOM_OF_PIPE,
+    vk::AccessFlags2::NONE,
+);
+
 pub const TOP: (vk::PipelineStageFlags2, vk::AccessFlags2) =
     (vk::PipelineStageFlags2::TOP_OF_PIPE, vk::AccessFlags2::NONE);
 pub const TRANSFER_WRITE: (vk::PipelineStageFlags2, vk::AccessFlags2) = (

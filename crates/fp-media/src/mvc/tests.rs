@@ -361,3 +361,25 @@ fn the_conformance_streams_decode_as_their_manifest_has_them() {
     }
     assert!(failed.is_empty(), "{failed:?}");
 }
+
+#[test]
+fn field_coding_is_read_from_the_parameter_sets() {
+    let data = |input: &Input| {
+        // SAFETY: the stream and its parameters live as long as the input.
+        let par = unsafe { &*(*input.streams()[0]).codecpar };
+        extradata(par).to_vec()
+    };
+    let tests = Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/data");
+    let interlaced = data(&open(&tests.join("interlaced_h264.mp4")));
+    assert!(field_coded(&interlaced));
+    let (_, sets) = record_parameter_sets(&interlaced, 0x1f).unwrap();
+    let annex_b: Vec<u8> = sets
+        .iter()
+        .flat_map(|s| [&[0, 0, 0, 1], *s].concat())
+        .collect();
+    assert!(field_coded(&annex_b));
+    assert!(!field_coded(&data(&open(
+        &tests.join("h264_aac_180_LR.mp4")
+    ))));
+    assert!(!field_coded(&[]));
+}

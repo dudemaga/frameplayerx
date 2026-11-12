@@ -97,6 +97,19 @@ pub fn library_page(
                 force: false,
             });
         }
+        if l.grid.total > 0
+            && widgets::button_sized(
+                ui,
+                Some(icons::PLAY),
+                tr!("common-play-all"),
+                Kind::Secondary,
+                44.0,
+            )
+            .clicked()
+        {
+            let reqs = super::library::play_all(v, &l.grid);
+            v.actions.push(Action::PlayAll(reqs, 0));
+        }
     });
     ui.horizontal(|ui| {
         ui.spacing_mut().item_spacing.x = 8.0;

@@ -319,6 +319,31 @@ impl App {
         });
     }
 
+    /// A server grid's Play all: the videos among the first of `query`,
+    /// fetched, then played through.
+    pub(super) fn catalog_play_all(&mut self, source: String, query: fp_sources::CatalogQuery) {
+        let Some(src) = self.services.opener.source(&source) else {
+            self.ui.toast(tr!("source-not-available"));
+            return;
+        };
+        self.jobs.spawn("catalog-play-all", move || {
+            let result = match src.as_catalog() {
+                Some(catalog) => catalog
+                    .items(&query)
+                    .map(|page| {
+                        page.items
+                            .iter()
+                            .filter(|i| i.kind.playable())
+                            .map(|i| ui::catalog::request(&source, i, false))
+                            .collect()
+                    })
+                    .map_err(|e| ui::errors::source(&e)),
+                None => Err(tr!("source-not-available").to_string()),
+            };
+            Job::PlayAll(result)
+        });
+    }
+
     /// Scans library `source` now, saying how it went; `force` makes its
     /// thumbnails again.
     pub(super) fn rescan(&mut self, source: &str, force: bool) {

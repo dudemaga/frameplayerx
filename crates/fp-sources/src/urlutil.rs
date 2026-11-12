@@ -128,7 +128,7 @@ pub fn last_segment(location: &str) -> String {
             _ => {}
         }
         let key = match reference.kind.as_str() {
-            "http" | "webdav" | "smb" | "mb-asset" => Some(reference.key.as_str()),
+            "http" | "webdav" | "smb" | "sftp" | "mb-asset" => Some(reference.key.as_str()),
             _ => None,
         };
         if let Some(key) = key {
@@ -459,7 +459,7 @@ mod tests {
 
     #[test]
     fn owned_path_names_keep_escaping_and_exclude_folders_and_queries() {
-        for kind in ["http", "webdav", "smb", "mb-asset"] {
+        for kind in ["http", "webdav", "smb", "sftp", "mb-asset"] {
             let uri = crate::location::encode(
                 "source/id",
                 kind,

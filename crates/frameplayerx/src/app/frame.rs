@@ -171,8 +171,8 @@ impl App {
     /// Background work, remote commands and saving the open video's state.
     fn update(&mut self) {
         self.poll_jobs();
-        // Play all, a playlist and what was queued play through, any list
-        // with Autoplay; Loop video keeps to the one playing.
+        // Up next plays on with Autoplay; Loop video keeps to the one
+        // playing.
         if self
             .playback
             .as_ref()
@@ -543,6 +543,9 @@ impl App {
         input: &FrameInput,
         anchor: Mat4,
     ) -> (Option<Arc<VideoFrame>>, VideoParams, bool) {
+        if let Some(p) = &mut self.playback {
+            p.poll_backdrop();
+        }
         let shown = self
             .playback
             .as_ref()
@@ -594,6 +597,14 @@ impl App {
             self.subtitles(renderer, input.time, player, &s);
         } else {
             self.subs.visible = false;
+        }
+        // Once the video plays, so the second read doesn't hold up its start.
+        if frame.is_some()
+            && let Some(p) = &mut self.playback
+            && p.wants_backdrop(&self.settings.default_view)
+        {
+            let duration = p.player.duration();
+            p.backdrop.start(self.services.opener.clone(), duration);
         }
         (frame, video, passthrough)
     }

@@ -708,8 +708,8 @@ pub fn page(ui: &mut egui::Ui, v: &mut View, source: &str, name: &str, f: &mut F
         f.shown += PAGE;
     }
     if let Some(i) = picked.play {
-        let reqs = list.iter().map(|s| request(source, s, None)).collect();
-        v.actions.push(Action::OpenList(reqs, i));
+        v.actions
+            .push(Action::Open(request(source, &list[i], None)));
     }
     if let Some(url) = picked.open {
         f.details = Some(Details {
@@ -865,6 +865,26 @@ fn header(
             actions.push(Action::FeedLoad {
                 source: source.to_string(),
             });
+        }
+        // Every scene the search and filters keep, in the grid's order.
+        if !f.order.is_empty()
+            && widgets::button_sized(
+                ui,
+                Some(icons::PLAY),
+                tr!("common-play-all"),
+                Kind::Secondary,
+                44.0,
+            )
+            .clicked()
+        {
+            let reqs: Vec<OpenRequest> = f
+                .visible()
+                .into_iter()
+                .map(|s| request(source, s, None))
+                .collect();
+            if !reqs.is_empty() {
+                actions.push(Action::PlayAll(reqs, 0));
+            }
         }
     })
 }

@@ -33,6 +33,10 @@ pub fn source(e: &fp_sources::Error) -> String {
         E::Unsupported(what) => tr!("error-unsupported", what = what.as_str()),
         E::Smb(message) => tr!("error-smb", error = message.as_str()),
         E::SmbUnavailable(message) => tr!("error-smb-unavailable", error = message.as_str()),
+        E::Sftp(message) => tr!("error-sftp", error = message.as_str()),
+        E::SftpUnavailable(message) => tr!("error-sftp-unavailable", error = message.as_str()),
+        E::HostKeyChanged(server) => tr!("error-host-key-changed", server = server.as_str()),
+        E::KeyPassphrase(file) => tr!("error-key-passphrase", file = file.as_str()),
         E::Config(message) => tr!("error-config", error = message.as_str()),
     }
 }

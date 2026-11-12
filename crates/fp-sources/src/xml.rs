@@ -73,24 +73,18 @@ impl Element {
     }
 }
 
-fn local(name: &[u8]) -> String {
-    let s = String::from_utf8_lossy(name);
-    match s.rsplit_once(':') {
+fn local(name: &str) -> String {
+    match name.rsplit_once(':') {
         Some((_, l)) => l.to_string(),
-        None => s.into_owned(),
+        None => name.to_string(),
     }
 }
 
 fn element_from(start: &BytesStart<'_>) -> Element {
     let mut attrs = Vec::new();
     for a in start.attributes().with_checks(false).flatten() {
-        let key = local(a.key.as_ref());
-        // Fall back to the raw value when it contains a bad escape.
-        let value = match a.unescape_value() {
-            Ok(v) => v.into_owned(),
-            Err(_) => html_unescape(&String::from_utf8_lossy(&a.value)),
-        };
-        attrs.push((key, value));
+        // Unescaped tolerantly: a bad escape stays as it is.
+        attrs.push((local(a.key.as_ref()), html_unescape(&a.value)));
     }
     Element {
         name: local(start.name().as_ref()),
@@ -143,19 +137,17 @@ pub(crate) fn parse(xml: &str) -> Result<Element> {
                 }
             }
             Event::Text(t) => {
-                let raw = t.decode().map_err(|e| Error::parse("XML", e))?;
                 if let Some(top) = stack.last_mut() {
-                    top.text.push_str(&html_unescape(&raw));
+                    top.text.push_str(&html_unescape(&t.xml10_content()));
                 }
             }
             Event::CData(c) => {
-                let raw = c.decode().map_err(|e| Error::parse("XML", e))?;
                 if let Some(top) = stack.last_mut() {
-                    top.text.push_str(&raw);
+                    top.text.push_str(&c.xml10_content());
                 }
             }
             Event::GeneralRef(r) => {
-                let name = r.decode().map_err(|e| Error::parse("XML", e))?;
+                let name = r.into_inner();
                 if let Some(top) = stack.last_mut() {
                     top.text.push_str(&html_unescape(&format!("&{name};")));
                 }

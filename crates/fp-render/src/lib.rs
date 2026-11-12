@@ -10,20 +10,33 @@
 //! - [`capture`]: offscreen eye targets with read-back, for tests and
 //!   screenshots.
 //! - `q10c`: shows the Steam Frame decoder's 10-bit (Q10C) pictures.
+//! - [`hdr`]: HDR on the SDR screen: tone curve, gamut compression and the
+//!   scene peak, which `peak` measures from the frames.
+//! - [`backdrop`]: finds the green or blue screen behind a video in a
+//!   picture of one of its frames, the colour its chroma key starts with.
 
+pub mod backdrop;
 pub mod capture;
+mod foveation;
 pub mod gpu;
+pub mod hdr;
 pub mod math;
 pub mod mem;
 pub mod params;
+mod peak;
 mod pipeline;
 mod q10c;
 pub mod renderer;
+mod shared;
+mod timing;
+mod tp10_eyes;
 mod video;
 
+pub use foveation::Foveation;
 pub use gpu::{Creator, DirectCreator, Gpu};
 pub use params::VideoParams;
 pub use renderer::{EyeTarget, EyeView, PanelId, QuadDraw, QuadTexture, Renderer};
+pub use timing::GpuTimes;
 
 use ash::vk;
 
@@ -58,3 +71,6 @@ pub(crate) const SCENE_SPV: &[u8] = include_bytes!(concat!(env!("OUT_DIR"), "/sc
 pub(crate) const QUAD_SPV: &[u8] = include_bytes!(concat!(env!("OUT_DIR"), "/quad.spv"));
 pub(crate) const EGUI_SPV: &[u8] = include_bytes!(concat!(env!("OUT_DIR"), "/egui.spv"));
 pub(crate) const Q10C_SPV: &[u8] = include_bytes!(concat!(env!("OUT_DIR"), "/q10c.spv"));
+pub(crate) const PEAK_SPV: &[u8] = include_bytes!(concat!(env!("OUT_DIR"), "/peak.spv"));
+pub(crate) const SCENE_TP10_SPV: &[u8] =
+    include_bytes!(concat!(env!("OUT_DIR"), "/scene_tp10.spv"));

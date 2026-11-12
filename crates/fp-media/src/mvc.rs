@@ -142,6 +142,22 @@ pub(crate) fn length_size(extradata: &[u8]) -> usize {
     record_parameter_sets(extradata, 0x1f).map_or(0, |(size, _)| size)
 }
 
+/// Whether an H.264 stream's extradata (avcC record or Annex B) has a
+/// sequence parameter set that allows field pictures (`frame_mbs_only_flag`
+/// 0): PAFF and MBAFF, 1080i camcorder and TV video, which MP4 often doesn't
+/// mark as interlaced.
+pub(crate) fn field_coded(extradata: &[u8]) -> bool {
+    let units: Vec<&[u8]> = match record_parameter_sets(extradata, 0x1f) {
+        Some((_, sets)) => sets,
+        None => crate::nal::units(extradata, 0).collect(),
+    };
+    units
+        .into_iter()
+        .filter(|u| u.first().is_some_and(|b| b & 0x1f == 7))
+        .filter_map(|u| syntax::parse_sps(&bits::unescape(u)).ok())
+        .any(|s| !s.frame_mbs_only)
+}
+
 pub(crate) fn extradata(par: &ff::AVCodecParameters) -> &[u8] {
     if par.extradata.is_null() || par.extradata_size <= 0 {
         &[]

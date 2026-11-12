@@ -5,6 +5,8 @@
 //! costs nothing. The Steam Frame profile comes first; Touch (what SteamVR
 //! presents the Frame controllers as without the Frame extension), the simple
 //! controller and hand interaction are bound the same way as fallbacks.
+//! Eye gaze, where the runtime has `XR_EXT_eye_gaze_interaction`, is one
+//! more pose action.
 
 use crate::{Result, XrContextExt};
 use glam::{Quat, Vec2, Vec3};
@@ -39,6 +41,9 @@ pub struct Hand {
 pub struct InputState {
     /// Left, right.
     pub hands: [Hand; 2],
+    /// Where the eyes look: origin and orientation (-Z forward) in the play
+    /// space, while eye tracking is on.
+    pub gaze: Option<(Vec3, Quat)>,
 }
 
 /// An interaction profile the runtime accepted bindings for.
@@ -67,6 +72,10 @@ pub(crate) struct Actions {
     haptic: xr::Action<xr::Haptic>,
     pub hands: [xr::Path; 2],
     aim_spaces: Option<[xr::Space; 2]>,
+    gaze: Option<xr::Action<xr::Posef>>,
+    gaze_space: Option<xr::Space>,
+    /// Whether eye tracking was on, for logging when that changes.
+    gaze_on: std::cell::Cell<Option<bool>>,
     pub bound: Vec<BoundProfile>,
     /// `FRAMEPLAYERX_DEBUG_INPUT=1`: log each hand's input when it changes,
     /// and errors reading action states (normally ignored).
@@ -163,8 +172,13 @@ const PROFILES: &[(&str, &str, &[Candidate])] = &[
     ),
 ];
 
+/// The eye gaze profile and its one pose (`XR_EXT_eye_gaze_interaction`).
+const GAZE_PROFILE: &str = "/interaction_profiles/ext/eye_gaze_interaction";
+const GAZE_POSE: &str = "/user/eyes_ext/input/gaze_ext/pose";
+
 impl Actions {
-    pub fn new(instance: &xr::Instance) -> Result<Actions> {
+    /// `eye_gaze`: the instance has `XR_EXT_eye_gaze_interaction`.
+    pub fn new(instance: &xr::Instance, eye_gaze: bool) -> Result<Actions> {
         let hands = [
             instance.string_to_path("/user/hand/left").ctx("path")?,
             instance.string_to_path("/user/hand/right").ctx("path")?,
@@ -216,6 +230,9 @@ impl Actions {
             haptic,
             hands,
             aim_spaces: None,
+            gaze: None,
+            gaze_space: None,
+            gaze_on: std::cell::Cell::new(None),
             bound: Vec::new(),
             debug: std::env::var_os("FRAMEPLAYERX_DEBUG_INPUT").is_some_and(|v| v != "0"),
             last_logged: Default::default(),
@@ -266,6 +283,11 @@ impl Actions {
             }
         }
         log::info!("input bindings: {:?}", actions.bound);
+        if eye_gaze {
+            actions.gaze = gaze_action(instance, &actions.set)
+                .inspect_err(|e| log::warn!("no eye gaze: {e}"))
+                .ok();
+        }
         Ok(actions)
     }
 
@@ -305,6 +327,12 @@ impl Actions {
                 .ctx("aim space")
         };
         self.aim_spaces = Some([mk(self.hands[0])?, mk(self.hands[1])?]);
+        if let Some(gaze) = &self.gaze {
+            self.gaze_space = gaze
+                .create_space(session, xr::Path::NULL, xr::Posef::IDENTITY)
+                .inspect_err(|e| log::warn!("no eye gaze space: {e}"))
+                .ok();
+        }
         Ok(())
     }
 
@@ -384,7 +412,28 @@ impl Actions {
                 }
             }
         }
+        out.gaze = self.read_gaze(session, base, time);
         out
+    }
+
+    /// The gaze pose at `time`, while eye tracking is on.
+    fn read_gaze<G>(
+        &self,
+        session: &xr::Session<G>,
+        base: &xr::Space,
+        time: xr::Time,
+    ) -> Option<(Vec3, Quat)> {
+        let (gaze, space) = (self.gaze.as_ref()?, self.gaze_space.as_ref()?);
+        let on = gaze.is_active(session, xr::Path::NULL).unwrap_or(false);
+        if self.gaze_on.replace(Some(on)) != Some(on) {
+            log::info!("eye tracking {}", if on { "on" } else { "off" });
+        }
+        let loc = space.locate(base, time).ok().filter(|_| on)?;
+        // Runtimes may only estimate where the gaze starts; its direction
+        // is what counts.
+        loc.location_flags
+            .contains(xr::SpaceLocationFlags::ORIENTATION_VALID)
+            .then(|| crate::pose(loc.pose))
     }
 
     /// Short vibration for UI feedback.
@@ -397,4 +446,17 @@ impl Actions {
             .haptic
             .apply_feedback(session, self.hands[hand.min(1)], &event);
     }
+}
+
+/// The eye gaze pose action in `set`, bound to the eye gaze profile.
+fn gaze_action(instance: &xr::Instance, set: &xr::ActionSet) -> Result<xr::Action<xr::Posef>> {
+    let action = set
+        .create_action::<xr::Posef>("gaze", "Eye gaze", &[])
+        .ctx("gaze action")?;
+    let profile = instance.string_to_path(GAZE_PROFILE).ctx("path")?;
+    let pose = instance.string_to_path(GAZE_POSE).ctx("path")?;
+    instance
+        .suggest_interaction_profile_bindings(profile, &[xr::Binding::new(&action, pose)])
+        .ctx("eye gaze binding")?;
+    Ok(action)
 }

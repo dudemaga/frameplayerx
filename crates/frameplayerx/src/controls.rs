@@ -56,6 +56,8 @@ pub enum Cmd {
     Bookmark,
     ToggleSubtitles,
     ResetImage,
+    /// The next preset (see [`crate::settings::Settings::next_preset`]).
+    NextPreset,
     DragBegin,
     /// Degrees moved since the drag began (yaw left-positive, pitch up-positive).
     DragTo {
@@ -309,6 +311,7 @@ fn button_cmd(action: ButtonAction, playing: bool) -> Option<Cmd> {
         B::NextChapter => Cmd::Chapter(1),
         B::Bookmark => Cmd::Bookmark,
         B::Subtitles => Cmd::ToggleSubtitles,
+        B::NextPreset => Cmd::NextPreset,
     };
     Some(cmd)
 }
@@ -403,6 +406,11 @@ mod tests {
         for (set, want) in cases {
             assert_eq!(press(RIGHT, set, true), vec![want], "{want:?}");
         }
+        assert_eq!(
+            press(LEFT, |h, v| (h.squeeze, h.west) = (1.0, v), true),
+            vec![Cmd::NextPreset],
+            "the left grip makes the adjust panel's button the next preset"
+        );
         // The other hand's grip doesn't count.
         let mut c = Controls::default();
         let mut h = hands();

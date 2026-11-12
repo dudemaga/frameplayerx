@@ -26,7 +26,14 @@ fn main() {
         );
     }
     println!("cargo:rustc-link-search=native={}", dir.display());
-    for lib in ["avformat", "avcodec", "swresample", "swscale", "avutil"] {
+    for lib in [
+        "avformat",
+        "avcodec",
+        "avfilter",
+        "swresample",
+        "swscale",
+        "avutil",
+    ] {
         println!("cargo:rustc-link-lib=dylib={lib}");
     }
     // Let dependent build scripts and tests find the libraries.

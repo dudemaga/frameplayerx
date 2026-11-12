@@ -105,7 +105,7 @@ headset's Noto Sans CJK; for the preview, install it with
 | `fp-xr` | OpenXR: the session and swapchains, controller input, passthrough |
 | `fp-xr-loader` | Finds the active OpenXR runtime and loads it directly, with no Khronos loader to ship (shared with `frame-probe`) |
 | `fp-library` | The SQLite database: folder scanning, the metadata and thumbnail worker, search, watch history |
-| `fp-sources` | Sources: local folders, HTTP, WebDAV, DLNA, SMB, DeoVR and HereSphere feeds, Jellyfin, Emby and Plex |
+| `fp-sources` | Sources: local folders, HTTP, WebDAV, DLNA, SMB, SFTP, DeoVR and HereSphere feeds, Jellyfin, Emby and Plex |
 | `fp-haptics` | Funscripts, the sync engine, and TCode, Buttplug and Handy devices |
 | `fp-remote` | The DeoVR remote API and the phone web remote |
 | `fp-updater` | Signed update manifests, download, install and rollback; the `fp-release` maintainer tool |
@@ -137,11 +137,34 @@ protocol is implemented in Rust and looks like a file to FFmpeg. H.264 and
 HEVC go to the Frame's V4L2 stateful decoder; anything it can't take is
 decoded in software. Frames are uploaded to Vulkan as YUV and converted in
 the shader, which maps each pixel of each eye onto the video for the chosen
-projection and stereo layout. HDR is tone mapped there too. 10-bit HEVC
+projection and stereo layout. HDR is tone mapped there too, with BT.2390's
+curve to the scene's peak, after compressing BT.2020 colours into BT.709
+(`fp-render/src/hdr.rs`); a small compute pass counts each new HDR frame's
+brightness into a histogram the peak comes from (`peak.rs`). 10-bit HEVC
 comes out of the decoder as Q10C (Qualcomm's compressed TP10), which only
 the GPU can read: `fp-render/src/q10c.rs` reads it through TP10 texture
 descriptors made from Turnip's own (`VK_EXT_descriptor_buffer`) and turns
 it into P010 planes in a compute pass.
+
+The player's hardware-decoded frames aren't copied at all on the Frame:
+the decoder lends each frame its buffer, exported as a DMA-BUF
+(`VideoFrame::shared`), and the renderer imports each buffer once and
+reads it where it is (`fp-render/src/shared.rs`), NV12 by the eye passes
+and Q10C by the conversion. A frame holds its buffer until the GPU is done
+with it, then the decoder has it back. When the driver would be left with
+fewer buffers than it needs, or an import fails, frames are copied out as
+before. So are 8-bit HDR frames, whose scenes are measured in the planes
+the renderer uploads.
+
+An SDR 10-bit frame read in place isn't converted either: the eye passes
+sample its Q10C planes through TP10 descriptors (`fp-render/src/tp10_eyes.rs`,
+`shaders/planes_tp10.wgsl`), which saves the conversion pass, 5.7 ms for an
+8K frame. A descriptor reads at most 2^24 samples, so each plane is read in
+overlapping bands of rows, and a sample comes from the band whose middle is
+nearest, where its bilinear neighbours are too. TP10 descriptors exist only
+as bytes, so this pipeline takes all its descriptors from descriptor
+buffers, the scene's parameters included. HDR 10-bit frames are still
+converted, as their scenes are measured in the converted planes.
 
 **Sources and browsing.** Every source implements one `Source` trait
 (`list`, `open`, `details`). Each kind gets its own browser in `ui/`:
@@ -154,7 +177,7 @@ Persistent source references use
 `source://source/<encoded-source-id>/<kind>/<encoded-key>`
 (`fp-sources/src/location.rs`). Each component is encoded separately; the
 key is one opaque segment, including any encoded path separators. HTTP(S),
-WebDAV and SMB keys are relative to the configured root; Jellyfin and Emby
+WebDAV, SMB and SFTP keys are relative to the configured root; Jellyfin and Emby
 keys retain item and version IDs, and DLNA uses object IDs rather than
 resource URLs. Feeds use published stable scene IDs where available;
 otherwise scene, media and asset URLs remain exactly as published,
@@ -299,6 +322,23 @@ from its timestamp, not a count, so a seek or a lost frame can't leave later
 frames on the wrong eye. An odd gap in a file's timestamps would swap them,
 which no file tried has.
 
+**Interlaced video.** `info::interlaced` calls a stream coded as fields
+when FFmpeg's field order says so or, for H.264, when a sequence parameter
+set allows field pictures (`frame_mbs_only_flag` 0, `mvc::field_coded`):
+FFmpeg reads an H.264 field order from the first picture alone, and none
+from field pictures (PAFF camcorder clips). Such H.264 never goes to the
+hardware decoder: FFmpeg's V4L2 wrapper is refused every packet of 1080i,
+and the native path gives up after seconds. `fp-media/src/deinterlace.rs`
+runs a software decoder's frames through libavfilter's bwdif
+(`mode=send_field`), the one filter the FFmpeg build enables: the frames
+the decoder marks interlaced for a stream found by its headers
+(`deint=interlaced`), every frame when the viewer turns it on (`deint=all`).
+Each field comes out a picture, timed in a time base half the stream's, and
+`StreamInfo` reports `deinterlaced` and twice the codec's frame rate.
+`VideoFormat::interlaced` holds the viewer's choice from the Format tab's
+**Interlaced** switch, reaching the player as `PlayerConfig::deinterlace`; a
+change reopens the video, as frame sequential does.
+
 **Pictures.** A card shows `MediaRecord::picture`: the frame where a partly
 watched video was left off, else its server's picture, else a thumbnail the
 metadata worker made (`fp-library/src/worker.rs`; only for videos whose
@@ -418,6 +458,15 @@ frameplayerx --seek-test URL --rounds 5 --seeks 0 --play 0               # first
 
 A skip slower than 2 s counts as a failure, so a slow route ends in `FAIL`; the numbers are still good. "Read speed while the buffer fills" counts only bursts of at least 16 MiB with no gap over 5 ms, so time the demuxer spends waiting with a full queue doesn't lower it, and reads served from the block cache don't raise it. A link's speed can swing 2x between runs, so compare builds in one session, on medians.
 
+### Measuring GPU time
+
+Every 10 s the log has a `frame GPU ms` line beside `frame CPU ms`: the GPU's time per frame (median, 95th percentile, longest) and the median of each part of a frame (`video`: an upload, a 10-bit conversion and HDR measuring; `eyes`: both eye passes; `panels`: painting the menus; `layers`: copying them into the compositor's layers), from timestamps the renderer writes between the parts. The compositor's own work isn't in it. The same work takes longer at a lower GPU clock, so the line ends with the clock. In `--preview`, the `gpu` script command prints the same line for the frames since the last one, and the run ends with one for the rest; `--size 2160` renders the eyes at the headset's size.
+
+```bash
+printf 'open clip_8k.mp4\nwait-playing 30\nwait 2\ngpu\nwait 10\ngpu\n' > /tmp/gpu.fps
+frameplayerx --preview /tmp/shots --size 2160 --script /tmp/gpu.fps
+```
+
 ## On the headset
 
 ```bash
@@ -439,11 +488,11 @@ Steam can't pass environment variables to an app, so the launcher reads
 
 | Variable | Default | What it does |
 |---|---|---|
-| `FRAMEPLAYERX_REFRESH_RATE` | `90` | The refresh rate set in SteamVR's per-app settings for FramePlayerX, unless you chose one there. `0` leaves it alone |
-| `FRAMEPLAYERX_RESOLUTION` | `2160` | Pixels per eye, set the same way (SteamVR's default is 1728). `0` leaves it alone |
 | `FRAMEPLAYERX_DEBUG_INPUT` | | `1` logs each controller's input when it changes |
 | `FRAMEPLAYERX_V4L2` | | `0` turns off the native V4L2 decoder |
 | `FRAMEPLAYERX_V4L2_DEVICE` | | The V4L2 device to decode with, instead of the one found |
+| `FRAMEPLAYERX_ZERO_COPY` | | `0` copies hardware-decoded frames out of the decoder's buffers instead of reading them there, as before; for comparing the two |
+| `FRAMEPLAYERX_TP10_EYES` | | `0` converts SDR 10-bit frames read in place into P010 planes instead of sampling them in the eye passes, as before; for comparing the two |
 
 ### Steam Frame notes
 
@@ -459,9 +508,18 @@ What the code relies on about the platform:
   `/interaction_profiles/valve/frame_controller_valve`, from the
   `XR_VALVE_frame_controller_interaction` extension. Without it SteamVR
   presents them as Touch controllers.
-- SteamVR's per-app video settings override what an app asks for through
-  OpenXR, which is why the launcher sets the refresh rate and resolution
-  there.
+- SteamVR runs each app at its per-app refresh rate:
+  `XR_FB_display_refresh_rate` offers only the current rate and refuses
+  requests. Setting the app's `preferredRefreshRate` with `vrcmd` changes
+  the rate at once, which is how Settings › General › Display sets it. The
+  eye picture size is the app's own: it makes its swapchains at the
+  chosen resolution (SteamVR allows up to 8192 per eye); the per-app
+  resolution only changes what SteamVR recommends.
+- Turnip applies a fragment density map once per rendering bin, about 576
+  pixels wide for one 8-bit target, so foveation uses a fragment shading
+  rate attachment instead: 8×8-pixel texels, `R8_UINT` in optimal tiling
+  only, padded to 64 texels (one 270 texels wide was misread near its
+  right edge). The gaze comes from `XR_EXT_eye_gaze_interaction`.
 - The hardware decoder is a V4L2 stateful decoder for 4:2:0 H.264 (8-bit)
   and HEVC (8- and 10-bit). One session takes at most 8192×4320. Every
   session open on the driver lowers that, idle ones and encoders too, so

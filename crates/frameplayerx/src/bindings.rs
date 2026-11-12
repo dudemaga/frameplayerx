@@ -34,10 +34,11 @@ pub enum ButtonAction {
     AdjustPanel,
     Passthrough,
     Recenter,
+    NextPreset,
 }
 
 impl ButtonAction {
-    pub const ALL: [ButtonAction; 20] = [
+    pub const ALL: [ButtonAction; 21] = [
         ButtonAction::PlayPause,
         ButtonAction::Back,
         ButtonAction::Library,
@@ -57,6 +58,7 @@ impl ButtonAction {
         ButtonAction::AdjustPanel,
         ButtonAction::Passthrough,
         ButtonAction::Recenter,
+        ButtonAction::NextPreset,
         ButtonAction::Nothing,
     ];
 
@@ -82,6 +84,7 @@ impl ButtonAction {
             ButtonAction::AdjustPanel => tr!("action-adjust"),
             ButtonAction::Passthrough => tr!("action-room"),
             ButtonAction::Recenter => tr!("action-recenter"),
+            ButtonAction::NextPreset => tr!("action-next-preset"),
         }
     }
 
@@ -99,6 +102,7 @@ impl ButtonAction {
             ButtonAction::ShowHideControls => tr!("action-short-show-hide"),
             ButtonAction::AdjustPanel => tr!("action-short-adjust"),
             ButtonAction::Passthrough => tr!("action-short-room"),
+            ButtonAction::NextPreset => tr!("action-short-next-preset"),
             other => other.label(),
         }
     }
@@ -324,7 +328,8 @@ impl HandBindings {
 
 /// Both controllers. The default: the right hand runs playback, the left
 /// the picture, with play/pause and seeking under either thumb; the right
-/// grip makes X/Y chapters, A a bookmark and the thumbstick press subtitles.
+/// grip makes X/Y chapters, A a bookmark and the thumbstick press subtitles,
+/// and the left grip makes D-pad left (the adjust panel) the next preset.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize)]
 pub struct Bindings {
     pub left: HandBindings,
@@ -387,7 +392,10 @@ impl Default for Bindings {
                 stick_y: X::Tilt,
                 grip_x: X::Turn,
                 grip_y: X::Zoom,
-                grip: GripButtons::default(),
+                grip: GripButtons {
+                    west: B::NextPreset,
+                    ..GripButtons::default()
+                },
             },
             right: HandBindings {
                 south: B::PlayPause,

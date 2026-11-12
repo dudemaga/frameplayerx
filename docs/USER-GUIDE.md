@@ -9,6 +9,7 @@ or your network.
   PIN locks, microSD cards and USB drives
 - [Video formats](#video-formats), [fisheye lenses](#fisheye-lenses) and
   [videos that stutter](#videos-that-stutter-av1-and-422)
+- [Display](#display): refresh rate, resolution and foveated rendering
 - [Controls](#controls), and [watching lying down](#watching-lying-down)
 - [Passthrough videos](#passthrough-videos)
 - [Haptics](#haptics)
@@ -167,6 +168,7 @@ that pairing, you can also delete `~/.ssh/id_rsa_frame_devkit` and
 | Any folder on the headset, a microSD card or a USB drive | Browse it under Home › On this device, or make it a library: Sources › Add source › Library |
 | Any server with a DeoVR feed or HereSphere API | Sources › Add source › DeoVR or HereSphere |
 | NAS / Windows share | Sources › Add source › SMB share: a whole server (`smb://nas/`, which lists the shares your login, or a guest without one, may open) or one share or folder (`smb://nas/videos`) |
+| Any computer with SSH (Linux, macOS, many NAS) | Sources › Add source › SFTP (see [Connecting over SFTP](#connecting-over-sftp)) |
 | Nextcloud and other WebDAV | Sources › Add source › WebDAV |
 | Jellyfin, Emby | Sources › Add source › Jellyfin / Emby (a password, or Quick Connect on Jellyfin) |
 | Plex | Sources › Add source › Plex › Link with code; enter the code at plex.tv/link on your phone or computer, then choose a server |
@@ -224,12 +226,15 @@ are deleted too.
 ### Up next and playlists
 
 **Up next** is the list of videos playing in turn; the button beside
-Browse on the control bar shows it over the video. Opening a video from a
-folder, grid or season makes that list Up next, and **⏮** and **⏭** either
-side of the play button (or X and Y) step through it; pointing at one names
-the video it goes to, and it dims at either end of the list or when the
-video was opened on its own. *Play all*, a playlist and what you queue
-yourself also play through: the next video starts when one ends. *Play
+Browse on the control bar shows it over the video. Opening a video plays it
+alone. **Play all**, at the top of a folder, a library's Videos, a
+Jellyfin, Emby or Plex grid, season or search, a scene grid or a playlist,
+makes that page's videos Up next and plays the first. On a server's grid
+it's the first 300 in the grid's order, as Jellyfin's own Play does;
+pointing at the button says so. **⏮** and **⏭** either side of the play
+button (or X and Y) step through Up next; pointing at one names the video
+it goes to, and it dims at either end of the list or when a video plays
+alone. With **Autoplay** on, the next starts when one ends. *Play
 next* (after the video playing) and *Add to queue* (at the end) are on a
 video's details, a Jellyfin or scene page and a folder row's ⋯; with
 nothing playing, either plays it. On the Up next page, pick a video to play
@@ -242,8 +247,8 @@ The current video keeps playing; press **Shuffle** again for another order.
 To keep this order as a playlist, press **Save as playlist** afterwards.
 
 **Autoplay** (the play sign in a circular arrow, on the control bar) plays
-any list through, one opened from a folder, grid or season too: the next
-video starts when one ends.
+Up next through: the next video starts when one ends. Off, a video stops
+at its end, and ⏭ plays the next.
 **Loop** on the Up next page plays the first video again after the last,
 and ⏮ and ⏭ step round the list past either end. The repeat key beside Up
 next on the control bar loops the video playing instead: it starts again
@@ -265,7 +270,7 @@ Videos of a source locked with a PIN are left out until it is unlocked.
 | Jellyfin / Emby | Your libraries, *Continue watching*, *Next up* and the latest additions; a search of the whole server by title, as Jellyfin's own search shows it: a row each of movies, shows, collections and other videos, best matches first (episodes are found through their show), a *People* row of the cast and crew whose names match (tap one to see what they are in), and a *Tagged* row of what carries a tag with your words in it; poster grids searched, sorted (title, date added, release date, rating, length, last watched, shuffle) and filtered by the server: unwatched, in progress, favorites, and **Filters** for genres, decades, resolution, studios and tags; series by season and episode; details with the story, cast, genres and tags (tap a tag to see everything that has it), and a *Version* row when the server keeps more than one version of a video (4K and 1080p, a director's cut): *Automatic* plays the tallest that fits the source's maximum height; pick another and the video plays from it wherever you open it (subtitles included) until the app closes. Each version keeps its own format and adjustments, as a separate video in your history. Watched marks, favorites and resume points are the server's (see [Watch sync](#watch-sync-with-jellyfin-emby-plex-and-heresphere)) |
 | DeoVR feed / HereSphere API | The server's scene groups as chips over a grid of scenes; search the chosen group (or *All*) across titles, studios, performers and tags; order by title, date, rating or length, either way, or shuffle; *Favorites* (and *Scripted*, with haptics on), and **Filters** for studio, people, tags, length, format and rating, each with how many scenes have it (a DeoVR feed's studios, tags and performers come with each scene's details, fetched while you search or filter and kept for next time). ⋯ opens a scene's details: description, performers and tags (tap one to see all their scenes), chapters to start from, and ♡ to make it a favourite on a HereSphere API that takes favourites. The page opens with the scenes from last time while the server sends the current list ("updating…" under the title). A HereSphere API can also sync watch state (see [Watch sync](#watch-sync-with-jellyfin-emby-plex-and-heresphere)) |
 | Plex | Movie, TV and personal-video libraries; Continue watching and recent additions; server search, sorted and shuffled grids, unwatched and in-progress filters, and genre, studio and decade filters. Shows open by season and episode; details include artwork, chapters and available versions. Resume points and watched marks belong to the selected Plex account. Plex server favorites, people and tag browsing are not offered. App playlists, Up next, history and format adjustments work as with other video sources |
-| SMB, WebDAV, HTTP folders, DLNA, local folders | Folders and files: search the folder you are in, order by name, date or size, *Play all* |
+| SMB, SFTP, WebDAV, HTTP folders, DLNA, local folders | Folders and files: search the folder you are in, order by name, date or size, *Play all* |
 
 **Filters** opens a drawer on the right: what you pick there applies at
 once, any of the choices in a section and all of the sections together,
@@ -334,6 +339,38 @@ the selected server's media connection; entering `app.plex.tv` in the
 manual address field starts account linking. Plex Home profile switching,
 live TV, music, photos, cloud Watchlist and casting are not supported.
 
+### Connecting over SFTP
+
+Any computer you can sign in to with SSH can be a source: Linux, macOS and
+many NAS. Under **Sources › Add source › SFTP**, the address says which
+folder to open:
+
+| Address | Opens |
+|---|---|
+| `sftp://pc.local/` | Your home folder on the server |
+| `sftp://pc.local/~/Videos` | A folder in your home folder |
+| `sftp://pc.local/srv/media` | Any other folder, from the top of the server's disk |
+
+Add the port after the name (`sftp://pc.local:2222/`) if the server doesn't
+use 22. A user name is always needed; one in the address
+(`sftp://me@pc.local/`) works as well as the **User name** field.
+
+Sign in with a password, a key file, or both: the key is tried first.
+A key file is a private key on the headset, from OpenSSH (`id_ed25519`,
+`id_rsa`) or PuTTY (`.ppk`). Copy it to `~/.ssh` or `~/Downloads` on the
+headset and it's listed under the field: tap it to use it. If the key is
+password-protected, a **Key passphrase** row appears: enter the passphrase
+you set when you made the key, not your account password.
+
+The first time it connects, FramePlayerX remembers the server's identity
+key. If the server later answers with a different key, the source stops
+with an error instead of signing in. If you reinstalled the server or gave
+it a new key, remove the source and add it again; otherwise another
+machine may be answering in its place.
+
+Files and folders whose names start with a dot (hidden on Linux and macOS)
+aren't listed.
+
 ### Locking a source with a PIN
 
 To keep a share or folder private when someone else uses the headset, press
@@ -352,7 +389,7 @@ own, if it shows the same videos.
 
 ### Parallel downloads
 
-A server's form has a **Parallel downloads** switch, off by default. On, FramePlayerX downloads several parts of a video at once over separate connections while it plays, the way some download managers do. This helps if the server limits the speed of each connection. If it doesn't, the switch may gain nothing, and a server on hard drives can get slower, because the drives have to jump between parts of the file. SMB shares and DLNA servers don't have the switch.
+A server's form has a **Parallel downloads** switch, off by default. On, FramePlayerX downloads several parts of a video at once over separate connections while it plays, the way some download managers do. This helps if the server limits the speed of each connection. If it doesn't, the switch may gain nothing, and a server on hard drives can get slower, because the drives have to jump between parts of the file. SMB shares, SFTP servers and DLNA servers don't have the switch.
 
 ### Editing a source
 
@@ -366,7 +403,7 @@ existing source. History, resume points, playlists and adjustments follow
 the same relative paths or server item IDs. Removing and adding the source
 again creates a different identity.
 
-HTTP(S), WebDAV and SMB use paths relative to the configured root.
+HTTP(S), WebDAV, SMB and SFTP use paths relative to the configured root.
 Jellyfin and Emby use item and version IDs; DLNA uses object IDs, and Plex
 keeps its server and item IDs. Feeds keep scene, media and artwork URLs
 exactly as published, unless a stable scene ID allows a fresh lookup.
@@ -509,6 +546,18 @@ the format list corrects it. A file nothing labels can be set to
 **3D FS** (frame sequential) in the format list, and a mislabelled one to any other
 format.
 
+Interlaced video (1080i TV recordings and camcorder clips, DVDs) stores
+each frame as two fields, every other line each, taken a field's time
+apart, so anything moving shows comb lines. It is deinterlaced as it
+plays: each field becomes a whole picture, so 25 frames a second become
+50 pictures. It is found from the video's header. For a video in your
+library whose header doesn't say so, the **Interlaced** switch under the
+format list turns it on, and turns it off for one wrongly marked; that
+opens the video
+again where it was, and is remembered for that video. Interlaced video
+plays with software decoding, as the Frame's hardware decoder doesn't take
+interlaced H.264.
+
 A disc image, 2D or 3D, plays its main title (its longest playlist) with
 its chapters (under **⚙ › Chapters**) and its audio and subtitle languages.
 Menus, extras and other titles aren't offered.
@@ -533,6 +582,37 @@ VC-1, MPEG-4, MPEG-2, ProRes. Audio: AAC, AC-3/E-AC-3, Opus, Vorbis, FLAC,
 MP3, DTS, TrueHD, PCM (Blu-ray and DVD LPCM too), and spatial (ambisonic)
 audio that follows your head.
 Subtitles: SRT, ASS/SSA, WebVTT, and embedded text or picture subtitles.
+
+HDR videos (HDR10 and HLG) are fitted to the headset's screen as they play.
+Each scene's brightest parts are measured, so midtones keep the brightness
+they were graded at and only the highlights are compressed, keeping their
+detail. Colours richer than the screen can show are toned down smoothly
+instead of being cut off, and the most vivid ones it can show lose a
+little saturation to make room for them.
+
+### Presets
+
+A preset keeps everything a video saves, to use on any video: the
+format, if you picked one, and the Position, Stereo, Picture and
+Passthrough tabs. A flat screen's place, where you moved it, isn't saved
+for a video, so a preset leaves it too. Presets sit at the top of the
+adjust panel, above the tabs:
+
+- **New preset** saves the playing video's as Preset 1, Preset 2 and so
+  on, up to 8. Saved from a video left on **Automatic**, a preset keeps
+  no format and leaves each video's to detection.
+- Press a preset to give the video all of it at once. It's lit while the
+  video has everything of it, and **Save for this video** keeps it with
+  the video, as with any change.
+- **Edit** lists the presets in place of the tab's page to rename or
+  delete them; Delete asks again first. **Done** or any tab goes back.
+- While you watch, hold the left grip and press D-pad left for the next
+  preset; a message names it. Settings › Controller can move it to another
+  button.
+
+Where videos start is set in Settings: **Video position** for the screen,
+zoom, height and background, **Picture** for the picture and a 3D video's
+depth and eye alignment, and Sound and subtitles for subtitle depth.
 
 ### Fisheye lenses
 
@@ -599,7 +679,9 @@ picked is kept, so a video whose subtitles you never changed follows
 **⚙ › Chapters** lists the video's chapters and your bookmarks (**Bookmark**
 on the control bar, or grip + A on the right controller, adds one where you
 are), each with a button to go there; grip + X and grip + Y step through
-them.
+them. Your bookmarks also have a button to remove them. Pressing Bookmark
+within a second of one you already have adds no other: it says "Already
+bookmarked here".
 
 Subtitles show in any script, with the fonts on the headset: Arabic and
 Hebrew read right to left, and Chinese, Japanese or Korean need a font
@@ -734,6 +816,32 @@ it (Dashboard › Playback › Transcoding), and pick their own limits:
 Jellyfin transcodes to at most 3840 pixels wide, so an 8K 180° video's
 2880p and 2160p both come as 3840×1920.
 
+## Display
+
+**Settings › General › Display** sets how the headset draws the picture.
+Changes apply at once, also while a video plays.
+
+| Setting | Choices | To begin with |
+|---|---|---|
+| Refresh rate | 72, 90, 120 Hz | 120 Hz |
+| Render resolution | 2160, 3072, 3744 pixels across each eye | 3744 |
+| Foveated rendering | Off, Low, High | Low |
+
+- **Refresh rate**: at 120 Hz, 24, 30 and 60 fps videos get even frame
+  timing. A lower rate gives each frame more time and saves battery.
+- **Render resolution**: the size of the picture drawn for each eye. Above
+  the Frame's 2160-pixel panels, 8K video looks sharper and fine detail
+  shimmers less. The menus and the control bar look the same at any
+  resolution.
+- **Foveated rendering**: the picture keeps full detail within 30° of where
+  you look (Low) or 18° (High) and less beyond, where your eyes don't see
+  detail anyway. It follows your eyes; without eye tracking it stays in the
+  middle of each lens. Menus and the pointer always keep full detail.
+
+If a demanding video stutters (8K 10-bit, or a passthrough video with a
+mask), set foveation to High or lower the resolution. With foveation off,
+8K 10-bit video needs a lower resolution or refresh rate to play smoothly.
+
 ## Controls
 
 Each button does one thing: the right hand runs playback, the left hand the
@@ -751,7 +859,7 @@ picture. Play/pause and seeking are under either thumb.
 | Menu / View | Browse | Recenter |
 | Bumper | Forward 1 minute | Back 1 minute |
 | Grip + thumbstick | Up / down raises or lowers you | Left / right turns the picture, down zooms in, up zooms out |
-| Grip + X / Y | Previous / next chapter or bookmark (back within 3 s of one's start goes to the one before) | As without the grip |
+| Grip + X / Y | Previous / next chapter or bookmark (back within 3 s of one's start goes to the one before) | Grip + D-pad left: the next [preset](#presets); D-pad up as without the grip |
 | Grip + A | Bookmark where you are | As without the grip |
 | Grip + thumbstick press | Subtitles off, or back on: the ones you had, else those in your language | As without the grip |
 | Hold grip + trigger, move | Drag the picture (a flat screen or the dome follows your hand) | The same |
@@ -832,8 +940,18 @@ videos can carry a mask.
 ### Green and blue screens (chroma key)
 
 Videos filmed against a green or blue screen can show your room instead of
-the screen. Turn on **Remove the background** and pick the colour (green
-screen, blue screen, or any colour with the red/green/blue sliders).
+the screen: turn on **Remove the background**.
+
+For a video without its own mask and with no Passthrough settings of its
+own yet, the colour to remove is found in the video itself, usually a
+second or two after it starts playing. It comes from a frame in the middle of the video,
+so a studio's intro doesn't decide it, and is used at full strength like
+the one-tap colours. The Colour row then says "Found in this video". Until
+then, or if no screen colour is found in that frame, the colour from
+**Settings > Passthrough** is used.
+
+To use another colour, pick green screen, blue screen or magenta, or set one
+with the red/green/blue sliders; that replaces the found one.
 **Similarity** sets how close a colour must be to disappear, **Edge softness**
 feathers the cut, and **Spill removal** takes the screen's tint off hair and
 edges. A keyed video turns passthrough on by itself, whatever its format.
@@ -843,6 +961,7 @@ open the adjust panel's **Passthrough** tab while it plays: changing anything
 there gives that video its own settings (save them like any other
 adjustment), and turning **Own settings for this video** off makes it follow
 Settings again.
+
 ## Haptics
 
 Haptics are off until you turn on **Settings › General › Haptic devices**.
